@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String      @id @default(cuid())
+  username    String      @unique
+  displayName String
+  role        String
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  auditLogs   AuditLog[]
+  receipts    RocReceipt[] @relation("ReceiptCreatedBy")
+}
+
+model Student {
+  id                String         @id @default(cuid())
+  enrollmentNumber  String         @unique
+  curp              String         @unique
+  rfc               String?
+  firstName         String
+  paternalLastName  String
+  maternalLastName  String
+  birthDate         DateTime?
+  age               Int?
+  sex               String?
+  phone             String?
+  email             String?
+  addressLine       String
+  neighborhood      String?
+  locality          String?
+  municipality      String?
+  state             String?
+  postalCode        String?
+  previousSchool    String?
+  secondaryAverage  Decimal?
+  schoolCycle       String
+  academicStatus    String?
+  status            String         @default("CAPTURADO")
+  validatedAt       DateTime?
+  validatedBy       String?
+  guardian          Guardian?
+  receipts          RocReceipt[]
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+}
+
+model Guardian {
+  id            String  @id @default(cuid())
+  studentId     String  @unique
+  fullName      String
+  relationship  String?
+  phone         String
+  email         String?
+  credentialRef String?
+  student       Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+}
+
+model ChargeConcept {
+  id          String          @id @default(cuid())
+  code        String          @unique
+  groupCode   String?
+  name        String
+  description String?
+  isActive    Boolean         @default(true)
+  tariffs     ChargeTariff[]
+  receiptRows RocReceiptLine[]
+}
+
+model ChargeTariff {
+  id          String        @id @default(cuid())
+  conceptId   String
+  amount      Decimal
+  periodLabel String
+  startsAt    DateTime?
+  endsAt      DateTime?
+  isActive    Boolean       @default(true)
+  concept     ChargeConcept @relation(fields: [conceptId], references: [id], onDelete: Restrict)
+}
+
+model RocTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  filePath    String
+  version     String
+  isActive    Boolean  @default(true)
+  uploadedAt  DateTime @default(now())
+  uploadedBy  String?
+}
+
+model RocReceipt {
+  id                String           @id @default(cuid())
+  rocNumber         String           @unique
+  studentId         String
+  status            String           @default("EMITIDO")
+  amountInWords     String?
+  totalAmount       Decimal          @default(0)
+  notes             String?
+  issuedAt          DateTime         @default(now())
+  createdById       String
+  templateVersion   String?
+  student           Student          @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  createdBy         User             @relation("ReceiptCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  lines             RocReceiptLine[]
+}
+
+model RocReceiptLine {
+  id         String        @id @default(cuid())
+  receiptId  String
+  conceptId  String
+  quantity   Int           @default(1)
+  unitAmount Decimal
+  total      Decimal
+  receipt    RocReceipt    @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  concept    ChargeConcept @relation(fields: [conceptId], references: [id], onDelete: Restrict)
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId      String?
+  entityType String
+  entityId   String
+  action     String
+  beforeJson String?
+  afterJson  String?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
