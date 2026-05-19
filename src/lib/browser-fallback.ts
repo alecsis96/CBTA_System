@@ -1,6 +1,9 @@
 import type {
   AuditLogSummary,
   ChargeConceptSummary,
+  PreRegistrationCreateInput,
+  PreRegistrationStatusUpdateInput,
+  PreRegistrationSummary,
   RocCreateInput,
   RocReceiptSummary,
   StudentDetail,
@@ -13,6 +16,7 @@ const STUDENTS_KEY = 'cbta-browser-students'
 const CONCEPTS_KEY = 'cbta-browser-concepts'
 const RECEIPTS_KEY = 'cbta-browser-receipts'
 const AUDIT_KEY = 'cbta-browser-audit'
+const PRE_REGISTRATIONS_KEY = 'cbta-browser-pre-registrations'
 
 const seededConcepts: ChargeConceptSummary[] = [
   {
@@ -181,6 +185,14 @@ function pushAuditLog(log: AuditLogSummary) {
   saveAuditLogs(logs.slice(0, 12))
 }
 
+function getPreRegistrations() {
+  return safeParse<PreRegistrationSummary[]>(window.localStorage.getItem(PRE_REGISTRATIONS_KEY), [])
+}
+
+function savePreRegistrations(items: PreRegistrationSummary[]) {
+  window.localStorage.setItem(PRE_REGISTRATIONS_KEY, JSON.stringify(items))
+}
+
 function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomUUID()): StudentDetail {
   return {
     id,
@@ -292,6 +304,45 @@ export const browserFallbackApi = {
       })
 
       return toStudentSummary(next)
+    },
+  },
+  preRegistrations: {
+    async list() {
+      return getPreRegistrations()
+    },
+    async create(input: PreRegistrationCreateInput) {
+      const item: PreRegistrationSummary = {
+        id: crypto.randomUUID(),
+        folio: `PR-${Date.now()}`,
+        fullName: `${input.firstName} ${input.paternalLastName} ${input.maternalLastName}`.trim(),
+        curp: input.curp,
+        schoolCycle: input.schoolCycle,
+        status: 'PRE_REGISTRO_ENVIADO',
+        submittedAt: new Date().toISOString(),
+        reviewedAt: null,
+        observationNotes: null,
+      }
+      const items = [item, ...getPreRegistrations()]
+      savePreRegistrations(items)
+      return item
+    },
+    async updateStatus(preRegistrationId: string, input: PreRegistrationStatusUpdateInput) {
+      const items = getPreRegistrations()
+      const index = items.findIndex((item) => item.id === preRegistrationId)
+      if (index === -1) {
+        throw new Error('Pre-registro no encontrado en modo navegador.')
+      }
+
+      const next: PreRegistrationSummary = {
+        ...items[index],
+        status: input.status,
+        reviewedAt: new Date().toISOString(),
+        observationNotes: input.observationNotes?.trim() || null,
+      }
+
+      items[index] = next
+      savePreRegistrations(items)
+      return next
     },
   },
   concepts: {

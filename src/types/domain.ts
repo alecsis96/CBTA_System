@@ -94,3 +94,52 @@ export type AuditLogSummary = {
   createdAt: string
   detail: string
 }
+
+export type PreRegistrationStatus =
+  | 'PRE_REGISTRO_ENVIADO'
+  | 'EN_REVISION_CONTROL_ESCOLAR'
+  | 'OBSERVADO'
+  | 'RECHAZADO'
+  | 'VALIDADO_PARA_PAGO'
+  | 'PAGADO'
+
+export type PreRegistrationSummary = {
+  id: string
+  folio: string
+  fullName: string
+  curp: string
+  schoolCycle: string
+  status: PreRegistrationStatus
+  submittedAt: string
+  reviewedAt: string | null
+  observationNotes: string | null
+}
+
+export type PreRegistrationCreateInput = {
+  firstName: string
+  paternalLastName: string
+  maternalLastName: string
+  curp: string
+  birthDate: string
+  sex: string
+  phone: string
+  email: string
+  addressLine: string
+  neighborhood: string
+  locality: string
+  municipality: string
+  state: string
+  postalCode: string
+  previousSchool: string
+  secondaryAverage: number | null
+  schoolCycle: string
+  guardianFullName: string
+  guardianRelationship: string
+  guardianPhone: string
+  guardianEmail: string
+}
+
+export type PreRegistrationStatusUpdateInput = {
+  status: Extract<PreRegistrationStatus, 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO'>
+  observationNotes?: string
+}

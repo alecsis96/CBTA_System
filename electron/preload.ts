@@ -10,6 +10,12 @@ contextBridge.exposeInMainWorld('cbta', {
     create: (input: unknown) => ipcRenderer.invoke('students:create', input),
     update: (studentId: string, input: unknown) => ipcRenderer.invoke('students:update', studentId, input),
   },
+  preRegistrations: {
+    list: () => ipcRenderer.invoke('preRegistrations:list'),
+    create: (input: unknown) => ipcRenderer.invoke('preRegistrations:create', input),
+    updateStatus: (preRegistrationId: string, input: unknown) =>
+      ipcRenderer.invoke('preRegistrations:updateStatus', preRegistrationId, input),
+  },
   concepts: {
     listActive: () => ipcRenderer.invoke('concepts:listActive'),
     updateTariff: (input: unknown) => ipcRenderer.invoke('concepts:updateTariff', input),

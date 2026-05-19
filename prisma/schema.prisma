@@ -45,10 +45,61 @@ model Student {
   status            String         @default("CAPTURADO")
   validatedAt       DateTime?
   validatedBy       String?
+  preRegistrationId String?        @unique
   guardian          Guardian?
+  preRegistration   PreRegistration? @relation(fields: [preRegistrationId], references: [id], onDelete: SetNull)
   receipts          RocReceipt[]
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
+}
+
+model PreRegistration {
+  id                   String                 @id @default(cuid())
+  folio                String                 @unique
+  status               String                 @default("PRE_REGISTRO_ENVIADO")
+  firstName            String
+  paternalLastName     String
+  maternalLastName     String
+  curp                 String
+  birthDate            DateTime?
+  sex                  String?
+  phone                String?
+  email                String?
+  addressLine          String
+  neighborhood         String?
+  locality             String?
+  municipality         String?
+  state                String?
+  postalCode           String?
+  previousSchool       String?
+  secondaryAverage     Decimal?
+  schoolCycle          String
+  guardianFullName     String
+  guardianRelationship String?
+  guardianPhone        String
+  guardianEmail        String?
+  voucherGeneratedAt   DateTime?
+  submittedAt          DateTime?
+  reviewedAt           DateTime?
+  reviewedBy           String?
+  observationNotes     String?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  audits               PreRegistrationAudit[]
+  student              Student?
+
+  @@unique([curp, schoolCycle])
+}
+
+model PreRegistrationAudit {
+  id                String          @id @default(cuid())
+  preRegistrationId String
+  action            String
+  actorRole         String
+  actorName         String?
+  detail            String?
+  createdAt         DateTime        @default(now())
+  preRegistration   PreRegistration @relation(fields: [preRegistrationId], references: [id], onDelete: Cascade)
 }
 
 model Guardian {

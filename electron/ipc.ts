@@ -50,6 +50,35 @@ const tariffUpdateSchema = z.object({
   periodLabel: z.string().min(1),
 })
 
+const preRegistrationCreateSchema = z.object({
+  firstName: z.string().min(1),
+  paternalLastName: z.string().min(1),
+  maternalLastName: z.string().min(1),
+  curp: z.string().min(18).max(18),
+  birthDate: z.string().optional().nullable(),
+  sex: z.string().trim().optional().nullable(),
+  phone: z.string().trim().optional().nullable(),
+  email: z.string().email().optional().or(z.literal('')).nullable(),
+  addressLine: z.string().min(1),
+  neighborhood: z.string().trim().optional().nullable(),
+  locality: z.string().trim().optional().nullable(),
+  municipality: z.string().trim().optional().nullable(),
+  state: z.string().trim().optional().nullable(),
+  postalCode: z.string().trim().optional().nullable(),
+  previousSchool: z.string().trim().optional().nullable(),
+  secondaryAverage: z.number().min(0).max(10).optional().nullable(),
+  schoolCycle: z.string().min(1),
+  guardianFullName: z.string().min(1),
+  guardianRelationship: z.string().trim().optional().nullable(),
+  guardianPhone: z.string().min(1),
+  guardianEmail: z.string().email().optional().or(z.literal('')).nullable(),
+})
+
+const preRegistrationStatusUpdateSchema = z.object({
+  status: z.enum(['EN_REVISION_CONTROL_ESCOLAR', 'OBSERVADO', 'RECHAZADO', 'VALIDADO_PARA_PAGO', 'PAGADO']),
+  observationNotes: z.string().trim().optional(),
+})
+
 function normalizeOptional(value: string | null | undefined) {
   if (!value) {
     return null
@@ -227,6 +256,40 @@ function auditSummary(log: {
   }
 }
 
+function preRegistrationSummary(item: {
+  id: string
+  folio: string
+  firstName: string
+  paternalLastName: string
+  maternalLastName: string
+  curp: string
+  schoolCycle: string
+  status: string
+  submittedAt: Date | null
+  createdAt: Date
+  reviewedAt: Date | null
+  observationNotes: string | null
+}) {
+  return {
+    id: item.id,
+    folio: item.folio,
+    fullName: `${item.firstName} ${item.paternalLastName} ${item.maternalLastName}`.trim(),
+    curp: item.curp,
+    schoolCycle: item.schoolCycle,
+    status: item.status,
+    submittedAt: (item.submittedAt ?? item.createdAt).toISOString(),
+    reviewedAt: item.reviewedAt ? item.reviewedAt.toISOString() : null,
+    observationNotes: item.observationNotes ?? null,
+  }
+}
+
+function buildPreRegistrationFolio() {
+  const now = new Date()
+  const ymd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+  const token = Math.random().toString(36).slice(2, 6).toUpperCase()
+  return `PR-${ymd}-${token}`
+}
+
 function unitsToWords(value: number): string {
   const words = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve']
   return words[value] ?? ''
@@ -341,6 +404,150 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
 }
 
 export function registerIpcHandlers() {
+  ipcMain.handle('preRegistrations:list', async () => {
+    const items = await prisma.preRegistration.findMany({
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return items.map(preRegistrationSummary)
+  })
+
+  ipcMain.handle('preRegistrations:create', async (_event, payload) => {
+    const input = preRegistrationCreateSchema.parse(payload)
+    const created = await prisma.$transaction(async (tx) => {
+      const item = await tx.preRegistration.create({
+        data: {
+          folio: buildPreRegistrationFolio(),
+          status: 'PRE_REGISTRO_ENVIADO',
+          firstName: input.firstName.trim(),
+          paternalLastName: input.paternalLastName.trim(),
+          maternalLastName: input.maternalLastName.trim(),
+          curp: input.curp.trim().toUpperCase(),
+          birthDate: input.birthDate ? new Date(input.birthDate) : null,
+          sex: normalizeOptional(input.sex),
+          phone: normalizeOptional(input.phone),
+          email: normalizeOptional(input.email),
+          addressLine: input.addressLine.trim(),
+          neighborhood: normalizeOptional(input.neighborhood),
+          locality: normalizeOptional(input.locality),
+          municipality: normalizeOptional(input.municipality),
+          state: normalizeOptional(input.state),
+          postalCode: normalizeOptional(input.postalCode),
+          previousSchool: normalizeOptional(input.previousSchool),
+          secondaryAverage: input.secondaryAverage ?? null,
+          schoolCycle: input.schoolCycle.trim(),
+          guardianFullName: input.guardianFullName.trim(),
+          guardianRelationship: normalizeOptional(input.guardianRelationship),
+          guardianPhone: input.guardianPhone.trim(),
+          guardianEmail: normalizeOptional(input.guardianEmail),
+          voucherGeneratedAt: new Date(),
+          submittedAt: new Date(),
+        },
+      })
+
+      await tx.preRegistrationAudit.create({
+        data: {
+          preRegistrationId: item.id,
+          action: 'PRE_REGISTRO_ENVIADO',
+          actorRole: 'PORTAL_PUBLICO',
+          actorName: 'Portal internet',
+          detail: `Folio ${item.folio}`,
+        },
+      })
+
+      return item
+    })
+
+    return preRegistrationSummary(created)
+  })
+
+  ipcMain.handle('preRegistrations:updateStatus', async (_event, preRegistrationId, payload) => {
+    const id = z.string().min(1).parse(preRegistrationId)
+    const input = preRegistrationStatusUpdateSchema.parse(payload)
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const existing = await tx.preRegistration.findUnique({ where: { id } })
+      if (!existing) {
+        throw new Error('No se encontro el pre-registro solicitado.')
+      }
+
+      let linkedStudentId: string | null = null
+      if (input.status === 'VALIDADO_PARA_PAGO') {
+        const alreadyLinked = await tx.student.findFirst({ where: { preRegistrationId: existing.id } })
+        linkedStudentId = alreadyLinked?.id ?? null
+        if (!alreadyLinked) {
+          const student = await tx.student.create({
+            data: {
+              enrollmentNumber: existing.folio,
+              curp: existing.curp,
+              firstName: existing.firstName,
+              paternalLastName: existing.paternalLastName,
+              maternalLastName: existing.maternalLastName,
+              birthDate: existing.birthDate,
+              sex: existing.sex,
+              phone: existing.phone,
+              email: existing.email,
+              addressLine: existing.addressLine,
+              neighborhood: existing.neighborhood,
+              locality: existing.locality,
+              municipality: existing.municipality,
+              state: existing.state,
+              postalCode: existing.postalCode,
+              previousSchool: existing.previousSchool,
+              secondaryAverage: existing.secondaryAverage,
+              schoolCycle: existing.schoolCycle,
+              status: 'LISTO_PARA_COBRO',
+              validatedAt: new Date(),
+              validatedBy: 'CONTROL_ESCOLAR',
+              preRegistrationId: existing.id,
+              guardian: {
+                create: {
+                  fullName: existing.guardianFullName,
+                  relationship: existing.guardianRelationship,
+                  phone: existing.guardianPhone,
+                  email: existing.guardianEmail,
+                },
+              },
+            },
+          })
+
+          linkedStudentId = student.id
+        }
+      }
+
+      const item = await tx.preRegistration.update({
+        where: { id },
+        data: {
+          status: input.status,
+          reviewedAt: new Date(),
+          reviewedBy: 'control.escolar',
+          observationNotes: normalizeOptional(input.observationNotes),
+        },
+      })
+
+      await tx.preRegistrationAudit.create({
+        data: {
+          preRegistrationId: item.id,
+          action: input.status,
+          actorRole: 'CONTROL_ESCOLAR',
+          actorName: 'Control Escolar',
+          detail: normalizeOptional(input.observationNotes) ?? undefined,
+        },
+      })
+
+      if (input.status === 'PAGADO' && linkedStudentId) {
+        await tx.student.update({
+          where: { id: linkedStudentId },
+          data: { status: 'COBRADO' },
+        })
+      }
+
+      return item
+    })
+
+    return preRegistrationSummary(updated)
+  })
+
   ipcMain.handle('students:list', async () => {
     const students = await prisma.student.findMany({
       orderBy: { createdAt: 'desc' },

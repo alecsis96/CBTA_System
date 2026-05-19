@@ -30,6 +30,21 @@ export function listPendingSyncOps() {
   return safeParse<SyncOperation[]>(window.localStorage.getItem(SYNC_QUEUE_KEY), [])
 }
 
+export function countPendingSyncOpsByType() {
+  const counts: Record<SyncOperationType, number> = {
+    STUDENT_CREATE: 0,
+    STUDENT_UPDATE: 0,
+    RECEIPT_CREATE: 0,
+    RECEIPT_REPRINT: 0,
+  }
+
+  for (const operation of listPendingSyncOps()) {
+    counts[operation.type] += 1
+  }
+
+  return counts
+}
+
 export function addPendingSyncOp(input: Omit<SyncOperation, 'id' | 'createdAt'>) {
   const queue = listPendingSyncOps()
   const next: SyncOperation = {

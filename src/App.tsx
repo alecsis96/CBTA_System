@@ -1,9 +1,16 @@
 import { FormEvent, Fragment, MutableRefObject, ReactNode, RefObject, useEffect, useRef, useState } from 'react'
 import { browserFallbackApi } from '@/lib/browser-fallback'
 import { amountToWords, formatCurrency, formatPrintDate } from '@/lib/formatters'
-import { addPendingSyncOp, clearPendingSyncOps, getDeviceId, listPendingSyncOps } from '@/lib/sync-queue'
-import { syncNow } from '@/lib/sync-service'
-import type { AuditLogSummary, ChargeConceptSummary, RocReceiptSummary, StudentFormInput, StudentSummary } from '@/types/domain'
+import { addPendingSyncOp, clearPendingSyncOps, getDeviceId } from '@/lib/sync-queue'
+import { getSyncStatusSnapshot, syncAll, type SyncStatusSnapshot } from '@/lib/sync-service'
+import type {
+  AuditLogSummary,
+  ChargeConceptSummary,
+  PreRegistrationSummary,
+  RocReceiptSummary,
+  StudentFormInput,
+  StudentSummary,
+} from '@/types/domain'
 
 type Screen = 'control-escolar' | 'ingresos-propios' | 'configuracion'
 
@@ -25,6 +32,18 @@ const relationshipOptions = ['Padre', 'Madre', 'Tutor', 'Abuelo', 'Abuela', 'Otr
 const STUDENTS_PER_PAGE = 10
 const CONTROL_STUDENTS_PER_PAGE = 20
 const RECEIPTS_PER_PAGE = 5
+
+const EMPTY_SYNC_STATUS: SyncStatusSnapshot = {
+  lastSuccessfulSyncAt: null,
+  lastSyncError: null,
+  pendingTotal: 0,
+  pendingByType: {
+    STUDENT_CREATE: 0,
+    STUDENT_UPDATE: 0,
+    RECEIPT_CREATE: 0,
+    RECEIPT_REPRINT: 0,
+  },
+}
 
 function isSelectableConcept(concept: ChargeConceptSummary) {
   return !concept.code.endsWith('000')
@@ -164,6 +183,7 @@ function App() {
   const [screen, setScreen] = useState<Screen>('control-escolar')
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [students, setStudents] = useState<StudentSummary[]>([])
+  const [preRegistrations, setPreRegistrations] = useState<PreRegistrationSummary[]>([])
   const [validatedStudents, setValidatedStudents] = useState<StudentSummary[]>([])
   const [selectedStudent, setSelectedStudent] = useState<StudentSummary | null>(null)
   const [concepts, setConcepts] = useState<ChargeConceptSummary[]>([])
@@ -181,17 +201,21 @@ function App() {
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === 'undefined' ? true : navigator.onLine)
-  const [pendingSyncCount, setPendingSyncCount] = useState(0)
+  const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(EMPTY_SYNC_STATUS)
   const [syncing, setSyncing] = useState(false)
   const studentsSectionRef = useRef<HTMLElement | null>(null)
   const captureSectionRef = useRef<HTMLElement | null>(null)
+
+  function refreshSyncStatus() {
+    setSyncStatus(getSyncStatusSnapshot())
+  }
 
   useEffect(() => {
     void loadData()
   }, [])
 
   useEffect(() => {
-    setPendingSyncCount(listPendingSyncOps().length)
+    refreshSyncStatus()
 
     function onOnline() {
       setIsOnline(true)
@@ -211,6 +235,26 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!isOnline || syncing) {
+      return
+    }
+
+    void handleSyncNow()
+  }, [isOnline, syncing])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (navigator.onLine && !syncing) {
+        void handleSyncNow()
+      }
+    }, 30000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [syncing])
+
+  useEffect(() => {
     if (!selectedStudent) {
       setReceipts([])
       return
@@ -225,8 +269,9 @@ function App() {
       const receiptsAllPromise =
         typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
 
-      const [allStudents, validatedStudents, activeConcepts, auditLogs, receiptsAll] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll] = await Promise.all([
         appApi.students.list(),
+        appApi.preRegistrations.list(),
         appApi.students.listValidated(),
         appApi.concepts.listActive(),
         appApi.audit.listRecent(),
@@ -234,6 +279,7 @@ function App() {
       ])
 
       setStudents(allStudents)
+      setPreRegistrations(preRegistrations)
       setValidatedStudents(validatedStudents)
       setConcepts(activeConcepts)
       setRecentAuditLogs(auditLogs)
@@ -295,7 +341,7 @@ function App() {
           deviceId: getDeviceId(),
         })
       }
-      setPendingSyncCount(listPendingSyncOps().length)
+      refreshSyncStatus()
 
       const wasEditing = editingStudentId !== null
       setEditingStudentId(null)
@@ -393,7 +439,7 @@ function App() {
         payload: { receiptId: createdReceipt.id, studentId: selectedStudent.id },
         deviceId: getDeviceId(),
       })
-      setPendingSyncCount(listPendingSyncOps().length)
+      refreshSyncStatus()
       setAllReceipts((current) => [createdReceipt, ...current])
       await loadReceipts(selectedStudent.id)
       await loadData()
@@ -417,7 +463,7 @@ function App() {
         payload: { receiptId },
         deviceId: getDeviceId(),
       })
-      setPendingSyncCount(listPendingSyncOps().length)
+      refreshSyncStatus()
 
       setAllReceipts((current) =>
         current.map((receipt) =>
@@ -457,6 +503,22 @@ function App() {
     }
   }
 
+  async function handleUpdatePreRegistrationStatus(
+    preRegistrationId: string,
+    status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
+  ) {
+    setFeedback(null)
+
+    try {
+      await appApi.preRegistrations.updateStatus(preRegistrationId, { status })
+      await loadData()
+      setFeedback(`Pre-registro actualizado a ${status}.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar el estatus del pre-registro.'
+      setFeedback(message)
+    }
+  }
+
   function handlePrintReceipt() {
     if (!selectedStudent || selectedConcepts.length === 0) {
       setFeedback('Selecciona un alumno y al menos un concepto antes de imprimir.')
@@ -491,15 +553,18 @@ function App() {
 
   function handleSimulateSync() {
     clearPendingSyncOps()
-    setPendingSyncCount(0)
+    refreshSyncStatus()
     setFeedback('Cola local de sincronizacion marcada como enviada.')
   }
 
   async function handleSyncNow() {
     setSyncing(true)
     try {
-      const result = await syncNow()
-      setPendingSyncCount(listPendingSyncOps().length)
+      const result = await syncAll()
+      refreshSyncStatus()
+      if (result.pulled > 0) {
+        await loadData()
+      }
       setFeedback(result.message)
     } finally {
       setSyncing(false)
@@ -567,7 +632,16 @@ function App() {
         <section className="panel compact">
           <h2>Sincronizacion</h2>
           <p className="muted">Estado: {isOnline ? 'Online' : 'Offline'}</p>
-          <p className="muted">Pendientes locales: {pendingSyncCount}</p>
+          <p className="muted">Pendientes locales: {syncStatus.pendingTotal}</p>
+          <p className="muted">STUDENT_CREATE: {syncStatus.pendingByType.STUDENT_CREATE}</p>
+          <p className="muted">STUDENT_UPDATE: {syncStatus.pendingByType.STUDENT_UPDATE}</p>
+          <p className="muted">RECEIPT_CREATE: {syncStatus.pendingByType.RECEIPT_CREATE}</p>
+          <p className="muted">RECEIPT_REPRINT: {syncStatus.pendingByType.RECEIPT_REPRINT}</p>
+          <p className="muted">
+            Ultimo sync exitoso:{' '}
+            {syncStatus.lastSuccessfulSyncAt ? new Date(syncStatus.lastSuccessfulSyncAt).toLocaleString() : 'Sin registro'}
+          </p>
+          {syncStatus.lastSyncError ? <p className="muted">Ultimo error: {syncStatus.lastSyncError}</p> : null}
           <button className="primary-button small-button" disabled={syncing} onClick={() => void handleSyncNow()} type="button">
             {syncing ? 'Sincronizando...' : 'Sincronizar ahora'}
           </button>
@@ -615,12 +689,14 @@ function App() {
             feedback={feedback}
             form={form}
             students={students}
+            preRegistrations={preRegistrations}
             editingStudentId={editingStudentId}
             saving={saving}
             studentsSectionRef={studentsSectionRef}
             captureSectionRef={captureSectionRef}
             onCancelEdit={handleCancelEdit}
             onEditStudent={handleEditStudent}
+            onUpdatePreRegistrationStatus={handleUpdatePreRegistrationStatus}
             onSubmit={handleSubmit}
             onUpdateField={updateField}
           />
@@ -833,6 +909,7 @@ function TariffEditorRow({ concept, isSaving, onSave }: TariffEditorRowProps) {
 type ControlEscolarProps = {
   form: StudentFormInput
   students: StudentSummary[]
+  preRegistrations: PreRegistrationSummary[]
   editingStudentId: string | null
   saving: boolean
   feedback: string | null
@@ -840,6 +917,10 @@ type ControlEscolarProps = {
   captureSectionRef: MutableRefObject<HTMLElement | null>
   onCancelEdit: () => void
   onEditStudent: (studentId: string) => Promise<void>
+  onUpdatePreRegistrationStatus: (
+    preRegistrationId: string,
+    status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
+  ) => Promise<void>
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>
   onUpdateField: <K extends keyof StudentFormInput>(field: K, value: StudentFormInput[K]) => void
 }
@@ -847,6 +928,7 @@ type ControlEscolarProps = {
 function ControlEscolarOverview({
   form,
   students,
+  preRegistrations,
   editingStudentId,
   saving,
   feedback,
@@ -854,6 +936,7 @@ function ControlEscolarOverview({
   captureSectionRef,
   onCancelEdit,
   onEditStudent,
+  onUpdatePreRegistrationStatus,
   onSubmit,
   onUpdateField,
 }: ControlEscolarProps) {
@@ -861,6 +944,7 @@ function ControlEscolarOverview({
   const [statusFilter, setStatusFilter] = useState('all')
   const [studentPage, setStudentPage] = useState(1)
   const [expandedStudentId, setExpandedStudentId] = useState<string | null>(null)
+  const [selectedPreRegistrationId, setSelectedPreRegistrationId] = useState<string | null>(null)
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
   const filteredStudents = students.filter((student) => {
     const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
@@ -884,8 +968,98 @@ function ControlEscolarOverview({
     }
   }, [studentPage, totalStudentPages])
 
+  useEffect(() => {
+    if (preRegistrations.length > 0 && !selectedPreRegistrationId) {
+      setSelectedPreRegistrationId(preRegistrations[0].id)
+    }
+  }, [preRegistrations, selectedPreRegistrationId])
+
+  const selectedPreRegistration =
+    preRegistrations.find((item) => item.id === selectedPreRegistrationId) ?? preRegistrations[0] ?? null
+
   return (
     <>
+      <section className="panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Control Escolar</p>
+            <h2>Bandeja de pre-registro</h2>
+          </div>
+          <span className="status-tag">{preRegistrations.length} folios</span>
+        </div>
+        {preRegistrations.length === 0 ? <p className="empty-state">Todavia no hay pre-registros recibidos.</p> : null}
+        {preRegistrations.length > 0 ? (
+          <div className="student-table-wrap">
+            <table className="student-table">
+              <thead>
+                <tr>
+                  <th>Folio</th>
+                  <th>Alumno</th>
+                  <th>CURP</th>
+                  <th>Estatus</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {preRegistrations.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.folio}</td>
+                    <td>{item.fullName}</td>
+                    <td>{item.curp}</td>
+                    <td>{item.status}</td>
+                    <td>
+                      <div className="table-actions">
+                        <button className="secondary-button small-button" onClick={() => setSelectedPreRegistrationId(item.id)} type="button">
+                          Voucher
+                        </button>
+                        <button
+                          className="secondary-button small-button"
+                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'EN_REVISION_CONTROL_ESCOLAR')}
+                          type="button"
+                        >
+                          Revisar
+                        </button>
+                        <button
+                          className="secondary-button small-button"
+                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'OBSERVADO')}
+                          type="button"
+                        >
+                          Observar
+                        </button>
+                        <button
+                          className="primary-button small-button"
+                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'VALIDADO_PARA_PAGO')}
+                          type="button"
+                        >
+                          Aprobar
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {selectedPreRegistration ? (
+          <article className="receipt-preview" id="pre-registration-voucher">
+            <div className="section-header">
+              <h3>Voucher de pre-registro</h3>
+              <button className="secondary-button small-button" onClick={() => window.print()} type="button">
+                Imprimir voucher
+              </button>
+            </div>
+            <p><strong>Folio:</strong> {selectedPreRegistration.folio}</p>
+            <p><strong>Alumno:</strong> {selectedPreRegistration.fullName}</p>
+            <p><strong>CURP:</strong> {selectedPreRegistration.curp}</p>
+            <p><strong>Fecha envio:</strong> {new Date(selectedPreRegistration.submittedAt).toLocaleString('es-MX')}</p>
+            <p><strong>Estatus:</strong> {selectedPreRegistration.status}</p>
+            <p>Presentar este voucher en Control Escolar para continuar el proceso.</p>
+          </article>
+        ) : null}
+      </section>
+
       <section className="panel" ref={studentsSectionRef}>
         <div className="section-header">
           <div>

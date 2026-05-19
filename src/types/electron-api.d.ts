@@ -1,6 +1,9 @@
 import type {
   AuditLogSummary,
   ChargeConceptSummary,
+  PreRegistrationCreateInput,
+  PreRegistrationStatusUpdateInput,
+  PreRegistrationSummary,
   RocCreateInput,
   RocReceiptSummary,
   StudentDetail,
@@ -17,6 +20,11 @@ type CbtaApi = {
     get: (studentId: string) => Promise<StudentDetail>
     create: (input: StudentFormInput) => Promise<StudentSummary>
     update: (studentId: string, input: StudentFormInput) => Promise<StudentSummary>
+  }
+  preRegistrations: {
+    list: () => Promise<PreRegistrationSummary[]>
+    create: (input: PreRegistrationCreateInput) => Promise<PreRegistrationSummary>
+    updateStatus: (preRegistrationId: string, input: PreRegistrationStatusUpdateInput) => Promise<PreRegistrationSummary>
   }
   concepts: {
     listActive: () => Promise<ChargeConceptSummary[]>
