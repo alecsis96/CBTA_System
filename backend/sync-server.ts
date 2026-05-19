@@ -4,7 +4,7 @@ import type { Request, Response } from 'express'
 import { z } from 'zod'
 
 const app = express()
-const port = Number(process.env.SYNC_SERVER_PORT ?? '8787')
+const port = Number(process.env.PORT ?? process.env.SYNC_SERVER_PORT ?? '8787')
 const syncApiKey = process.env.SYNC_API_KEY
 
 const allowedTypes = [
@@ -26,6 +26,18 @@ const syncOperationSchema = z.object({
 const receivedOperationIds = new Set<string>()
 
 app.use(express.json())
+
+app.get('/', (_req: Request, res: Response) => {
+  return res.status(200).json({
+    ok: true,
+    service: 'cbta-sync-server',
+    endpoint: '/api/sync/op',
+  })
+})
+
+app.get('/health', (_req: Request, res: Response) => {
+  return res.status(200).json({ ok: true })
+})
 
 app.post('/api/sync/op', (req: Request, res: Response) => {
   const requestKey = req.header('x-api-key')
