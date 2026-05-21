@@ -8,6 +8,10 @@ import { prisma } from './prisma'
 const app = express()
 const port = Number(process.env.PORT ?? process.env.SYNC_SERVER_PORT ?? '8787')
 const syncApiKey = process.env.SYNC_API_KEY
+const corsAllowedOrigins = (process.env.SYNC_CORS_ORIGINS ?? '*')
+  .split(',')
+  .map((item) => item.trim())
+  .filter((item) => item.length > 0)
 
 const allowedTypes = [
   'STUDENT_CREATE',
@@ -51,6 +55,27 @@ const publicPreRegistrationSchoolCycle =
   process.env.PUBLIC_PRE_REGISTRATION_SCHOOL_CYCLE?.trim() || '2026-2027'
 
 app.use(express.json())
+
+app.use((req: Request, res: Response, next) => {
+  const origin = req.header('origin')
+  const allowAny = corsAllowedOrigins.includes('*')
+
+  if (allowAny) {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+  } else if (origin && corsAllowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Vary', 'Origin')
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-api-key')
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).send()
+  }
+
+  return next()
+})
 
 app.get('/', (_req: Request, res: Response) => {
   return res.status(200).json({
