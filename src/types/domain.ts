@@ -17,6 +17,8 @@ export type StudentSummary = {
   email: string | null
   address: string
   statusLabel: string
+  groupLabel: string | null
+  shiftLabel: string | null
 }
 
 export type StudentDetail = StudentFormInput & {
@@ -50,7 +52,9 @@ export type StudentFormInput = {
   age: number | null
   sex: string
   phone: string
+  studentPhoneSecondary: string
   email: string
+  motherTongue: string
   addressLine: string
   neighborhood: string
   locality: string
@@ -59,11 +63,13 @@ export type StudentFormInput = {
   postalCode: string
   previousSchool: string
   secondaryAverage: number | null
+  examRoom: string
   schoolCycle: string
   academicStatus: string
   guardianFullName: string
   guardianRelationship: string
   guardianPhone: string
+  guardianPhoneSecondary: string
   guardianEmail: string
   validateNow: boolean
 }
@@ -72,6 +78,7 @@ export type RocCreateInput = {
   rocNumber: string
   studentId: string
   conceptCodes: string[]
+  conceptItems?: Array<{ code: string; amount: number }>
 }
 
 export type RocReceiptSummary = {
@@ -115,6 +122,11 @@ export type PreRegistrationSummary = {
   observationNotes: string | null
 }
 
+export type SepExportResult = {
+  outputPath: string
+  exportedCount: number
+}
+
 export type PreRegistrationCreateInput = {
   firstName: string
   paternalLastName: string
@@ -123,7 +135,9 @@ export type PreRegistrationCreateInput = {
   birthDate: string
   sex: string
   phone: string
+  studentPhoneSecondary: string
   email: string
+  motherTongue: string
   addressLine: string
   neighborhood: string
   locality: string
@@ -132,14 +146,78 @@ export type PreRegistrationCreateInput = {
   postalCode: string
   previousSchool: string
   secondaryAverage: number | null
+  examRoom: string
   schoolCycle: string
   guardianFullName: string
   guardianRelationship: string
   guardianPhone: string
+  guardianPhoneSecondary: string
   guardianEmail: string
 }
 
 export type PreRegistrationStatusUpdateInput = {
   status: Extract<PreRegistrationStatus, 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO'>
   observationNotes?: string
+  motherTongue?: string
+  examRoom?: string
+  studentPhoneSecondary?: string
+  guardianPhoneSecondary?: string
+}
+
+export type AdmissionStatus =
+  | 'PAGADO_PENDIENTE_CAPTURA'
+  | 'EN_CAPTURA_CONTROL_ESCOLAR'
+  | 'CAPTURADO_CONTROL_ESCOLAR'
+  | 'FICHA_IMPRESA'
+
+export type AdmissionSummary = {
+  id: string
+  folio: string
+  curp: string
+  fullName: string
+  paidAt: string
+  status: AdmissionStatus
+  studentId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type AdmissionCreatePaymentInput = {
+  folio?: string
+  curp: string
+  fullName: string
+}
+
+export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
+
+export type AuthSession = {
+  id: string
+  username: string
+  displayName: string
+  role: AppRole
+}
+
+export type AuthLoginInput = {
+  username: string
+  password: string
+}
+
+export type GroupStat = {
+  groupId: string
+  label: string
+  capacity: number
+  assignedCount: number
+  available: number
+  bands: { alto: number; medio: number; bajo: number }
+  sex: { mujer: number; hombre: number; noEspecificado: number }
+}
+
+export type GroupPreviewRow = {
+  groupLabel: string
+  enrollmentNumber: string
+  fullName: string
+  curp: string
+  sex: string
+  averageBand: 'alto' | 'medio' | 'bajo'
+  secondaryAverage: number | null
 }

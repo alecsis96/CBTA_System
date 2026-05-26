@@ -45,10 +45,19 @@ const publicPreRegistrationSchema = z.object({
   maternalLastName: z.string().trim().min(1),
   curp: z.string().trim().toUpperCase().length(18),
   phone: z.string().trim().min(7).max(20),
+  studentPhoneSecondary: z.string().trim().max(20).optional(),
+  motherTongue: z.string().trim().optional(),
   addressLine: z.string().trim().min(1),
+  examRoom: z.string().trim().optional(),
   guardianFullName: z.string().trim().min(1),
   guardianPhone: z.string().trim().min(7).max(20),
+  guardianPhoneSecondary: z.string().trim().max(20).optional(),
 })
+
+function normalizeOptional(value: string | undefined) {
+  const trimmed = value?.trim() ?? ''
+  return trimmed.length > 0 ? trimmed : null
+}
 
 let publicPreRegistrationSequence = 0
 const publicPreRegistrationSchoolCycle =
@@ -169,11 +178,17 @@ const publicPreRegistrationHtml = `<!doctype html>
         <div class="row">
           <label>CURP (18 caracteres) <input name="curp" maxlength="18" minlength="18" required /></label>
           <label>Telefono alumno <input name="phone" required /></label>
+          <label>Telefono alumno alterno <input name="studentPhoneSecondary" type="tel" /></label>
+        </div>
+        <div class="row">
+          <label>Lengua materna <input name="motherTongue" /></label>
+          <label>Salon de examen <input name="examRoom" /></label>
         </div>
         <label>Domicilio <input name="addressLine" required /></label>
         <div class="row">
           <label>Nombre tutor <input name="guardianFullName" required /></label>
           <label>Telefono tutor <input name="guardianPhone" required /></label>
+          <label>Telefono tutor alterno <input name="guardianPhoneSecondary" type="tel" /></label>
         </div>
         <button type="submit">Enviar pre-registro</button>
         <p id="error" class="error"></p>
@@ -260,10 +275,14 @@ app.post('/api/public/pre-registrations', async (req: Request, res: Response) =>
         maternalLastName: parsed.data.maternalLastName,
         curp: parsed.data.curp,
         phone: parsed.data.phone,
+        studentPhoneSecondary: normalizeOptional(parsed.data.studentPhoneSecondary),
+        motherTongue: normalizeOptional(parsed.data.motherTongue),
         addressLine: parsed.data.addressLine,
+        examRoom: normalizeOptional(parsed.data.examRoom),
         schoolCycle: publicPreRegistrationSchoolCycle,
         guardianFullName: parsed.data.guardianFullName,
         guardianPhone: parsed.data.guardianPhone,
+        guardianPhoneSecondary: normalizeOptional(parsed.data.guardianPhoneSecondary),
         voucherGeneratedAt: submittedAt,
         submittedAt,
       },

@@ -1,4 +1,8 @@
 import type {
+  AdmissionCreatePaymentInput,
+  AdmissionSummary,
+  AuthLoginInput,
+  AuthSession,
   AuditLogSummary,
   ChargeConceptSummary,
   PreRegistrationCreateInput,
@@ -6,6 +10,7 @@ import type {
   PreRegistrationSummary,
   RocCreateInput,
   RocReceiptSummary,
+  SepExportResult,
   StudentDetail,
   StudentFormInput,
   StudentSummary,
@@ -17,6 +22,25 @@ const CONCEPTS_KEY = 'cbta-browser-concepts'
 const RECEIPTS_KEY = 'cbta-browser-receipts'
 const AUDIT_KEY = 'cbta-browser-audit'
 const PRE_REGISTRATIONS_KEY = 'cbta-browser-pre-registrations'
+const ADMISSIONS_KEY = 'cbta-browser-admissions'
+const SESSION_KEY = 'cbta-browser-session'
+
+const browserUsers: Array<AuthSession & { password: string }> = [
+  { id: 'browser-control-1', username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
+  { id: 'browser-ingresos-1', username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
+  { id: 'browser-admin-1', username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!' },
+]
+
+type BrowserAdmissionRecord = AdmissionSummary
+
+type BrowserPreRegistrationRecord = PreRegistrationCreateInput & {
+  id: string
+  folio: string
+  status: PreRegistrationSummary['status']
+  submittedAt: string
+  reviewedAt: string | null
+  observationNotes: string | null
+}
 
 const seededConcepts: ChargeConceptSummary[] = [
   {
@@ -186,11 +210,46 @@ function pushAuditLog(log: AuditLogSummary) {
 }
 
 function getPreRegistrations() {
-  return safeParse<PreRegistrationSummary[]>(window.localStorage.getItem(PRE_REGISTRATIONS_KEY), [])
+  return safeParse<BrowserPreRegistrationRecord[]>(window.localStorage.getItem(PRE_REGISTRATIONS_KEY), [])
 }
 
-function savePreRegistrations(items: PreRegistrationSummary[]) {
+function savePreRegistrations(items: BrowserPreRegistrationRecord[]) {
   window.localStorage.setItem(PRE_REGISTRATIONS_KEY, JSON.stringify(items))
+}
+
+function getAdmissions() {
+  return safeParse<BrowserAdmissionRecord[]>(window.localStorage.getItem(ADMISSIONS_KEY), [])
+}
+
+function saveAdmissions(items: BrowserAdmissionRecord[]) {
+  window.localStorage.setItem(ADMISSIONS_KEY, JSON.stringify(items))
+}
+
+function getSession() {
+  return safeParse<AuthSession | null>(window.localStorage.getItem(SESSION_KEY), null)
+}
+
+function saveSession(session: AuthSession | null) {
+  if (!session) {
+    window.localStorage.removeItem(SESSION_KEY)
+    return
+  }
+
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+}
+
+function toPreRegistrationSummary(item: BrowserPreRegistrationRecord): PreRegistrationSummary {
+  return {
+    id: item.id,
+    folio: item.folio,
+    fullName: `${item.firstName} ${item.paternalLastName} ${item.maternalLastName}`.trim(),
+    curp: item.curp,
+    schoolCycle: item.schoolCycle,
+    status: item.status,
+    submittedAt: item.submittedAt,
+    reviewedAt: item.reviewedAt,
+    observationNotes: item.observationNotes,
+  }
 }
 
 function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomUUID()): StudentDetail {
@@ -206,7 +265,9 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     age: input.age,
     sex: input.sex,
     phone: input.phone,
+    studentPhoneSecondary: input.studentPhoneSecondary,
     email: input.email,
+    motherTongue: input.motherTongue,
     addressLine: input.addressLine,
     neighborhood: input.neighborhood,
     locality: input.locality,
@@ -215,11 +276,13 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     postalCode: input.postalCode,
     previousSchool: input.previousSchool,
     secondaryAverage: input.secondaryAverage,
+    examRoom: input.examRoom,
     schoolCycle: input.schoolCycle,
     academicStatus: input.academicStatus,
     guardianFullName: input.guardianFullName,
     guardianRelationship: input.guardianRelationship,
     guardianPhone: input.guardianPhone,
+    guardianPhoneSecondary: input.guardianPhoneSecondary,
     guardianEmail: input.guardianEmail,
     validateNow: input.validateNow,
     statusLabel: input.validateNow ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
@@ -245,11 +308,38 @@ function toStudentSummary(student: StudentDetail): StudentSummary {
     fullName,
     address,
     statusLabel: student.statusLabel,
+    groupLabel: null,
+    shiftLabel: null,
   }
 }
 
 export const browserFallbackApi = {
   appName: 'CBTA Financieros (Browser Mode)',
+  auth: {
+    async login(input: AuthLoginInput) {
+      const username = input.username.trim().toLowerCase()
+      const user = browserUsers.find((item) => item.username === username && item.password === input.password)
+      if (!user) {
+        throw new Error('Credenciales invalidas.')
+      }
+
+      const session: AuthSession = {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        role: user.role,
+      }
+      saveSession(session)
+      return session
+    },
+    async logout() {
+      saveSession(null)
+      return { ok: true }
+    },
+    async session() {
+      return getSession()
+    },
+  },
   students: {
     async list() {
       return getStudents().map(toStudentSummary)
@@ -308,15 +398,14 @@ export const browserFallbackApi = {
   },
   preRegistrations: {
     async list() {
-      return getPreRegistrations()
+      return getPreRegistrations().map(toPreRegistrationSummary)
     },
     async create(input: PreRegistrationCreateInput) {
-      const item: PreRegistrationSummary = {
+      const item: BrowserPreRegistrationRecord = {
         id: crypto.randomUUID(),
         folio: `PR-${Date.now()}`,
-        fullName: `${input.firstName} ${input.paternalLastName} ${input.maternalLastName}`.trim(),
+        ...input,
         curp: input.curp,
-        schoolCycle: input.schoolCycle,
         status: 'PRE_REGISTRO_ENVIADO',
         submittedAt: new Date().toISOString(),
         reviewedAt: null,
@@ -324,7 +413,7 @@ export const browserFallbackApi = {
       }
       const items = [item, ...getPreRegistrations()]
       savePreRegistrations(items)
-      return item
+      return toPreRegistrationSummary(item)
     },
     async updateStatus(preRegistrationId: string, input: PreRegistrationStatusUpdateInput) {
       const items = getPreRegistrations()
@@ -333,16 +422,32 @@ export const browserFallbackApi = {
         throw new Error('Pre-registro no encontrado en modo navegador.')
       }
 
-      const next: PreRegistrationSummary = {
+      const next: BrowserPreRegistrationRecord = {
         ...items[index],
         status: input.status,
         reviewedAt: new Date().toISOString(),
         observationNotes: input.observationNotes?.trim() || null,
+        motherTongue: input.motherTongue ?? items[index].motherTongue,
+        examRoom: input.examRoom ?? items[index].examRoom,
+        studentPhoneSecondary: input.studentPhoneSecondary ?? items[index].studentPhoneSecondary,
+        guardianPhoneSecondary: input.guardianPhoneSecondary ?? items[index].guardianPhoneSecondary,
       }
 
       items[index] = next
       savePreRegistrations(items)
-      return next
+      return toPreRegistrationSummary(next)
+    },
+    async exportSep() {
+      const csv = '"Nombre(s)","Apellido paterno","Apellido materno","CURP","Fecha nacimiento","Sexo","Domicilio","Municipio","Estado","Codigo postal","Tutor","Telefono tutor","Correo","Escuela procedencia","Promedio","Ciclo","Estatus"'
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `sep-export-${Date.now()}.csv`
+      anchor.click()
+      URL.revokeObjectURL(url)
+      const result: SepExportResult = { outputPath: 'browser-download', exportedCount: 0 }
+      return result
     },
   },
   concepts: {
@@ -433,10 +538,123 @@ export const browserFallbackApi = {
       window.print()
       return { outputPath: 'browser-reprint', mode: 'browser-fallback' }
     },
+    async printBatch() {
+      window.print()
+      return { ok: true, mode: 'browser-fallback' }
+    },
+  },
+  groups: {
+    async createForIntake() {
+      return []
+    },
+    async listForIntake() {
+      return { groups: [], stats: [] }
+    },
+    async autoAssign() {
+      return { ok: true, assignedCount: 0, groupCount: 0 }
+    },
+    async confirmAssignment() {
+      return { ok: true, confirmed: 0 }
+    },
+    async manualReassign() {
+      return { ok: true, assignmentId: 'browser' }
+    },
+    async markNoShow() {
+      return { ok: true }
+    },
+    async stats() {
+      return []
+    },
+    async previewRoster() {
+      return []
+    },
   },
   audit: {
     async listRecent() {
       return getAuditLogs()
+    },
+  },
+  admissions: {
+    async list() {
+      return getAdmissions()
+    },
+    async createPayment(input: AdmissionCreatePaymentInput) {
+      const now = new Date().toISOString()
+      const year = new Date().getFullYear()
+      const prefix = `FIC-${year}-`
+      const latest = getAdmissions().find((item) => item.folio.startsWith(prefix))
+      const latestSequence = latest ? Number(latest.folio.replace(prefix, '')) : 0
+      const nextFolio = `${prefix}${String((Number.isFinite(latestSequence) ? latestSequence : 0) + 1).padStart(5, '0')}`
+      const folio = (input.folio ?? '').trim().length > 0 ? (input.folio ?? '').trim().toUpperCase() : nextFolio
+
+      if (getAdmissions().some((item) => item.folio === folio)) {
+        throw new Error('El folio de pago ya existe. Usa el siguiente folio consecutivo.')
+      }
+
+      const item: AdmissionSummary = {
+        id: crypto.randomUUID(),
+        folio,
+        curp: input.curp.trim().toUpperCase(),
+        fullName: input.fullName.trim(),
+        paidAt: now,
+        status: 'PAGADO_PENDIENTE_CAPTURA',
+        studentId: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      const items = [item, ...getAdmissions()]
+      saveAdmissions(items)
+      return item
+    },
+    async startCapture(admissionId: string) {
+      const items = getAdmissions()
+      const index = items.findIndex((item) => item.id === admissionId)
+      if (index === -1) {
+        throw new Error('Pago no encontrado en modo navegador.')
+      }
+      const updated = { ...items[index], status: 'EN_CAPTURA_CONTROL_ESCOLAR', updatedAt: new Date().toISOString() } as AdmissionSummary
+      items[index] = updated
+      saveAdmissions(items)
+      return updated
+    },
+    async completeCapture(admissionId: string, studentId: string) {
+      const items = getAdmissions()
+      const index = items.findIndex((item) => item.id === admissionId)
+      if (index === -1) {
+        throw new Error('Pago no encontrado en modo navegador.')
+      }
+      const updated = {
+        ...items[index],
+        status: 'CAPTURADO_CONTROL_ESCOLAR',
+        studentId,
+        updatedAt: new Date().toISOString(),
+      } as AdmissionSummary
+      items[index] = updated
+      saveAdmissions(items)
+      return updated
+    },
+    async markPrinted(admissionId: string) {
+      const items = getAdmissions()
+      const index = items.findIndex((item) => item.id === admissionId)
+      if (index === -1) {
+        throw new Error('Pago no encontrado en modo navegador.')
+      }
+      const updated = { ...items[index], status: 'FICHA_IMPRESA', updatedAt: new Date().toISOString() } as AdmissionSummary
+      items[index] = updated
+      saveAdmissions(items)
+      return updated
+    },
+    async findByFolioOrCurp(query: string) {
+      const normalized = query.trim().toUpperCase()
+      return getAdmissions().find((item) => item.folio === normalized || item.curp === normalized) ?? null
+    },
+    async printPaymentReceipt() {
+      window.print()
+      return { ok: true, mode: 'browser-fallback' }
+    },
+    async printFicha() {
+      window.print()
+      return { ok: true, mode: 'browser-fallback' }
     },
   },
 }

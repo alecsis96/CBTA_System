@@ -1,4 +1,43 @@
 import { prisma } from './db'
+import { scryptSync, randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import * as XLSX from 'xlsx'
+
+const AUTH_HASH_PREFIX = 'scrypt'
+
+function buildPasswordHash(password: string) {
+  const salt = randomBytes(16).toString('hex')
+  const derived = scryptSync(password, salt, 64).toString('hex')
+  return `${AUTH_HASH_PREFIX}$${salt}$${derived}`
+}
+
+function isValidPasswordHash(passwordHash: string) {
+  if (!passwordHash.startsWith(`${AUTH_HASH_PREFIX}$`)) {
+    return false
+  }
+
+  const parts = passwordHash.split('$')
+  if (parts.length !== 3) {
+    return false
+  }
+
+  const [prefix, salt, digest] = parts
+  if (prefix !== AUTH_HASH_PREFIX || !salt || !digest) {
+    return false
+  }
+
+  return /^[a-f0-9]+$/i.test(salt) && /^[a-f0-9]+$/i.test(digest)
+}
+
+const seedUsers = [
+  { username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
+  { username: 'control.escolar.2', displayName: 'Control Escolar 2', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
+  { username: 'control.escolar.3', displayName: 'Control Escolar 3', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
+  { username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
+  { username: 'ingresos.propios.2', displayName: 'Ingresos Propios 2', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
+  { username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!' },
+] as const
 
 const baseConcepts = [
   {
@@ -115,194 +154,150 @@ const baseConcepts = [
   },
 ]
 
-const sampleStudents = [
-  {
-    enrollmentNumber: '2407001001',
-    curp: 'LOGA080101HCSPRLA1',
-    firstName: 'Luis Omar',
-    paternalLastName: 'Gomez',
-    maternalLastName: 'Aguilar',
-    addressLine: '2a poniente sur',
-    neighborhood: 'Santa Teresita',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Marta Aguilar Diaz',
-    guardianPhone: '9191000001',
-  },
-  {
-    enrollmentNumber: '2407001002',
-    curp: 'PEMR080214MCSLRBA2',
-    firstName: 'Paola Elena',
-    paternalLastName: 'Martinez',
-    maternalLastName: 'Ruiz',
-    addressLine: 'Av. Central Oriente S/N',
-    neighborhood: 'Linda Vista',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Jose Martinez Cruz',
-    guardianPhone: '9191000002',
-  },
-  {
-    enrollmentNumber: '2407001003',
-    curp: 'SACJ080320HCSNRRA3',
-    firstName: 'Juan Carlos',
-    paternalLastName: 'Sanchez',
-    maternalLastName: 'Cruz',
-    addressLine: 'Barrio Centro',
-    neighborhood: 'Centro',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Juana Cruz Perez',
-    guardianPhone: '9191000003',
-  },
-  {
-    enrollmentNumber: '2407001004',
-    curp: 'TOME080411MCSRRSA4',
-    firstName: 'Maria Elena',
-    paternalLastName: 'Torres',
-    maternalLastName: 'Mendez',
-    addressLine: 'Colonia San Pedro',
-    neighborhood: 'San Pedro',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Rosa Mendez Lopez',
-    guardianPhone: '9191000004',
-  },
-  {
-    enrollmentNumber: '2407001005',
-    curp: 'HEAN080505HCSRRDA5',
-    firstName: 'Ana Sofia',
-    paternalLastName: 'Hernandez',
-    maternalLastName: 'Nunez',
-    addressLine: 'Calle Principal',
-    neighborhood: 'El Mirador',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Miguel Hernandez Santos',
-    guardianPhone: '9191000005',
-  },
-  {
-    enrollmentNumber: '2407001006',
-    curp: 'CHBR080623HCSLPLA6',
-    firstName: 'Brenda Lizeth',
-    paternalLastName: 'Chavez',
-    maternalLastName: 'Bautista',
-    addressLine: 'Barrio Guadalupe',
-    neighborhood: 'Guadalupe',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Luis Bautista Gomez',
-    guardianPhone: '9191000006',
-  },
-  {
-    enrollmentNumber: '2407001007',
-    curp: 'VARE080714MCSRRNA7',
-    firstName: 'Ricardo Emiliano',
-    paternalLastName: 'Vazquez',
-    maternalLastName: 'Ramos',
-    addressLine: 'Privada Los Pinos',
-    neighborhood: 'Los Pinos',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Maria Ramos Lopez',
-    guardianPhone: '9191000007',
-  },
-  {
-    enrollmentNumber: '2407001008',
-    curp: 'DEKL080822HCSMNSA8',
-    firstName: 'Karla Itzel',
-    paternalLastName: 'Diaz',
-    maternalLastName: 'Escobar',
-    addressLine: 'Calle Reforma',
-    neighborhood: 'San Antonio',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Patricia Escobar Diaz',
-    guardianPhone: '9191000008',
-  },
-  {
-    enrollmentNumber: '2407001009',
-    curp: 'ROPM080930MCSLRSA9',
-    firstName: 'Pedro Manuel',
-    paternalLastName: 'Rodriguez',
-    maternalLastName: 'Pinto',
-    addressLine: 'Camino al Cobach',
-    neighborhood: 'San Jose',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Teresa Pinto Ruiz',
-    guardianPhone: '9191000009',
-  },
-  {
-    enrollmentNumber: '2407001010',
-    curp: 'MOGA081015HCSPRLA0',
-    firstName: 'Gabriela Andrea',
-    paternalLastName: 'Morales',
-    maternalLastName: 'Ordonez',
-    addressLine: 'Calle Hidalgo',
-    neighborhood: 'San Sebastian',
-    locality: 'Yajalon',
-    municipality: 'Yajalon',
-    state: 'Chiapas',
-    schoolCycle: '2026-2027',
-    academicStatus: 'Regular',
-    guardianFullName: 'Andrea Ordonez Perez',
-    guardianPhone: '9191000010',
-  },
-]
+type ExcelStudentRow = {
+  enrollmentNumber: string
+  curp: string
+  firstName: string
+  paternalLastName: string
+  maternalLastName: string
+  age: number | null
+  sex: string
+  previousSchool: string
+  secondaryAverage: number | null
+  locality: string
+  guardianFullName: string
+  phone: string
+  guardianPhone: string
+  email: string
+  motherTongue: string
+}
 
-export async function ensureBaseData() {
-  const controlEscolarUser = await prisma.user.findUnique({
-    where: { username: 'control.escolar' },
-  })
+function normalizeText(value: unknown) {
+  return String(value ?? '').trim()
+}
 
-  if (!controlEscolarUser) {
-    await prisma.user.create({
-      data: {
-        username: 'control.escolar',
-        displayName: 'Usuario de Control Escolar',
-        role: 'CONTROL_ESCOLAR',
-      },
+function normalizePhone(value: unknown) {
+  return normalizeText(value).replace(/\s+/g, '')
+}
+
+function normalizeUpper(value: unknown) {
+  return normalizeText(value).toUpperCase()
+}
+
+function parseDecimal(value: unknown) {
+  const text = normalizeText(value).replace(',', '.')
+  if (!text) return null
+  const parsed = Number(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseInteger(value: unknown) {
+  const parsed = Number(normalizeText(value))
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null
+}
+
+function parseLocationParts(localitySource: string) {
+  const rawParts = localitySource
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+
+  if (rawParts.length === 0) {
+    return {
+      locality: '',
+      municipality: null as string | null,
+      state: null as string | null,
+    }
+  }
+
+  if (rawParts.length === 1) {
+    return {
+      locality: null,
+      municipality: rawParts[0],
+      state: null,
+    }
+  }
+
+  if (rawParts.length === 2) {
+    return {
+      locality: null,
+      municipality: rawParts[0],
+      state: rawParts[1],
+    }
+  }
+
+  return {
+    locality: rawParts[0],
+    municipality: rawParts[1],
+    state: rawParts[rawParts.length - 1],
+  }
+}
+
+function loadStudentsFromExcel(): ExcelStudentRow[] {
+  const workbookPath = join(process.cwd(), 'FICHAS 2026.xlsx')
+  if (!existsSync(workbookPath)) {
+    return []
+  }
+
+  const workbook = XLSX.readFile(workbookPath)
+  const sheet = workbook.Sheets[workbook.SheetNames[0]]
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' })
+
+  const students: ExcelStudentRow[] = []
+  for (const row of rows.slice(1)) {
+    const sequential = parseInteger(row[0])
+    const curp = normalizeUpper(row[6])
+    const paternalLastName = normalizeUpper(row[3])
+    const maternalLastName = normalizeUpper(row[4])
+    const firstName = normalizeUpper(row[5])
+
+    if (!sequential || !curp || curp.length < 18 || !firstName || !paternalLastName) {
+      continue
+    }
+
+    students.push({
+      enrollmentNumber: `2026${String(sequential).padStart(4, '0')}`,
+      curp,
+      firstName,
+      paternalLastName,
+      maternalLastName,
+      age: parseInteger(row[7]),
+      sex: normalizeUpper(row[8]),
+      previousSchool: normalizeText(row[9]),
+      secondaryAverage: parseDecimal(row[10]),
+      locality: normalizeText(row[11]),
+      guardianFullName: normalizeText(row[12]),
+      phone: normalizePhone(row[13]),
+      guardianPhone: normalizePhone(row[14]),
+      email: normalizeText(row[15]).toLowerCase(),
+      motherTongue: normalizeText(row[16]),
     })
   }
 
-  const defaultUser = await prisma.user.findUnique({
-    where: { username: 'ingresos.propios' },
-  })
+  return students
+}
 
-  if (!defaultUser) {
-    await prisma.user.create({
-      data: {
-        username: 'ingresos.propios',
-        displayName: 'Encargado de Ingresos Propios',
-        role: 'INGRESOS_PROPIOS',
+export async function ensureBaseData() {
+  for (const user of seedUsers) {
+    const existing = await prisma.user.findUnique({ where: { username: user.username } })
+    const passwordHash = existing?.passwordHash && isValidPasswordHash(existing.passwordHash)
+      ? existing.passwordHash
+      : buildPasswordHash(user.password)
+
+    await prisma.user.upsert({
+      where: { username: user.username },
+      update: {
+        displayName: user.displayName,
+        role: user.role,
+        isActive: true,
+        passwordHash,
+      },
+      create: {
+        username: user.username,
+        displayName: user.displayName,
+        role: user.role,
+        isActive: true,
+        passwordHash,
       },
     })
   }
@@ -365,15 +360,26 @@ export async function ensureBaseData() {
     }
   }
 
-  for (const student of sampleStudents) {
-    const existingStudent = await prisma.student.findUnique({
-      where: { enrollmentNumber: student.enrollmentNumber },
-    })
+  const excelStudents = loadStudentsFromExcel()
+  if (excelStudents.length === 0) {
+    return
+  }
 
-    if (existingStudent) {
-      continue
-    }
+  await prisma.$transaction(async (tx) => {
+    await tx.groupAssignmentAudit.deleteMany({})
+    await tx.studentGroupAssignment.deleteMany({})
+    await tx.intakeGroup.deleteMany({})
+    await tx.rocReceiptLine.deleteMany({})
+    await tx.rocReceipt.deleteMany({})
+    await tx.preRegistrationAudit.deleteMany({})
+    await tx.preRegistration.deleteMany({})
+    await tx.admissionPayment.deleteMany({})
+    await tx.guardian.deleteMany({})
+    await tx.student.deleteMany({})
+  })
 
+  for (const student of excelStudents) {
+    const location = parseLocationParts(student.locality)
     await prisma.student.create({
       data: {
         enrollmentNumber: student.enrollmentNumber,
@@ -381,20 +387,27 @@ export async function ensureBaseData() {
         firstName: student.firstName,
         paternalLastName: student.paternalLastName,
         maternalLastName: student.maternalLastName,
-        addressLine: student.addressLine,
-        neighborhood: student.neighborhood,
-        locality: student.locality,
-        municipality: student.municipality,
-        state: student.state,
-        schoolCycle: student.schoolCycle,
-        academicStatus: student.academicStatus,
+        age: student.age,
+        sex: student.sex,
+        phone: student.phone || null,
+        email: student.email || null,
+        motherTongue: student.motherTongue || null,
+        addressLine: '',
+        locality: location.locality || null,
+        municipality: location.municipality,
+        state: location.state,
+        previousSchool: student.previousSchool || null,
+        secondaryAverage: student.secondaryAverage,
+        schoolCycle: '2026-2027',
+        academicStatus: 'REGULAR',
+        enrollmentStatus: 'FICHA_ENTREGADA',
         status: 'LISTO_PARA_COBRO',
         validatedAt: new Date(),
         validatedBy: 'CONTROL_ESCOLAR',
         guardian: {
           create: {
-            fullName: student.guardianFullName,
-            phone: student.guardianPhone,
+            fullName: student.guardianFullName || 'SIN TUTOR CAPTURADO',
+            phone: student.guardianPhone || 'SIN TELEFONO',
           },
         },
       },

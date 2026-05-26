@@ -10,6 +10,7 @@ datasource db {
 model User {
   id          String      @id @default(cuid())
   username    String      @unique
+  passwordHash String     @default("")
   displayName String
   role        String
   isActive    Boolean     @default(true)
@@ -17,6 +18,9 @@ model User {
   updatedAt   DateTime    @updatedAt
   auditLogs   AuditLog[]
   receipts    RocReceipt[] @relation("ReceiptCreatedBy")
+  groupAssignmentsCreated StudentGroupAssignment[] @relation("GroupAssignedBy")
+  groupAssignmentsUpdated StudentGroupAssignment[] @relation("GroupUpdatedBy")
+  groupAssignmentAudits GroupAssignmentAudit[] @relation("GroupAuditActor")
 }
 
 model Student {
@@ -31,7 +35,9 @@ model Student {
   age               Int?
   sex               String?
   phone             String?
+  studentPhoneSecondary String?
   email             String?
+  motherTongue      String?
   addressLine       String
   neighborhood      String?
   locality          String?
@@ -40,17 +46,88 @@ model Student {
   postalCode        String?
   previousSchool    String?
   secondaryAverage  Decimal?
+  examRoom          String?
   schoolCycle       String
   academicStatus    String?
+  conductStatus     String         @default("REGULAR")
+  addressConfirmedAt DateTime?
+  addressConfirmedBy String?
+  enrollmentStatus  String         @default("PENDIENTE_ASIGNACION")
   status            String         @default("CAPTURADO")
   validatedAt       DateTime?
   validatedBy       String?
   preRegistrationId String?        @unique
+  admissionPaymentId String?       @unique
   guardian          Guardian?
   preRegistration   PreRegistration? @relation(fields: [preRegistrationId], references: [id], onDelete: SetNull)
+  admissionPayment  AdmissionPayment? @relation(fields: [admissionPaymentId], references: [id], onDelete: SetNull)
   receipts          RocReceipt[]
+  groupAssignment   StudentGroupAssignment?
+  groupAuditLogs    GroupAssignmentAudit[]
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
+}
+
+model IntakeGroup {
+  id         String                   @id @default(cuid())
+  schoolCycle String
+  label      String
+  shift      String                   @default("MATUTINO")
+  capacity   Int                      @default(40)
+  isActive   Boolean                  @default(true)
+  createdAt  DateTime                 @default(now())
+  updatedAt  DateTime                 @updatedAt
+  assignments StudentGroupAssignment[]
+
+  @@unique([schoolCycle, label, shift])
+}
+
+model StudentGroupAssignment {
+  id             String                 @id @default(cuid())
+  studentId      String                 @unique
+  groupId        String
+  status         String                 @default("ASIGNADO")
+  assignedAt     DateTime               @default(now())
+  confirmedAt    DateTime?
+  assignedById   String?
+  updatedById    String?
+  reason         String?
+  student        Student                @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  group          IntakeGroup            @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  assignedBy     User?                  @relation("GroupAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+  updatedBy      User?                  @relation("GroupUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  auditLogs      GroupAssignmentAudit[]
+}
+
+model GroupAssignmentAudit {
+  id              String                 @id @default(cuid())
+  assignmentId    String
+  studentId       String
+  beforeGroupId   String?
+  beforeGroupLabel String?
+  afterGroupId    String?
+  afterGroupLabel String?
+  actorId         String?
+  actorRole       String
+  reason          String
+  createdAt       DateTime               @default(now())
+  assignment      StudentGroupAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student         Student                @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  actor           User?                  @relation("GroupAuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+}
+
+model AdmissionPayment {
+  id         String   @id @default(cuid())
+  folio      String   @unique
+  curp       String
+  fullName   String
+  paidAt     DateTime @default(now())
+  status     String   @default("PAGADO_PENDIENTE_CAPTURA")
+  student    Student?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([curp])
 }
 
 model PreRegistration {
@@ -64,7 +141,9 @@ model PreRegistration {
   birthDate            DateTime?
   sex                  String?
   phone                String?
+  studentPhoneSecondary String?
   email                String?
+  motherTongue         String?
   addressLine          String
   neighborhood         String?
   locality             String?
@@ -73,10 +152,12 @@ model PreRegistration {
   postalCode           String?
   previousSchool       String?
   secondaryAverage     Decimal?
+  examRoom             String?
   schoolCycle          String
   guardianFullName     String
   guardianRelationship String?
   guardianPhone        String
+  guardianPhoneSecondary String?
   guardianEmail        String?
   voucherGeneratedAt   DateTime?
   submittedAt          DateTime?
@@ -108,6 +189,7 @@ model Guardian {
   fullName      String
   relationship  String?
   phone         String
+  secondaryPhone String?
   email         String?
   credentialRef String?
   student       Student @relation(fields: [studentId], references: [id], onDelete: Cascade)

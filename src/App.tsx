@@ -1,41 +1,43 @@
-import { FormEvent, Fragment, MutableRefObject, ReactNode, RefObject, useEffect, useRef, useState } from 'react'
+import { FormEvent, Fragment, MutableRefObject, ReactNode, useEffect, useRef, useState } from 'react'
 import { browserFallbackApi } from '@/lib/browser-fallback'
+import {
+  AdmissionCaptureTable,
+  PreRegistrationInboxPanel,
+  type PreRegistrationStatusUpdate,
+} from '@/components/control-escolar/panels'
+import { StudentCaptureFormPanel } from '@/components/control-escolar/student-capture-form-panel'
 import { amountToWords, formatCurrency, formatPrintDate } from '@/lib/formatters'
 import { addPendingSyncOp, clearPendingSyncOps, getDeviceId } from '@/lib/sync-queue'
 import { getSyncStatusSnapshot, syncAll, type SyncStatusSnapshot } from '@/lib/sync-service'
 import type {
+  AdmissionCreatePaymentInput,
+  AdmissionSummary,
+  AppRole,
+  AuthLoginInput,
+  AuthSession,
   AuditLogSummary,
   ChargeConceptSummary,
   PreRegistrationSummary,
   RocReceiptSummary,
+  GroupStat,
+  GroupPreviewRow,
   StudentFormInput,
   StudentSummary,
 } from '@/types/domain'
 
 type Screen = 'control-escolar' | 'ingresos-propios' | 'configuracion'
+type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'configuracion' | 'sync'
 
-const controlEscolarFields = [
-  'Nombre completo',
-  'CURP obligatoria',
-  'RFC opcional',
-  'Fecha de nacimiento',
-  'Domicilio',
-  'Telefono del alumno',
-  'Tutor y telefono',
-  'Promedio de secundaria',
-  'Ciclo escolar',
-]
-
-const sexOptions = ['Masculino', 'Femenino', 'Otro']
 const relationshipOptions = ['Padre', 'Madre', 'Tutor', 'Abuelo', 'Abuela', 'Otro']
 
-const STUDENTS_PER_PAGE = 10
+const STUDENTS_PER_PAGE = 20
 const CONTROL_STUDENTS_PER_PAGE = 20
 const RECEIPTS_PER_PAGE = 5
 
 const EMPTY_SYNC_STATUS: SyncStatusSnapshot = {
   lastSuccessfulSyncAt: null,
   lastSyncError: null,
+  lastSyncErrorState: null,
   pendingTotal: 0,
   pendingByType: {
     STUDENT_CREATE: 0,
@@ -122,6 +124,24 @@ function groupConcepts(concepts: ChargeConceptSummary[], query?: string) {
     .filter((group) => group.items.length > 0)
 }
 
+function deriveGradeFromGroup(groupLabel: string | null) {
+  if (!groupLabel) return 'Sin grado'
+  const match = groupLabel.trim().match(/^(\d+)/)
+  if (!match) return 'Sin grado'
+  return `${match[1]}o`
+}
+
+function groupSexBalanceLabel(stat: GroupStat) {
+  const gap = Math.abs(stat.sex.hombre - stat.sex.mujer)
+  return gap <= 4 ? 'OK' : gap <= 8 ? 'Revisar' : 'Ajustar'
+}
+
+function groupBandBalanceLabel(stat: GroupStat) {
+  const values = [stat.bands.alto, stat.bands.medio, stat.bands.bajo]
+  const spread = Math.max(...values) - Math.min(...values)
+  return spread <= 6 ? 'OK' : spread <= 12 ? 'Revisar' : 'Ajustar'
+}
+
 function groupedSelectableConcepts(concepts: ChargeConceptSummary[]) {
   const items = concepts.filter(isSelectableConcept)
   const grouped = new Map<string, ChargeConceptSummary[]>()
@@ -158,7 +178,9 @@ const initialForm: StudentFormInput = {
   age: null,
   sex: '',
   phone: '',
+  studentPhoneSecondary: '',
   email: '',
+  motherTongue: '',
   addressLine: '',
   neighborhood: '',
   locality: '',
@@ -167,13 +189,21 @@ const initialForm: StudentFormInput = {
   postalCode: '29930',
   previousSchool: '',
   secondaryAverage: null,
+  examRoom: '',
   schoolCycle: '2026-2027',
   academicStatus: 'Regular',
   guardianFullName: '',
   guardianRelationship: '',
   guardianPhone: '',
+  guardianPhoneSecondary: '',
   guardianEmail: '',
   validateNow: true,
+}
+
+const initialPaymentForm: AdmissionCreatePaymentInput = {
+  folio: '',
+  curp: '',
+  fullName: '',
 }
 
 function App() {
@@ -181,13 +211,23 @@ function App() {
   const appApi = desktopApi ?? browserFallbackApi
   const isBrowserMode = !desktopApi
   const [screen, setScreen] = useState<Screen>('control-escolar')
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null)
+  const [authForm, setAuthForm] = useState<AuthLoginInput>({ username: '', password: '' })
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authSaving, setAuthSaving] = useState(false)
+  const [authError, setAuthError] = useState<string | null>(null)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [students, setStudents] = useState<StudentSummary[]>([])
   const [preRegistrations, setPreRegistrations] = useState<PreRegistrationSummary[]>([])
+  const [admissions, setAdmissions] = useState<AdmissionSummary[]>([])
+  const [paymentForm, setPaymentForm] = useState<AdmissionCreatePaymentInput>(initialPaymentForm)
+  const [captureQuery, setCaptureQuery] = useState('')
+  const [activeAdmission, setActiveAdmission] = useState<AdmissionSummary | null>(null)
   const [validatedStudents, setValidatedStudents] = useState<StudentSummary[]>([])
   const [selectedStudent, setSelectedStudent] = useState<StudentSummary | null>(null)
   const [concepts, setConcepts] = useState<ChargeConceptSummary[]>([])
   const [selectedConcepts, setSelectedConcepts] = useState<ChargeConceptSummary[]>([])
+  const [conceptAmounts, setConceptAmounts] = useState<Record<string, number>>({})
   const [receipts, setReceipts] = useState<RocReceiptSummary[]>([])
   const [allReceipts, setAllReceipts] = useState<RocReceiptSummary[]>([])
   const [recentAuditLogs, setRecentAuditLogs] = useState<AuditLogSummary[]>([])
@@ -199,20 +239,81 @@ function App() {
   const [savingReceipt, setSavingReceipt] = useState(false)
   const [savingTariffCode, setSavingTariffCode] = useState<string | null>(null)
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
-  const [feedback, setFeedback] = useState<string | null>(null)
+  const [feedbackByScope, setFeedbackByScope] = useState<Record<FeedbackScope, string | null>>({
+    'control-escolar': null,
+    'ingresos-propios': null,
+    configuracion: null,
+    sync: null,
+  })
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === 'undefined' ? true : navigator.onLine)
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(EMPTY_SYNC_STATUS)
   const [syncing, setSyncing] = useState(false)
   const studentsSectionRef = useRef<HTMLElement | null>(null)
   const captureSectionRef = useRef<HTMLElement | null>(null)
 
+  function setScopedFeedback(scope: FeedbackScope, message: string | null) {
+    setFeedbackByScope((current) => ({
+      ...current,
+      [scope]: message,
+    }))
+  }
+
+  const feedback = feedbackByScope[screen]
+
+  function setFeedback(message: string | null, scope: FeedbackScope = screen) {
+    setScopedFeedback(scope, message)
+  }
+
+  function setControlFeedback(message: string | null) {
+    setFeedback(message, 'control-escolar')
+  }
+
+  function setIngresosFeedback(message: string | null) {
+    setFeedback(message, 'ingresos-propios')
+  }
+
+  function setConfigFeedback(message: string | null) {
+    setFeedback(message, 'configuracion')
+  }
+
+  function setSyncFeedback(message: string | null) {
+    setFeedback(message, 'sync')
+  }
+
   function refreshSyncStatus() {
     setSyncStatus(getSyncStatusSnapshot())
   }
 
   useEffect(() => {
-    void loadData()
+    void initializeSession()
   }, [])
+
+  useEffect(() => {
+    if (!authSession) {
+      return
+    }
+
+    if (!canAccessScreen(authSession.role, screen)) {
+      setScreen(defaultScreenByRole(authSession.role))
+    }
+  }, [authSession, screen])
+
+  async function initializeSession() {
+    setAuthLoading(true)
+    try {
+      const session = await appApi.auth.session()
+      setAuthSession(session)
+      if (session) {
+        setScreen(defaultScreenByRole(session.role))
+        await loadData()
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo validar la sesion actual.'
+      setAuthError(message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }
 
   useEffect(() => {
     refreshSyncStatus()
@@ -268,14 +369,17 @@ function App() {
     try {
       const receiptsAllPromise =
         typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
+      const admissionsPromise =
+        typeof appApi.admissions?.list === 'function' ? appApi.admissions.list() : Promise.resolve([])
 
-      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, admissions] = await Promise.all([
         appApi.students.list(),
         appApi.preRegistrations.list(),
         appApi.students.listValidated(),
         appApi.concepts.listActive(),
         appApi.audit.listRecent(),
         receiptsAllPromise,
+        admissionsPromise,
       ])
 
       setStudents(allStudents)
@@ -284,6 +388,7 @@ function App() {
       setConcepts(activeConcepts)
       setRecentAuditLogs(auditLogs)
       setAllReceipts(receiptsAll)
+      setAdmissions(admissions)
       setSelectedStudent((current) => {
         if (current) {
           return validatedStudents.find((student) => student.id === current.id) ?? validatedStudents[0] ?? null
@@ -307,10 +412,50 @@ function App() {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo cargar la informacion inicial.'
-      setFeedback(message)
+      setSyncFeedback(message)
     } finally {
       setLoading(false)
     }
+  }
+
+  function defaultScreenByRole(role: AppRole): Screen {
+    if (role === 'CONTROL_ESCOLAR') return 'control-escolar'
+    if (role === 'INGRESOS_PROPIOS') return 'ingresos-propios'
+    return 'configuracion'
+  }
+
+  function canAccessScreen(role: AppRole, target: Screen) {
+    if (role === 'ADMIN') return true
+    if (role === 'CONTROL_ESCOLAR') return target === 'control-escolar'
+    if (role === 'INGRESOS_PROPIOS') return target === 'ingresos-propios'
+    return false
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setAuthSaving(true)
+    setAuthError(null)
+    try {
+      const session = await appApi.auth.login(authForm)
+      setAuthSession(session)
+      setScreen(defaultScreenByRole(session.role))
+      await loadData()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo iniciar sesion.'
+      setAuthError(message)
+    } finally {
+      setAuthSaving(false)
+    }
+  }
+
+  async function handleLogout() {
+    await appApi.auth.logout()
+    setAuthSession(null)
+    setAuthForm({ username: '', password: '' })
+    setControlFeedback(null)
+    setIngresosFeedback(null)
+    setConfigFeedback(null)
+    setSyncFeedback(null)
   }
 
   async function loadReceipts(studentId: string) {
@@ -321,7 +466,7 @@ function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setSaving(true)
-    setFeedback(null)
+    setControlFeedback(null)
 
     try {
       if (editingStudentId) {
@@ -332,6 +477,9 @@ function App() {
           payload: { studentId: updated.id },
           deviceId: getDeviceId(),
         })
+        if (activeAdmission && typeof appApi.admissions?.completeCapture === 'function') {
+          await appApi.admissions.completeCapture(activeAdmission.id, updated.id)
+        }
       } else {
         const created = await appApi.students.create(form)
         addPendingSyncOp({
@@ -340,13 +488,17 @@ function App() {
           payload: { studentId: created.id },
           deviceId: getDeviceId(),
         })
+        if (activeAdmission && typeof appApi.admissions?.completeCapture === 'function') {
+          await appApi.admissions.completeCapture(activeAdmission.id, created.id)
+        }
       }
       refreshSyncStatus()
 
       const wasEditing = editingStudentId !== null
       setEditingStudentId(null)
+      setActiveAdmission(null)
       setForm(initialForm)
-      setFeedback(
+      setControlFeedback(
         wasEditing
           ? 'Alumno actualizado correctamente desde Control Escolar.'
           : isBrowserMode
@@ -359,7 +511,7 @@ function App() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo guardar el alumno.'
-      setFeedback(message)
+      setControlFeedback(message)
     } finally {
       setSaving(false)
     }
@@ -372,8 +524,96 @@ function App() {
     }))
   }
 
+  async function handleCreatePayment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (typeof appApi.admissions?.createPayment !== 'function') {
+      return
+    }
+
+    setIngresosFeedback(null)
+    try {
+      const createdPayment = await appApi.admissions.createPayment(paymentForm)
+      await printPaymentReceipt(createdPayment)
+      setPaymentForm(initialPaymentForm)
+      await loadData()
+      setIngresosFeedback('Pago de ficha registrado e impreso. Ya esta disponible para captura en Control Escolar.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo registrar el pago de ficha.'
+      setIngresosFeedback(message)
+    }
+  }
+
+  async function printPaymentReceipt(admission: AdmissionSummary) {
+    if (typeof appApi.admissions?.printPaymentReceipt === 'function') {
+      await appApi.admissions.printPaymentReceipt(admission)
+      return
+    }
+
+    window.print()
+  }
+
+  function splitFullName(fullName: string) {
+    const parts = fullName
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+
+    if (parts.length <= 1) {
+      return { firstName: fullName.trim(), paternalLastName: '', maternalLastName: '' }
+    }
+
+    if (parts.length === 2) {
+      return { firstName: parts[0], paternalLastName: parts[1], maternalLastName: '' }
+    }
+
+    const maternalLastName = parts[parts.length - 1]
+    const paternalLastName = parts[parts.length - 2]
+    const firstName = parts.slice(0, -2).join(' ')
+    return { firstName, paternalLastName, maternalLastName }
+  }
+
+  async function handleSelectAdmissionForCapture(admission: AdmissionSummary) {
+    setControlFeedback(null)
+    try {
+      const started =
+        typeof appApi.admissions?.startCapture === 'function' ? await appApi.admissions.startCapture(admission.id) : admission
+
+      setActiveAdmission(started)
+      const parsedName = splitFullName(admission.fullName)
+      setForm((current) => ({
+        ...current,
+        curp: admission.curp,
+        firstName: parsedName.firstName,
+        paternalLastName: parsedName.paternalLastName,
+        maternalLastName: parsedName.maternalLastName,
+      }))
+      setControlFeedback('Pago seleccionado. Completa la captura y guarda el alumno.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo abrir la captura de ficha.'
+      setControlFeedback(message)
+    }
+  }
+
+  async function handlePrintAdmission(admission: AdmissionSummary) {
+    if (admission.status !== 'CAPTURADO_CONTROL_ESCOLAR' && admission.status !== 'FICHA_IMPRESA') {
+      setIngresosFeedback('La ficha solo se imprime cuando la captura esta completa.')
+      return
+    }
+
+    if (typeof appApi.admissions?.printFicha === 'function') {
+      await appApi.admissions.printFicha(admission)
+    } else {
+      window.print()
+    }
+
+    if (typeof appApi.admissions?.markPrinted === 'function') {
+      await appApi.admissions.markPrinted(admission.id)
+      await loadData()
+    }
+  }
+
   async function handleEditStudent(studentId: string) {
-    setFeedback(null)
+    setControlFeedback(null)
 
     try {
       const student = await appApi.students.get(studentId)
@@ -387,51 +627,63 @@ function App() {
       }, 0)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo cargar el alumno para editar.'
-      setFeedback(message)
+      setControlFeedback(message)
     }
   }
 
   function handleCancelEdit() {
     setEditingStudentId(null)
     setForm(initialForm)
-    setFeedback(null)
+    setControlFeedback(null)
   }
 
   function toggleConcept(concept: ChargeConceptSummary) {
     setSelectedConcepts((current) => {
       const exists = current.some((item) => item.code === concept.code)
       if (exists) {
+        setConceptAmounts((amounts) => {
+          const next = { ...amounts }
+          delete next[concept.code]
+          return next
+        })
         return current.filter((item) => item.code !== concept.code)
       }
+
+      setConceptAmounts((amounts) => ({ ...amounts, [concept.code]: amounts[concept.code] ?? concept.amount }))
 
       return [...current, concept]
     })
   }
 
+  function updateConceptAmount(code: string, amount: number) {
+    setConceptAmounts((current) => ({ ...current, [code]: amount }))
+  }
+
   async function handleCreateReceipt() {
     if (!selectedStudent) {
-      setFeedback('Selecciona primero un alumno validado.')
+      setIngresosFeedback('Selecciona primero un alumno validado.')
       return
     }
 
     if (!rocNumber.trim()) {
-      setFeedback('Captura el numero de ROC antes de emitir.')
+      setIngresosFeedback('Captura el numero de ROC antes de emitir.')
       return
     }
 
     if (selectedConcepts.length === 0) {
-      setFeedback('Selecciona al menos un concepto para emitir el ROC.')
+      setIngresosFeedback('Selecciona al menos un concepto para emitir el ROC.')
       return
     }
 
     setSavingReceipt(true)
-    setFeedback(null)
+    setIngresosFeedback(null)
 
     try {
       const createdReceipt = await appApi.receipts.create({
         rocNumber,
         studentId: selectedStudent.id,
         conceptCodes: selectedConcepts.map((concept) => concept.code),
+        conceptItems: selectedConcepts.map((concept) => ({ code: concept.code, amount: conceptAmounts[concept.code] ?? concept.amount })),
       })
       addPendingSyncOp({
         type: 'RECEIPT_CREATE',
@@ -443,17 +695,17 @@ function App() {
       setAllReceipts((current) => [createdReceipt, ...current])
       await loadReceipts(selectedStudent.id)
       await loadData()
-      setFeedback('ROC guardado correctamente en el historial del alumno.')
+      setIngresosFeedback('ROC guardado correctamente en el historial del alumno.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo guardar el ROC.'
-      setFeedback(message)
+      setIngresosFeedback(message)
     } finally {
       setSavingReceipt(false)
     }
   }
 
   async function handleReprintReceipt(receiptId: string) {
-    setFeedback(null)
+    setIngresosFeedback(null)
 
     try {
       await appApi.receipts.reprint(receiptId)
@@ -476,28 +728,28 @@ function App() {
       }
 
       await loadData()
-      setFeedback(
+      setIngresosFeedback(
         isBrowserMode
           ? 'Reimpresion lanzada en modo navegador.'
           : 'Se genero una nueva copia del ROC oficial desde el historial.',
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo reimprimir el ROC.'
-      setFeedback(message)
+      setIngresosFeedback(message)
     }
   }
 
   async function handleUpdateTariff(code: string, amount: number, periodLabel: string) {
     setSavingTariffCode(code)
-    setFeedback(null)
+    setConfigFeedback(null)
 
     try {
       await appApi.concepts.updateTariff({ code, amount, periodLabel })
       await loadData()
-      setFeedback(`Tarifa actualizada para ${code}: $${amount.toFixed(2)} en ${periodLabel}.`)
+      setConfigFeedback(`Tarifa actualizada para ${code}: $${amount.toFixed(2)} en ${periodLabel}.`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo actualizar la tarifa.'
-      setFeedback(message)
+      setConfigFeedback(message)
     } finally {
       setSavingTariffCode(null)
     }
@@ -507,54 +759,70 @@ function App() {
     preRegistrationId: string,
     status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
   ) {
-    setFeedback(null)
+    setControlFeedback(null)
 
     try {
       await appApi.preRegistrations.updateStatus(preRegistrationId, { status })
       await loadData()
-      setFeedback(`Pre-registro actualizado a ${status}.`)
+      setControlFeedback(`Pre-registro actualizado a ${status}.`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo actualizar el estatus del pre-registro.'
-      setFeedback(message)
+      setControlFeedback(message)
     }
   }
 
-  function handlePrintReceipt() {
+  async function handlePrintReceipt() {
     if (!selectedStudent || selectedConcepts.length === 0) {
-      setFeedback('Selecciona un alumno y al menos un concepto antes de imprimir.')
+      setIngresosFeedback('Selecciona un alumno y al menos un concepto antes de imprimir.')
       return
     }
 
-    if (desktopApi) {
-      void desktopApi.receipts
-        .openOfficialTemplate({
-          rocNumber,
-          studentId: selectedStudent.id,
-          conceptCodes: selectedConcepts.map((concept) => concept.code),
-        })
-        .then(() => {
-          setFeedback('Se genero un archivo nuevo desde la plantilla oficial de Excel y se abrio en Excel.')
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'No se pudo abrir la plantilla oficial de Excel.'
-          setFeedback(message)
-        })
+    if (!rocNumber.trim()) {
+      setIngresosFeedback('Captura el numero de ROC antes de imprimir.')
       return
     }
 
-    void appApi.receipts.openOfficialTemplate({
-      rocNumber,
-      studentId: selectedStudent.id,
-      conceptCodes: selectedConcepts.map((concept) => concept.code),
-    })
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+    try {
+      const createdReceipt = await appApi.receipts.create({
+        rocNumber,
+        studentId: selectedStudent.id,
+        conceptCodes: selectedConcepts.map((concept) => concept.code),
+        conceptItems: selectedConcepts.map((concept) => ({ code: concept.code, amount: conceptAmounts[concept.code] ?? concept.amount })),
+      })
+      await appApi.receipts.reprint(createdReceipt.id)
+      await loadReceipts(selectedStudent.id)
+      await loadData()
+      setIngresosFeedback('ROC guardado e impreso correctamente.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo guardar e imprimir el ROC.'
+      setIngresosFeedback(message)
+    } finally {
+      setSavingReceipt(false)
+    }
   }
 
-  const total = selectedConcepts.reduce((sum, concept) => sum + concept.amount, 0)
+  async function handlePrintBatchReceipts() {
+    if (typeof appApi.receipts.printBatch !== 'function') {
+      setIngresosFeedback('La impresion por lote no esta disponible en este modo.')
+      return
+    }
+    try {
+      await appApi.receipts.printBatch()
+      setIngresosFeedback('Se genero el lote final de ROC para impresion (2 por hoja).')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo imprimir el lote de ROC.'
+      setIngresosFeedback(message)
+    }
+  }
+
+  const total = selectedConcepts.reduce((sum, concept) => sum + (conceptAmounts[concept.code] ?? concept.amount), 0)
 
   function handleSimulateSync() {
     clearPendingSyncOps()
     refreshSyncStatus()
-    setFeedback('Cola local de sincronizacion marcada como enviada.')
+    setSyncFeedback('Cola local de sincronizacion marcada como enviada.')
   }
 
   async function handleSyncNow() {
@@ -565,17 +833,59 @@ function App() {
       if (result.pulled > 0) {
         await loadData()
       }
-      setFeedback(result.message)
+      setSyncFeedback(result.message)
     } finally {
       setSyncing(false)
     }
   }
 
-  function handleQuickScroll(target: RefObject<HTMLElement | null>) {
-    setScreen('control-escolar')
-    setTimeout(() => {
-      target.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }, 0)
+  async function handleExportSep() {
+    if (typeof appApi.preRegistrations?.exportSep !== 'function') {
+      setControlFeedback('La exportacion SEP no esta disponible en este modo.')
+      return
+    }
+
+    try {
+      const result = await appApi.preRegistrations.exportSep({ status: 'VALIDADO_PARA_PAGO' })
+      setControlFeedback(`Exportacion SEP generada (${result.exportedCount} registros): ${result.outputPath}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo generar la exportacion SEP.'
+      setControlFeedback(message)
+    }
+  }
+
+  if (authLoading) {
+    return <div className="auth-shell"><p>Cargando sesion...</p></div>
+  }
+
+  if (!authSession) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleLogin}>
+          <p className="eyebrow">CBTA Financieros</p>
+          <h1>Iniciar sesion</h1>
+          <label className="form-field">
+            <span>Usuario</span>
+            <input
+              value={authForm.username}
+              onChange={(event) => setAuthForm((current) => ({ ...current, username: event.target.value }))}
+            />
+          </label>
+          <label className="form-field">
+            <span>Contrasena</span>
+            <input
+              type="password"
+              value={authForm.password}
+              onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))}
+            />
+          </label>
+          {authError ? <p className="feedback-banner">{authError}</p> : null}
+          <button className="primary-button" disabled={authSaving} type="submit">
+            {authSaving ? 'Ingresando...' : 'Entrar'}
+          </button>
+        </form>
+      </div>
+    )
   }
 
   return (
@@ -584,64 +894,68 @@ function App() {
         <div className="sidebar-brand">
           <div>
             <p className="eyebrow">CBTA Financieros</p>
-            <h1>Base inicial del MVP</h1>
-            <p className="muted">
-              Flujo compartido entre Control Escolar e Ingresos Propios para alumnos validados y
-              emision del ROC.
-            </p>
+            <h1>Operacion escolar</h1>
+            <p className="muted">Inscripciones, grupos y ROC oficial.</p>
           </div>
           <button className="sidebar-toggle" onClick={() => setIsSidebarCollapsed((current) => !current)} type="button">
             {isSidebarCollapsed ? 'Expandir' : 'Colapsar'}
           </button>
         </div>
 
+        <section className="panel compact">
+          <h2>Sesion</h2>
+          <p className="muted">{authSession.displayName}</p>
+          <p className="muted">{authSession.role}</p>
+          <button className="secondary-button small-button" onClick={() => void handleLogout()} type="button">
+            Cerrar sesion
+          </button>
+        </section>
+
         <nav className="nav">
-          <button
+          {canAccessScreen(authSession.role, 'control-escolar') ? <button
             className={screen === 'control-escolar' ? 'nav-item active' : 'nav-item'}
             data-short="CE"
             onClick={() => setScreen('control-escolar')}
           >
             <span>Control Escolar</span>
-          </button>
-          <button
+          </button> : null}
+          {canAccessScreen(authSession.role, 'ingresos-propios') ? <button
             className={screen === 'ingresos-propios' ? 'nav-item active' : 'nav-item'}
             data-short="IP"
             onClick={() => setScreen('ingresos-propios')}
           >
             <span>Ingresos Propios</span>
-          </button>
-          <button
+          </button> : null}
+          {canAccessScreen(authSession.role, 'configuracion') ? <button
             className={screen === 'configuracion' ? 'nav-item active' : 'nav-item'}
             data-short="CF"
             onClick={() => setScreen('configuracion')}
           >
             <span>Configuracion</span>
-          </button>
+          </button> : null}
         </nav>
 
         <section className="panel compact">
-          <h2>Recordatorios del proyecto</h2>
-          <ul className="plain-list">
-            <li>Operacion offline</li>
-            <li>ROC con plantilla oficial</li>
-            <li>Alumno validado antes del cobro</li>
-            <li>Conceptos por clave y tarifa vigente</li>
-          </ul>
+          <h2>Resumen rapido</h2>
+          <p className="muted">Ficha entregada: {students.filter((item) => item.statusLabel === 'Ficha entregada').length}</p>
+          <p className="muted">Sin grupo: {students.filter((item) => !item.groupLabel).length}</p>
+          <p className="muted">No presentados: {students.filter((item) => item.statusLabel === 'No presentado').length}</p>
+          <p className="muted">Pagos pendientes: {admissions.filter((item) => item.status === 'PAGADO_PENDIENTE_CAPTURA').length}</p>
         </section>
 
         <section className="panel compact">
           <h2>Sincronizacion</h2>
           <p className="muted">Estado: {isOnline ? 'Online' : 'Offline'}</p>
           <p className="muted">Pendientes locales: {syncStatus.pendingTotal}</p>
-          <p className="muted">STUDENT_CREATE: {syncStatus.pendingByType.STUDENT_CREATE}</p>
-          <p className="muted">STUDENT_UPDATE: {syncStatus.pendingByType.STUDENT_UPDATE}</p>
-          <p className="muted">RECEIPT_CREATE: {syncStatus.pendingByType.RECEIPT_CREATE}</p>
-          <p className="muted">RECEIPT_REPRINT: {syncStatus.pendingByType.RECEIPT_REPRINT}</p>
           <p className="muted">
             Ultimo sync exitoso:{' '}
             {syncStatus.lastSuccessfulSyncAt ? new Date(syncStatus.lastSuccessfulSyncAt).toLocaleString() : 'Sin registro'}
           </p>
+          {feedbackByScope.sync ? <p className="muted">Mensaje: {feedbackByScope.sync}</p> : null}
           {syncStatus.lastSyncError ? <p className="muted">Ultimo error: {syncStatus.lastSyncError}</p> : null}
+          {syncStatus.lastSyncErrorState ? (
+            <p className="muted">Error reintentable: {syncStatus.lastSyncErrorState.retryable ? 'Si' : 'No'}</p>
+          ) : null}
           <button className="primary-button small-button" disabled={syncing} onClick={() => void handleSyncNow()} type="button">
             {syncing ? 'Sincronizando...' : 'Sincronizar ahora'}
           </button>
@@ -652,30 +966,20 @@ function App() {
       </aside>
 
       <main className="content">
-        <section className="metrics-grid">
-        {[
-          { label: 'Alumnos validados', value: String(students.length), note: 'Disponibles para cobro en este ciclo.' },
-          { label: 'Claves activas', value: String(concepts.length), note: 'Catalogo listo para ROC.' },
-          { label: 'Modo operativo', value: 'Offline', note: 'SQLite local con Prisma y Electron.' },
-        ].map((metric) => (
-            <article className="metric-card" key={metric.label}>
-              <p className="metric-label">{metric.label}</p>
-              <strong>{metric.value}</strong>
-              <span>{metric.note}</span>
-            </article>
-          ))}
+        <section className="panel compact">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Panel operativo</p>
+              <h2>{screen === 'control-escolar' ? 'Control Escolar' : screen === 'ingresos-propios' ? 'Ingresos Propios' : 'Configuracion'}</h2>
+            </div>
+            <span className="status-tag">{isOnline ? 'Online' : 'Offline'}</span>
+          </div>
+          <div className="button-row">
+            <span className="chip">Alumnos validados: {validatedStudents.length}</span>
+            <span className="chip">Claves activas: {concepts.length}</span>
+            <span className="chip">Sync pendientes: {syncStatus.pendingTotal}</span>
+          </div>
         </section>
-
-        {screen === 'control-escolar' ? (
-          <section className="quick-actions">
-            <button className="quick-action" onClick={() => handleQuickScroll(studentsSectionRef)} type="button">
-              Alumnos registrados
-            </button>
-            <button className="quick-action" onClick={() => handleQuickScroll(captureSectionRef)} type="button">
-              Captura de alumno
-            </button>
-          </section>
-        ) : null}
 
         {isBrowserMode ? (
           <p className="feedback-banner">
@@ -690,6 +994,9 @@ function App() {
             form={form}
             students={students}
             preRegistrations={preRegistrations}
+            admissions={admissions}
+            captureQuery={captureQuery}
+            activeAdmission={activeAdmission}
             editingStudentId={editingStudentId}
             saving={saving}
             studentsSectionRef={studentsSectionRef}
@@ -699,6 +1006,9 @@ function App() {
             onUpdatePreRegistrationStatus={handleUpdatePreRegistrationStatus}
             onSubmit={handleSubmit}
             onUpdateField={updateField}
+            onSelectAdmissionForCapture={handleSelectAdmissionForCapture}
+            onUpdateCaptureQuery={setCaptureQuery}
+            onExportSep={handleExportSep}
           />
         ) : screen === 'ingresos-propios' ? (
           <IngresosPropiosOverview
@@ -709,17 +1019,26 @@ function App() {
             rocNumber={rocNumber}
             savingReceipt={savingReceipt}
             selectedConcepts={selectedConcepts}
+            admissions={admissions}
+            paymentForm={paymentForm}
             selectedStudent={selectedStudent}
             students={validatedStudents}
             total={total}
+            conceptAmounts={conceptAmounts}
             conceptQuery={conceptQuery}
             onChangeRocNumber={setRocNumber}
             onCreateReceipt={handleCreateReceipt}
             onChangeConceptQuery={setConceptQuery}
             onPrintReceipt={handlePrintReceipt}
+            onPrintBatchReceipts={handlePrintBatchReceipts}
             onReprintReceipt={handleReprintReceipt}
             onSelectStudent={setSelectedStudent}
             onToggleConcept={toggleConcept}
+            onUpdateConceptAmount={updateConceptAmount}
+            onPrintAdmission={handlePrintAdmission}
+            onPrintPaymentReceipt={printPaymentReceipt}
+            onCreatePayment={handleCreatePayment}
+            onUpdatePaymentField={(field, value) => setPaymentForm((current) => ({ ...current, [field]: value }))}
           />
         ) : (
           <ConfiguracionTarifasOverview
@@ -728,28 +1047,6 @@ function App() {
             onUpdateTariff={handleUpdateTariff}
           />
         )}
-
-        <section className="panel two-columns">
-          <div>
-            <h2>Campos principales de Control Escolar</h2>
-            <div className="chips">
-              {controlEscolarFields.map((field) => (
-                <span className="chip" key={field}>
-                  {field}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <h2>Decisiones tecnicas aplicadas</h2>
-            <ul className="plain-list">
-              <li>Electron + React + TypeScript para escritorio offline.</li>
-              <li>Prisma + SQLite para persistencia local inicial.</li>
-              <li>Modelo preparado para ROC, tarifas, plantillas y bitacora.</li>
-            </ul>
-          </div>
-        </section>
 
         <section className="panel">
           <div className="section-header">
@@ -910,6 +1207,9 @@ type ControlEscolarProps = {
   form: StudentFormInput
   students: StudentSummary[]
   preRegistrations: PreRegistrationSummary[]
+  admissions: AdmissionSummary[]
+  captureQuery: string
+  activeAdmission: AdmissionSummary | null
   editingStudentId: string | null
   saving: boolean
   feedback: string | null
@@ -919,16 +1219,22 @@ type ControlEscolarProps = {
   onEditStudent: (studentId: string) => Promise<void>
   onUpdatePreRegistrationStatus: (
     preRegistrationId: string,
-    status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
+    status: PreRegistrationStatusUpdate,
   ) => Promise<void>
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>
   onUpdateField: <K extends keyof StudentFormInput>(field: K, value: StudentFormInput[K]) => void
+  onSelectAdmissionForCapture: (admission: AdmissionSummary) => Promise<void>
+  onUpdateCaptureQuery: (value: string) => void
+  onExportSep: () => Promise<void>
 }
 
 function ControlEscolarOverview({
   form,
   students,
   preRegistrations,
+  admissions,
+  captureQuery,
+  activeAdmission,
   editingStudentId,
   saving,
   feedback,
@@ -939,12 +1245,28 @@ function ControlEscolarOverview({
   onUpdatePreRegistrationStatus,
   onSubmit,
   onUpdateField,
+  onSelectAdmissionForCapture,
+  onUpdateCaptureQuery,
+  onExportSep,
 }: ControlEscolarProps) {
+  const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas')
+  const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'alumnos'>('alumnos')
   const [studentQuery, setStudentQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [studentPage, setStudentPage] = useState(1)
   const [expandedStudentId, setExpandedStudentId] = useState<string | null>(null)
   const [selectedPreRegistrationId, setSelectedPreRegistrationId] = useState<string | null>(null)
+  const [groupStats, setGroupStats] = useState<GroupStat[]>([])
+  const [groupPreviewRows, setGroupPreviewRows] = useState<GroupPreviewRow[]>([])
+  const [isPreviewStats, setIsPreviewStats] = useState(false)
+  const [previewGroupFilter, setPreviewGroupFilter] = useState('all')
+  const [previewSexFilter, setPreviewSexFilter] = useState('all')
+  const [previewPage, setPreviewPage] = useState(1)
+  const [moveStudentId, setMoveStudentId] = useState('')
+  const [moveGroupId, setMoveGroupId] = useState('')
+  const [moveReason, setMoveReason] = useState('')
+  const [noShowStudentId, setNoShowStudentId] = useState('')
+  const [noShowReason, setNoShowReason] = useState('')
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
   const filteredStudents = students.filter((student) => {
     const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
@@ -969,6 +1291,10 @@ function ControlEscolarOverview({
   }, [studentPage, totalStudentPages])
 
   useEffect(() => {
+    setPreviewPage(1)
+  }, [previewGroupFilter, previewSexFilter, groupPreviewRows.length])
+
+  useEffect(() => {
     if (preRegistrations.length > 0 && !selectedPreRegistrationId) {
       setSelectedPreRegistrationId(preRegistrations[0].id)
     }
@@ -977,89 +1303,296 @@ function ControlEscolarOverview({
   const selectedPreRegistration =
     preRegistrations.find((item) => item.id === selectedPreRegistrationId) ?? preRegistrations[0] ?? null
 
+  const normalizedCaptureQuery = captureQuery.trim().toLowerCase()
+  const filteredAdmissions = admissions.filter((item) => {
+    if (!normalizedCaptureQuery) return true
+    const haystack = `${item.folio} ${item.curp} ${item.fullName}`.toLowerCase()
+    return haystack.includes(normalizedCaptureQuery)
+  })
+  const previewGroups = Array.from(new Set(groupPreviewRows.map((row) => row.groupLabel))).sort((a, b) => a.localeCompare(b))
+  const filteredPreviewRows = groupPreviewRows.filter((row) => {
+    const matchesGroup = previewGroupFilter === 'all' || row.groupLabel === previewGroupFilter
+    const normalizedSex = row.sex.trim().toUpperCase()
+    const matchesSex =
+      previewSexFilter === 'all' ||
+      (previewSexFilter === 'H' && normalizedSex.startsWith('H')) ||
+      (previewSexFilter === 'M' && (normalizedSex.startsWith('M') || normalizedSex.startsWith('F')))
+    return matchesGroup && matchesSex
+  })
+  const previewTotalPages = Math.max(1, Math.ceil(filteredPreviewRows.length / 20))
+  const paginatedPreviewRows = filteredPreviewRows.slice((previewPage - 1) * 20, previewPage * 20)
+
+  useEffect(() => {
+    if (previewPage > previewTotalPages) {
+      setPreviewPage(previewTotalPages)
+    }
+  }, [previewPage, previewTotalPages])
+
+  async function handleSelectAdmissionRow(admission: AdmissionSummary) {
+    await onSelectAdmissionForCapture(admission)
+    setCaptureTab('formulario')
+    setTimeout(() => {
+      captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
+  }
+
+  async function handleStartEditStudent(studentId: string) {
+    await onEditStudent(studentId)
+    setCaptureTab('formulario')
+    setTimeout(() => {
+      captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
+  }
+
+  async function refreshGroupStats() {
+    if (!window.cbta?.groups?.stats) return
+    const stats = await window.cbta.groups.stats({ schoolCycle: form.schoolCycle })
+    setGroupStats(stats)
+  }
+
+  async function handleAutoAssign() {
+    if (!window.cbta?.groups?.autoAssign) return
+    await window.cbta.groups.autoAssign({ schoolCycle: form.schoolCycle })
+    setIsPreviewStats(false)
+    setGroupPreviewRows([])
+    setPreviewGroupFilter('all')
+    setPreviewSexFilter('all')
+    await refreshGroupStats()
+  }
+
+  async function handlePreviewAssign() {
+    if (!window.cbta?.groups?.preview) return
+    const stats = await window.cbta.groups.preview({ schoolCycle: form.schoolCycle })
+    setGroupStats(stats)
+    if (window.cbta?.groups?.previewRoster) {
+      const rows = await window.cbta.groups.previewRoster({ schoolCycle: form.schoolCycle })
+      setGroupPreviewRows(rows)
+    }
+    setIsPreviewStats(true)
+  }
+
+  async function handleConfirmGroups() {
+    if (!window.cbta?.groups?.confirmAssignment) return
+    await window.cbta.groups.confirmAssignment({ schoolCycle: form.schoolCycle })
+    await refreshGroupStats()
+  }
+
+  async function handleManualMove() {
+    if (!window.cbta?.groups?.manualReassign || !moveStudentId || !moveGroupId) return
+    await window.cbta.groups.manualReassign({ studentId: moveStudentId, toGroupId: moveGroupId, reason: moveReason || 'Ajuste operativo' })
+    await refreshGroupStats()
+  }
+
+  async function handleNoShow() {
+    if (!window.cbta?.groups?.markNoShow || !noShowStudentId) return
+    await window.cbta.groups.markNoShow({ studentId: noShowStudentId, reason: noShowReason || 'No se presento a inscripcion' })
+    await refreshGroupStats()
+  }
+
+  useEffect(() => {
+    void refreshGroupStats()
+  }, [form.schoolCycle])
+
   return (
     <>
+      {captureTab === 'fichas' ? (
+      <>
+      <section className="panel compact">
+        <div className="button-row">
+          <button
+            className={operationsTab === 'captura' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('captura')}
+            type="button"
+          >
+            Fichas
+          </button>
+          <button
+            className={operationsTab === 'bandeja' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('bandeja')}
+            type="button"
+          >
+            Bandeja
+          </button>
+          <button
+            className={operationsTab === 'grupos' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('grupos')}
+            type="button"
+          >
+            Asignacion
+          </button>
+          <button
+            className={operationsTab === 'alumnos' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('alumnos')}
+            type="button"
+          >
+            Alumnos
+          </button>
+        </div>
+      </section>
+
+      {operationsTab === 'captura' ? (
       <section className="panel">
         <div className="section-header">
           <div>
             <p className="eyebrow">Control Escolar</p>
-            <h2>Bandeja de pre-registro</h2>
+            <h2>Captura de fichas</h2>
           </div>
-          <span className="status-tag">{preRegistrations.length} folios</span>
+          <span className="status-tag">Seleccion en tiempo real</span>
         </div>
-        {preRegistrations.length === 0 ? <p className="empty-state">Todavia no hay pre-registros recibidos.</p> : null}
-        {preRegistrations.length > 0 ? (
-          <div className="student-table-wrap">
-            <table className="student-table">
-              <thead>
-                <tr>
-                  <th>Folio</th>
-                  <th>Alumno</th>
-                  <th>CURP</th>
-                  <th>Estatus</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {preRegistrations.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.folio}</td>
-                    <td>{item.fullName}</td>
-                    <td>{item.curp}</td>
-                    <td>{item.status}</td>
-                    <td>
-                      <div className="table-actions">
-                        <button className="secondary-button small-button" onClick={() => setSelectedPreRegistrationId(item.id)} type="button">
-                          Voucher
-                        </button>
-                        <button
-                          className="secondary-button small-button"
-                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'EN_REVISION_CONTROL_ESCOLAR')}
-                          type="button"
-                        >
-                          Revisar
-                        </button>
-                        <button
-                          className="secondary-button small-button"
-                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'OBSERVADO')}
-                          type="button"
-                        >
-                          Observar
-                        </button>
-                        <button
-                          className="primary-button small-button"
-                          onClick={() => void onUpdatePreRegistrationStatus(item.id, 'VALIDADO_PARA_PAGO')}
-                          type="button"
-                        >
-                          Aprobar
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="student-search-row">
+          <Field className="span-2" label="Buscar pago">
+            <input placeholder="Folio o CURP" value={captureQuery} onChange={(event) => onUpdateCaptureQuery(event.target.value)} />
+          </Field>
+        </div>
+        {activeAdmission ? (
+          <p className="feedback-banner">
+            Captura activa para folio {activeAdmission.folio} ({activeAdmission.curp}) - estatus {activeAdmission.status}
+          </p>
         ) : null}
 
-        {selectedPreRegistration ? (
-          <article className="receipt-preview" id="pre-registration-voucher">
-            <div className="section-header">
-              <h3>Voucher de pre-registro</h3>
-              <button className="secondary-button small-button" onClick={() => window.print()} type="button">
-                Imprimir voucher
-              </button>
-            </div>
-            <p><strong>Folio:</strong> {selectedPreRegistration.folio}</p>
-            <p><strong>Alumno:</strong> {selectedPreRegistration.fullName}</p>
-            <p><strong>CURP:</strong> {selectedPreRegistration.curp}</p>
-            <p><strong>Fecha envio:</strong> {new Date(selectedPreRegistration.submittedAt).toLocaleString('es-MX')}</p>
-            <p><strong>Estatus:</strong> {selectedPreRegistration.status}</p>
-            <p>Presentar este voucher en Control Escolar para continuar el proceso.</p>
-          </article>
-        ) : null}
+        <AdmissionCaptureTable
+          activeAdmissionId={activeAdmission?.id ?? null}
+          admissions={filteredAdmissions}
+          onSelect={handleSelectAdmissionRow}
+        />
+        {filteredAdmissions.length === 0 ? <p className="empty-state">No hay pagos que coincidan con la busqueda.</p> : null}
       </section>
+      ) : null}
 
+      {operationsTab === 'bandeja' ? (
+      <PreRegistrationInboxPanel
+        onExportSep={onExportSep}
+        onSelectPreRegistration={setSelectedPreRegistrationId}
+        onUpdateStatus={onUpdatePreRegistrationStatus}
+        preRegistrations={preRegistrations}
+        selectedPreRegistration={selectedPreRegistration}
+      />
+      ) : null}
+
+      {operationsTab === 'grupos' ? (
+      <section className="panel">
+        <div className="section-header">
+          <div><p className="eyebrow">Control Escolar</p><h2>Asignacion de grupos</h2></div>
+          <span className="status-tag">{isPreviewStats ? 'Vista previa' : 'Nuevo ingreso MATUTINO'}</span>
+        </div>
+        <div className="button-row">
+          <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
+          <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
+          <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
+        </div>
+        {isPreviewStats ? <p className="table-summary">Previsualizacion calculada sin guardar cambios.</p> : null}
+        <div className="student-table-wrap">
+          <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>
+            {groupStats.map((stat) => <tr key={stat.groupId}><td>{stat.label}</td><td>{stat.assignedCount}</td><td>{stat.capacity}</td><td>{stat.bands.alto}</td><td>{stat.bands.medio}</td><td>{stat.bands.bajo}</td><td>{stat.sex.hombre}</td><td>{stat.sex.mujer}</td><td>{groupSexBalanceLabel(stat)}</td><td>{groupBandBalanceLabel(stat)}</td></tr>)}
+          </tbody></table>
+        </div>
+        {isPreviewStats && groupPreviewRows.length > 0 ? (
+          <>
+            <p className="table-summary">Listado preliminar por grupo (sin confirmar).</p>
+            <div className="student-search-row">
+              <Field label="Grupo">
+                <select className="group-select" value={previewGroupFilter} onChange={(event) => setPreviewGroupFilter(event.target.value)}>
+                  <option value="all">Todos</option>
+                  {previewGroups.map((group) => (
+                    <option key={group} value={group}>{group}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Sexo">
+                <select className="group-select" value={previewSexFilter} onChange={(event) => setPreviewSexFilter(event.target.value)}>
+                  <option value="all">Todos</option>
+                  <option value="H">Hombre</option>
+                  <option value="M">Mujer</option>
+                </select>
+              </Field>
+            </div>
+            <div className="student-table-wrap">
+              <table className="student-table">
+                <thead>
+                  <tr>
+                    <th>Grupo</th>
+                    <th>Matricula</th>
+                    <th>Alumno</th>
+                    <th>CURP</th>
+                    <th>Sexo</th>
+                    <th>Promedio</th>
+                    <th>Banda</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedPreviewRows.map((row) => (
+                    <tr key={`${row.groupLabel}-${row.enrollmentNumber}`}>
+                      <td>{row.groupLabel}</td>
+                      <td>{row.enrollmentNumber}</td>
+                      <td>{row.fullName}</td>
+                      <td>{row.curp}</td>
+                      <td>{row.sex}</td>
+                      <td>{row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1)}</td>
+                      <td>{row.averageBand.toUpperCase()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {filteredPreviewRows.length > 20 ? (
+              <div className="pagination-row">
+                <button
+                  className="secondary-button small-button"
+                  disabled={previewPage === 1}
+                  onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}
+                  type="button"
+                >
+                  Anterior
+                </button>
+                <span>Pagina {previewPage} de {previewTotalPages}</span>
+                <button
+                  className="secondary-button small-button"
+                  disabled={previewPage === previewTotalPages}
+                  onClick={() => setPreviewPage((page) => Math.min(previewTotalPages, page + 1))}
+                  type="button"
+                >
+                  Siguiente
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        <div className="form-grid">
+          <Field label="Alumno para mover">
+            <select className="group-select" value={moveStudentId} onChange={(event) => setMoveStudentId(event.target.value)}>
+              <option value="">Selecciona alumno</option>
+              {students.map((student) => (
+                <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Grupo destino">
+            <select className="group-select" value={moveGroupId} onChange={(event) => setMoveGroupId(event.target.value)}>
+              <option value="">Selecciona grupo</option>
+              {groupStats.map((group) => (
+                <option key={group.groupId} value={group.groupId}>{group.label} (cupo {group.assignedCount}/{group.capacity})</option>
+              ))}
+            </select>
+          </Field>
+          <Field className="span-2" label="Motivo"><input value={moveReason} onChange={(event) => setMoveReason(event.target.value)} placeholder="Motivo de reasignacion" /></Field>
+          <button className="secondary-button small-button" onClick={() => void handleManualMove()} type="button">Reasignar manual</button>
+        </div>
+        <div className="form-grid">
+          <Field label="Alumno no-show">
+            <select className="group-select" value={noShowStudentId} onChange={(event) => setNoShowStudentId(event.target.value)}>
+              <option value="">Selecciona alumno</option>
+              {students.map((student) => (
+                <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
+              ))}
+            </select>
+          </Field>
+          <Field className="span-2" label="Motivo no-show"><input value={noShowReason} onChange={(event) => setNoShowReason(event.target.value)} placeholder="No se presento" /></Field>
+          <button className="secondary-button small-button" onClick={() => void handleNoShow()} type="button">Marcar no-show</button>
+        </div>
+      </section>
+      ) : null}
+
+      {operationsTab === 'alumnos' ? (
       <section className="panel" ref={studentsSectionRef}>
         <div className="section-header">
           <div>
@@ -1083,10 +1616,12 @@ function ControlEscolarOverview({
             <Field label="Estatus">
               <select className="group-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                 <option value="all">Todos</option>
-                <option value="CAPTURADO">Capturado</option>
-                <option value="VALIDADO">Validado</option>
-                <option value="LISTO_PARA_COBRO">Listo para cobro</option>
-                <option value="COBRADO">Cobrado</option>
+                <option value="Ficha entregada">Ficha entregada</option>
+                <option value="Inscrito">Inscrito</option>
+                <option value="Baja temporal">Baja temporal</option>
+                <option value="Baja definitiva">Baja definitiva</option>
+                <option value="Portabilidad">Portabilidad</option>
+                <option value="Recursador">Recursador</option>
               </select>
             </Field>
           </div>
@@ -1106,6 +1641,9 @@ function ControlEscolarOverview({
                   <th>Matricula</th>
                   <th>Alumno</th>
                   <th>CURP</th>
+                  <th>Grado</th>
+                  <th>Grupo</th>
+                  <th>Estatus</th>
                   <th></th>
                 </tr>
               </thead>
@@ -1137,6 +1675,9 @@ function ControlEscolarOverview({
                         </td>
                         <td>{student.fullName}</td>
                         <td>{student.curp}</td>
+                        <td>{deriveGradeFromGroup(student.groupLabel)}</td>
+                        <td>{student.groupLabel ?? 'Sin asignar'}</td>
+                        <td>{student.statusLabel}</td>
                         <td className="student-actions-cell">
                           <button
                             className="secondary-button small-button"
@@ -1144,7 +1685,7 @@ function ControlEscolarOverview({
                               event.stopPropagation()
                               event.preventDefault()
                               setExpandedStudentId(null)
-                              void onEditStudent(student.id)
+                              void handleStartEditStudent(student.id)
                             }}
                             type="button"
                           >
@@ -1154,7 +1695,7 @@ function ControlEscolarOverview({
                       </tr>
                       {expanded ? (
                         <tr className="student-detail-row">
-                          <td colSpan={4}>
+                          <td colSpan={7}>
                             <div className="student-detail-grid">
                               <div>
                                 <span className="detail-label">Telefono</span>
@@ -1208,195 +1749,35 @@ function ControlEscolarOverview({
           <p className="empty-state">No hay alumnos que coincidan con la busqueda actual.</p>
         ) : null}
       </section>
+      ) : null}
 
-      <section className="panel" ref={captureSectionRef}>
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Modulo 1</p>
-            <h2>Captura y validacion del alumno</h2>
-          </div>
-          <span className="status-tag">{editingStudentId ? 'Edicion activa' : 'Captura real activa'}</span>
-        </div>
+      </>
+      ) : null}
 
-        <form className="student-form" onSubmit={(event) => void onSubmit(event)}>
-          <div className="form-grid">
-            <Field label="Matricula" required>
-              <input value={form.enrollmentNumber} onChange={(event) => onUpdateField('enrollmentNumber', event.target.value)} />
-            </Field>
-            <Field label="CURP" required>
-              <input maxLength={18} value={form.curp} onChange={(event) => onUpdateField('curp', event.target.value.toUpperCase())} />
-            </Field>
-            <Field label="RFC opcional">
-              <input value={form.rfc} onChange={(event) => onUpdateField('rfc', event.target.value.toUpperCase())} />
-            </Field>
-            <Field label="Ciclo escolar" required>
-              <input value={form.schoolCycle} onChange={(event) => onUpdateField('schoolCycle', event.target.value)} />
-            </Field>
-          <Field label="Nombre(s)" required>
-            <input value={form.firstName} onChange={(event) => onUpdateField('firstName', event.target.value)} />
-          </Field>
-          <Field label="Apellido paterno" required>
-            <input value={form.paternalLastName} onChange={(event) => onUpdateField('paternalLastName', event.target.value)} />
-          </Field>
-          <Field label="Apellido materno" required>
-            <input value={form.maternalLastName} onChange={(event) => onUpdateField('maternalLastName', event.target.value)} />
-          </Field>
-          <Field label="Fecha de nacimiento">
-            <input type="date" value={form.birthDate} onChange={(event) => onUpdateField('birthDate', event.target.value)} />
-          </Field>
-          <Field label="Edad">
-            <input
-              type="number"
-              min="0"
-              max="120"
-              inputMode="numeric"
-              value={form.age ?? ''}
-              onChange={(event) => onUpdateField('age', event.target.value ? Number(event.target.value) : null)}
-            />
-          </Field>
-          <Field label="Sexo">
-            <select value={form.sex} onChange={(event) => onUpdateField('sex', event.target.value)}>
-              <option value="">Selecciona</option>
-              {sexOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Telefono alumno">
-            <input inputMode="numeric" type="tel" value={form.phone} onChange={(event) => onUpdateField('phone', event.target.value)} />
-          </Field>
-          <Field label="Correo alumno">
-            <input type="email" value={form.email} onChange={(event) => onUpdateField('email', event.target.value)} />
-          </Field>
-          <Field className="span-2" label="Domicilio" required>
-            <input value={form.addressLine} onChange={(event) => onUpdateField('addressLine', event.target.value)} />
-          </Field>
-          <Field label="Colonia">
-            <select value={form.neighborhood} onChange={(event) => onUpdateField('neighborhood', event.target.value)}>
-              <option value="">Selecciona</option>
-              <option value="12 de Diciembre">12 de Diciembre</option>
-              <option value="Agua Fria">Agua Fria</option>
-              <option value="Amado Nervo">Amado Nervo</option>
-              <option value="Belen Ajkabalna">Belen Ajkabalna</option>
-              <option value="Belisario Dominguez">Belisario Dominguez</option>
-              <option value="Chitaltic">Chitaltic</option>
-              <option value="Chul-Ha">Chul-Ha</option>
-              <option value="Efigenia Chapoy">Efigenia Chapoy</option>
-              <option value="El Azufre">El Azufre</option>
-              <option value="El Bosque">El Bosque</option>
-              <option value="El Campo">El Campo</option>
-              <option value="Flamboyan">Flamboyan</option>
-              <option value="Flores">Flores</option>
-              <option value="Jardines">Jardines</option>
-              <option value="Jonuta">Jonuta</option>
-              <option value="La Belleza">La Belleza</option>
-              <option value="La Cadelaria">La Cadelaria</option>
-              <option value="Lazaro Cardenas">Lazaro Cardenas</option>
-              <option value="Linda Vista 1a. Seccion">Linda Vista 1a. Seccion</option>
-              <option value="Loma Bonita">Loma Bonita</option>
-              <option value="Los Tulipanes">Los Tulipanes</option>
-              <option value="Saclumil Rosario II">Saclumil Rosario II</option>
-              <option value="San Antonio">San Antonio</option>
-              <option value="San Jose Bunslac">San Jose Bunslac</option>
-              <option value="San Jose el Mirador">San Jose el Mirador</option>
-              <option value="San Luis">San Luis</option>
-              <option value="San Martin">San Martin</option>
-              <option value="San Miguel">San Miguel</option>
-              <option value="Santa Elena">Santa Elena</option>
-              <option value="Santa Teresita">Santa Teresita</option>
-              <option value="San Vicente">San Vicente</option>
-              <option value="Vista Alegre">Vista Alegre</option>
-              <option value="Yajalon Centro">Yajalon Centro</option>
-            </select>
-          </Field>
-          <Field label="Localidad">
-            <input value={form.locality} onChange={(event) => onUpdateField('locality', event.target.value)} />
-          </Field>
-          <Field label="Municipio">
-            <input value={form.municipality} onChange={(event) => onUpdateField('municipality', event.target.value)} readOnly />
-          </Field>
-          <Field label="Estado">
-            <input value={form.state} onChange={(event) => onUpdateField('state', event.target.value)} readOnly />
-          </Field>
-          <Field label="Codigo postal">
-            <input
-              inputMode="numeric"
-              maxLength={5}
-              value={form.postalCode}
-              onChange={(event) => onUpdateField('postalCode', event.target.value)}
-              readOnly
-            />
-          </Field>
-          <Field label="Escuela de procedencia">
-            <input value={form.previousSchool} onChange={(event) => onUpdateField('previousSchool', event.target.value)} />
-          </Field>
-          <Field label="Promedio secundaria">
-            <input
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              inputMode="decimal"
-              value={form.secondaryAverage ?? ''}
-              onChange={(event) => onUpdateField('secondaryAverage', event.target.value ? Number(event.target.value) : null)}
-            />
-          </Field>
-          <Field label="Estatus academico">
-            <input value={form.academicStatus} onChange={(event) => onUpdateField('academicStatus', event.target.value)} />
-          </Field>
-          <Field className="span-2" label="Tutor" required>
-            <input value={form.guardianFullName} onChange={(event) => onUpdateField('guardianFullName', event.target.value)} />
-          </Field>
-          <Field label="Parentesco">
-            <select value={form.guardianRelationship} onChange={(event) => onUpdateField('guardianRelationship', event.target.value)}>
-              <option value="">Selecciona</option>
-              {relationshipOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Telefono tutor" required>
-            <input
-              inputMode="numeric"
-              type="tel"
-              value={form.guardianPhone}
-              onChange={(event) => onUpdateField('guardianPhone', event.target.value)}
-            />
-          </Field>
-          <Field label="Correo tutor">
-            <input type="email" value={form.guardianEmail} onChange={(event) => onUpdateField('guardianEmail', event.target.value)} />
-          </Field>
-        </div>
-
-        <label className="checkbox-row">
-          <input checked={form.validateNow} type="checkbox" onChange={(event) => onUpdateField('validateNow', event.target.checked)} />
-          Guardar alumno ya validado y listo para cobro
-        </label>
-
-        {feedback ? <p className="feedback-banner">{feedback}</p> : null}
-
-        <div className="form-actions control-actions">
-          {editingStudentId ? (
-            <button className="secondary-button" onClick={onCancelEdit} type="button">
-              Cancelar edicion
-            </button>
-          ) : null}
-          <button className="primary-button" disabled={saving} type="submit">
-            {saving ? 'Guardando...' : editingStudentId ? 'Actualizar alumno' : 'Guardar alumno'}
-          </button>
-          </div>
-        </form>
-      </section>
+      {captureTab === 'formulario' ? (
+      <StudentCaptureFormPanel
+        FieldComponent={Field}
+        activeAdmission={activeAdmission}
+        captureSectionRef={captureSectionRef}
+        editingStudentId={editingStudentId}
+        feedback={feedback}
+        form={form}
+        onBackToFichas={() => setCaptureTab('fichas')}
+        onCancelEdit={onCancelEdit}
+        onSubmit={onSubmit}
+        onUpdateField={onUpdateField}
+        relationshipOptions={relationshipOptions}
+        saving={saving}
+      />
+      ) : null}
     </>
   )
 }
 
 type IngresosProps = {
   students: StudentSummary[]
+  admissions: AdmissionSummary[]
+  paymentForm: AdmissionCreatePaymentInput
   selectedStudent: StudentSummary | null
   concepts: ChargeConceptSummary[]
   selectedConcepts: ChargeConceptSummary[]
@@ -1407,17 +1788,26 @@ type IngresosProps = {
   savingReceipt: boolean
   loading: boolean
   total: number
+  conceptAmounts: Record<string, number>
   onChangeConceptQuery: (value: string) => void
   onChangeRocNumber: (value: string) => void
   onCreateReceipt: () => Promise<void>
-  onPrintReceipt: () => void
+  onPrintReceipt: () => Promise<void>
+  onPrintBatchReceipts: () => Promise<void>
   onReprintReceipt: (receiptId: string) => Promise<void>
   onSelectStudent: (student: StudentSummary) => void
   onToggleConcept: (concept: ChargeConceptSummary) => void
+  onUpdateConceptAmount: (code: string, amount: number) => void
+  onPrintAdmission: (admission: AdmissionSummary) => Promise<void>
+  onPrintPaymentReceipt: (admission: AdmissionSummary) => Promise<void>
+  onCreatePayment: (event: FormEvent<HTMLFormElement>) => Promise<void>
+  onUpdatePaymentField: <K extends keyof AdmissionCreatePaymentInput>(field: K, value: AdmissionCreatePaymentInput[K]) => void
 }
 
 function IngresosPropiosOverview({
   students,
+  admissions,
+  paymentForm,
   selectedStudent,
   concepts,
   selectedConcepts,
@@ -1428,24 +1818,32 @@ function IngresosPropiosOverview({
   savingReceipt,
   loading,
   total,
+  conceptAmounts,
   onChangeConceptQuery,
   onChangeRocNumber,
   onCreateReceipt,
   onPrintReceipt,
+  onPrintBatchReceipts,
   onReprintReceipt,
   onSelectStudent,
   onToggleConcept,
+  onUpdateConceptAmount,
+  onPrintAdmission,
+  onPrintPaymentReceipt,
+  onCreatePayment,
+  onUpdatePaymentField,
 }: IngresosProps) {
+  const [operationsTab, setOperationsTab] = useState<'pagos' | 'inscripcion-roc' | 'fichas' | 'historial'>('inscripcion-roc')
   const printedAt = new Date()
   const amountInWords = amountToWords(total)
   const normalizedQuery = conceptQuery.trim().toLowerCase()
-  const groupedConcepts = groupConcepts(concepts, '')
-  const searchResults = normalizedQuery
-    ? concepts.filter(isSelectableConcept).filter((concept) => {
+  const paymentConcepts = concepts.filter(isSelectableConcept)
+  const filteredPaymentConcepts = normalizedQuery
+    ? paymentConcepts.filter((concept) => {
         const haystack = [concept.code, concept.name, concept.description ?? ''].join(' ').toLowerCase()
         return haystack.includes(normalizedQuery)
       })
-    : []
+    : paymentConcepts
   const [studentQuery, setStudentQuery] = useState('')
   const [studentPage, setStudentPage] = useState(1)
   const [receiptPage, setReceiptPage] = useState(1)
@@ -1584,13 +1982,75 @@ function IngresosPropiosOverview({
 
   return (
     <section className="roc-layout">
+      <article className="panel compact" style={{ gridColumn: '1 / -1' }}>
+        <div className="button-row">
+          <button
+            className={operationsTab === 'pagos' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('pagos')}
+            type="button"
+          >
+            Pago ficha
+          </button>
+          <button
+            className={operationsTab === 'inscripcion-roc' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('inscripcion-roc')}
+            type="button"
+          >
+            Pagos
+          </button>
+          <button
+            className={operationsTab === 'fichas' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('fichas')}
+            type="button"
+          >
+            Fichas
+          </button>
+          <button
+            className={operationsTab === 'historial' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('historial')}
+            type="button"
+          >
+            Historial
+          </button>
+        </div>
+      </article>
+
+      {operationsTab === 'pagos' ? (
       <article className="panel">
         <div className="section-header">
           <div>
-            <p className="eyebrow">Modulo 2</p>
-            <h2>Seleccion de alumno validado</h2>
+            <p className="eyebrow">Financieros</p>
+            <h2>Pago de ficha e impresion de recibo</h2>
           </div>
-          <span className="status-tag">Prerelleno de ROC</span>
+          <span className="status-tag">Paso 1 obligatorio</span>
+        </div>
+        <form className="student-form" onSubmit={(event) => void onCreatePayment(event)}>
+          <div className="form-grid">
+            <Field label="CURP" required>
+              <input maxLength={18} value={paymentForm.curp} onChange={(event) => onUpdatePaymentField('curp', event.target.value.toUpperCase())} />
+            </Field>
+            <Field className="span-2" label="Nombre completo" required>
+              <input value={paymentForm.fullName} onChange={(event) => onUpdatePaymentField('fullName', event.target.value)} />
+            </Field>
+            <Field className="span-2" label="Folio">
+              <input disabled value="Se genera automatico (FIC-AAAA-00001)" />
+            </Field>
+          </div>
+          <div className="form-actions control-actions">
+            <button className="primary-button" type="submit">Guardar pago e imprimir recibo</button>
+          </div>
+        </form>
+      </article>
+      ) : null}
+
+      {operationsTab === 'inscripcion-roc' ? (
+      <article className="panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Ingresos Propios</p>
+            <h2>Paso 1: seleccionar alumno</h2>
+          </div>
+          <span className="status-tag">Wizard de inscripcion</span>
         </div>
 
         {loading ? <p>Cargando alumnos validados...</p> : null}
@@ -1617,6 +2077,7 @@ function IngresosPropiosOverview({
                   <th>Matricula</th>
                   <th>Alumno</th>
                   <th>CURP</th>
+                  <th>Grupo</th>
                   </tr>
                 </thead>
               <tbody>
@@ -1642,6 +2103,7 @@ function IngresosPropiosOverview({
                       </td>
                       <td>{student.fullName}</td>
                       <td>{student.curp}</td>
+                      <td>{student.groupLabel ?? 'Sin asignar'}</td>
                     </tr>
                   )
                 })}
@@ -1676,15 +2138,18 @@ function IngresosPropiosOverview({
         {!loading && students.length > 0 && filteredStudents.length === 0 ? (
           <p className="empty-state">No hay alumnos que coincidan con la busqueda actual.</p>
         ) : null}
-      </article>
 
+      </article>
+      ) : null}
+
+      {operationsTab === 'inscripcion-roc' ? (
       <article className="panel print-host">
         <div className="section-header">
           <div>
             <p className="eyebrow">ROC</p>
-            <h2>Datos prerellenados y conceptos</h2>
+            <h2>Paso 2: claves, guardar e imprimir ROC</h2>
           </div>
-          <span className="status-tag">Plantilla oficial</span>
+          <span className="status-tag">{paymentConcepts.length} claves activas</span>
         </div>
 
         {selectedStudent ? (
@@ -1699,6 +2164,10 @@ function IngresosPropiosOverview({
                   <label>Matricula</label>
                   <p>{selectedStudent.enrollmentNumber}</p>
                 </div>
+                <div>
+                  <label>Grupo</label>
+                  <p>{selectedStudent.groupLabel ?? 'Sin asignar'}</p>
+                </div>
               </div>
 
               <div className="concept-groups">
@@ -1712,68 +2181,64 @@ function IngresosPropiosOverview({
                   </Field>
                 </div>
 
-                {groupedConcepts.length === 0 ? (
+                {filteredPaymentConcepts.length === 0 ? (
                   <p className="empty-state">No hay claves que coincidan con la busqueda.</p>
                 ) : null}
 
-              {normalizedQuery.length > 0 ? (
-                <section className="concept-group-panel">
-                  <div className="concept-group-header static">
-                    <strong>RESULTADOS</strong>
-                    <span>{searchResults.length} claves</span>
-                  </div>
+                <p className="table-summary">Selecciona las claves a cobrar. Vista compacta para operar rapido en ventanilla.</p>
 
-                  <div className="concept-grid compact-concept-grid">
-                    {searchResults.map((concept) => {
-                      const active = selectedConcepts.some((item) => item.code === concept.code)
-                      return (
-                        <button
-                          className={active ? 'concept-card active' : 'concept-card'}
-                          key={concept.code}
-                          onClick={() => onToggleConcept(concept)}
-                        >
-                          <strong>{concept.code}</strong>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </section>
-              ) : (
-                groupedConcepts.map((group) => (
-                  <section className="concept-group-panel" key={group.key}>
-                    <div className="concept-group-header static">
-                      <div>
-                        <strong>{group.header?.code ?? group.key}</strong>
-                      </div>
-                      <span>{group.items.length} claves</span>
-                    </div>
-
-                    <div className="concept-grid compact-concept-grid">
-                      {group.items.map((concept) => {
+                <div className="student-table-wrap">
+                  <table className="student-table">
+                    <thead>
+                      <tr>
+                        <th>Clave</th>
+                        <th>Concepto</th>
+                        <th>Cuota</th>
+                        <th>Periodo</th>
+                        <th>Accion</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredPaymentConcepts.map((concept) => {
                         const active = selectedConcepts.some((item) => item.code === concept.code)
                         return (
-                          <button
-                            className={active ? 'concept-card active' : 'concept-card'}
-                            key={concept.code}
-                            onClick={() => onToggleConcept(concept)}
-                          >
-                            <strong>{concept.code}</strong>
-                          </button>
+                          <tr className={active ? 'student-row active' : 'student-row'} key={concept.code}>
+                            <td><strong>{concept.code}</strong></td>
+                            <td>{concept.name}</td>
+                            <td>
+                              <input
+                                className="table-input"
+                                min="0"
+                                step="0.01"
+                                type="number"
+                                value={conceptAmounts[concept.code] ?? concept.amount}
+                                onChange={(event) => onUpdateConceptAmount(concept.code, Number(event.target.value || 0))}
+                              />
+                            </td>
+                            <td>{concept.periodLabel}</td>
+                            <td>
+                              <button className={active ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => onToggleConcept(concept)} type="button">
+                                {active ? 'Quitar' : 'Agregar'}
+                              </button>
+                            </td>
+                          </tr>
                         )
                       })}
-                    </div>
-                  </section>
-                ))
-              )}
-            </div>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
 
               <div className="roc-actions">
                 <Field label="Numero de ROC" required>
                   <input value={rocNumber} onChange={(event) => onChangeRocNumber(event.target.value)} />
                 </Field>
                 <div className="button-row">
-                  <button className="secondary-button" onClick={onPrintReceipt} type="button">
-                    Imprimir ROC
+                  <button className="secondary-button" disabled={savingReceipt} onClick={() => void onPrintReceipt()} type="button">
+                    Guardar e imprimir ROC
+                  </button>
+                  <button className="secondary-button" onClick={() => void onPrintBatchReceipts()} type="button">
+                    Generar lote final 2 por hoja
                   </button>
                   <button className="primary-button" disabled={savingReceipt} onClick={() => void onCreateReceipt()} type="button">
                     {savingReceipt ? 'Guardando ROC...' : 'Guardar ROC'}
@@ -1786,7 +2251,7 @@ function IngresosPropiosOverview({
                 <ul className="plain-list">
                   {selectedConcepts.map((concept) => (
                     <li key={concept.code}>
-                      {concept.code} - {concept.name} - ${concept.amount.toFixed(2)}
+                      {concept.code} - {concept.name} - ${(conceptAmounts[concept.code] ?? concept.amount).toFixed(2)}
                     </li>
                   ))}
                 </ul>
@@ -1835,8 +2300,55 @@ function IngresosPropiosOverview({
             <div className="roc-print-sheet print-only">{rocSheet('')}</div>
           </div>
         ) : null}
-      </article>
 
+        {!selectedStudent ? <p className="empty-state">Primero selecciona un alumno en el Paso 1 para continuar con ROC.</p> : null}
+      </article>
+      ) : null}
+
+      {operationsTab === 'fichas' ? (
+      <article className="panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Etapa 1</p>
+            <h2>Impresion ficha</h2>
+          </div>
+        </div>
+        <div className="student-table-wrap">
+          <table className="student-table">
+            <thead>
+              <tr>
+                <th>Folio</th>
+                <th>Alumno</th>
+                <th>Estatus</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {admissions.slice(0, 12).map((admission) => {
+                const canPrint = admission.status === 'CAPTURADO_CONTROL_ESCOLAR' || admission.status === 'FICHA_IMPRESA'
+                return (
+                  <tr key={admission.id}>
+                    <td>{admission.folio}</td>
+                    <td>{admission.fullName}</td>
+                    <td>{admission.status}</td>
+                    <td>
+                      <button className="secondary-button small-button" onClick={() => void onPrintPaymentReceipt(admission)} type="button">
+                        Reimprimir recibo
+                      </button>{' '}
+                      <button className="secondary-button small-button" disabled={!canPrint} onClick={() => void onPrintAdmission(admission)} type="button">
+                        Imprimir ficha
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      ) : null}
+
+      {operationsTab === 'historial' ? (
       <article className="panel">
         <div className="section-header">
           <div>
@@ -1858,6 +2370,7 @@ function IngresosPropiosOverview({
           ))}
         </div>
       </article>
+      ) : null}
     </section>
   )
 }

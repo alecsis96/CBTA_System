@@ -6,7 +6,7 @@
   - `roc 2026.xlsx` - official ROC receipt template/reference
   - `Plantilla_Levantamiento_Requerimientos.docx` - interview and requirements gathering template
   - `prisma/schema.prisma` - source of truth for the current data model
-- SQLite is local/offline-first. The active development database is `dev.db` at repo root, created from `.env`.
+- SQLite is local/offline-first. The active development database is `prisma/dev.db`, referenced by `.env` as `DATABASE_URL="file:./dev.db"` relative to `prisma/schema.prisma`.
 - Ignore temporary Office lockfiles such as `~$roc 2026.xlsx` and `~$antilla_Levantamiento_Requerimientos.docx`.
 
 ## Commands

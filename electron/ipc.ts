@@ -1,7 +1,64 @@
-import { app, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { scryptSync, timingSafeEqual } from 'node:crypto'
+import { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import * as XLSX from 'xlsx'
 import { prisma } from './db'
 import { openOfficialRocTemplate } from './roc-template'
+
+type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
+
+type SessionUser = {
+  id: string
+  username: string
+  displayName: string
+  role: AppRole
+}
+
+let currentSession: SessionUser | null = null
+
+const authLoginSchema = z.object({
+  username: z.string().trim().min(1),
+  password: z.string().min(1),
+})
+
+function verifyPassword(password: string, passwordHash: string) {
+  const [prefix, salt, digest] = passwordHash.split('$')
+  if (prefix !== 'scrypt' || !salt || !digest) {
+    return false
+  }
+
+  const expected = Buffer.from(digest, 'hex')
+  const current = scryptSync(password, salt, expected.length)
+  if (expected.length !== current.length) {
+    return false
+  }
+
+  return timingSafeEqual(expected, current)
+}
+
+function authSessionSummary() {
+  return currentSession
+}
+
+function requireAuth() {
+  if (!currentSession) {
+    throw new Error('No autorizado: inicia sesion para continuar.')
+  }
+
+  return currentSession
+}
+
+function requireRole(allowedRoles: AppRole[], actionLabel: string) {
+  const session = requireAuth()
+  if (!allowedRoles.includes(session.role)) {
+    throw new Error(`No autorizado: ${session.role} no puede ${actionLabel}.`)
+  }
+
+  return session
+}
 
 const studentInputSchema = z.object({
   enrollmentNumber: z.string().min(1),
@@ -14,7 +71,9 @@ const studentInputSchema = z.object({
   age: z.number().int().min(0).max(120).optional().nullable(),
   sex: z.string().trim().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
+  studentPhoneSecondary: z.string().trim().optional().nullable(),
   email: z.string().email().optional().or(z.literal('')).nullable(),
+  motherTongue: z.string().trim().optional().nullable(),
   addressLine: z.string().min(1),
   neighborhood: z.string().trim().optional().nullable(),
   locality: z.string().trim().optional().nullable(),
@@ -23,11 +82,13 @@ const studentInputSchema = z.object({
   postalCode: z.string().trim().optional().nullable(),
   previousSchool: z.string().trim().optional().nullable(),
   secondaryAverage: z.number().min(0).max(10).optional().nullable(),
+  examRoom: z.string().trim().optional().nullable(),
   schoolCycle: z.string().min(1),
   academicStatus: z.string().trim().optional().nullable(),
   guardianFullName: z.string().min(1),
   guardianRelationship: z.string().trim().optional().nullable(),
   guardianPhone: z.string().min(1),
+  guardianPhoneSecondary: z.string().trim().optional().nullable(),
   guardianEmail: z.string().email().optional().or(z.literal('')).nullable(),
   validateNow: z.boolean().default(false),
 })
@@ -36,6 +97,7 @@ const receiptInputSchema = z.object({
   rocNumber: z.string().min(1),
   studentId: z.string().min(1),
   conceptCodes: z.array(z.string().min(1)).min(1),
+  conceptItems: z.array(z.object({ code: z.string().min(1), amount: z.number().min(0) })).optional(),
 })
 
 const printReceiptSchema = z.object({
@@ -58,7 +120,9 @@ const preRegistrationCreateSchema = z.object({
   birthDate: z.string().optional().nullable(),
   sex: z.string().trim().optional().nullable(),
   phone: z.string().trim().optional().nullable(),
+  studentPhoneSecondary: z.string().trim().optional().nullable(),
   email: z.string().email().optional().or(z.literal('')).nullable(),
+  motherTongue: z.string().trim().optional().nullable(),
   addressLine: z.string().min(1),
   neighborhood: z.string().trim().optional().nullable(),
   locality: z.string().trim().optional().nullable(),
@@ -67,17 +131,209 @@ const preRegistrationCreateSchema = z.object({
   postalCode: z.string().trim().optional().nullable(),
   previousSchool: z.string().trim().optional().nullable(),
   secondaryAverage: z.number().min(0).max(10).optional().nullable(),
+  examRoom: z.string().trim().optional().nullable(),
   schoolCycle: z.string().min(1),
   guardianFullName: z.string().min(1),
   guardianRelationship: z.string().trim().optional().nullable(),
   guardianPhone: z.string().min(1),
+  guardianPhoneSecondary: z.string().trim().optional().nullable(),
   guardianEmail: z.string().email().optional().or(z.literal('')).nullable(),
 })
 
 const preRegistrationStatusUpdateSchema = z.object({
   status: z.enum(['EN_REVISION_CONTROL_ESCOLAR', 'OBSERVADO', 'RECHAZADO', 'VALIDADO_PARA_PAGO', 'PAGADO']),
   observationNotes: z.string().trim().optional(),
+  motherTongue: z.string().trim().optional().nullable(),
+  examRoom: z.string().trim().optional().nullable(),
+  studentPhoneSecondary: z.string().trim().optional().nullable(),
+  guardianPhoneSecondary: z.string().trim().optional().nullable(),
 })
+
+const admissionPaymentCreateSchema = z.object({
+  folio: z.string().trim().optional(),
+  curp: z.string().min(18).max(18),
+  fullName: z.string().min(1),
+})
+
+const admissionListFiltersSchema = z
+  .object({
+    status: z.string().trim().optional(),
+    query: z.string().trim().optional(),
+  })
+  .optional()
+
+const admissionPrintSchema = z.object({
+  id: z.string().min(1).optional(),
+  folio: z.string().min(1),
+  curp: z.string().min(18).max(18),
+  fullName: z.string().min(1),
+  paidAt: z.string().min(1),
+  status: z.string().min(1),
+  updatedAt: z.string().min(1),
+})
+
+const sepExportSchema = z.object({
+  ids: z.array(z.string().min(1)).optional(),
+  status: z.string().trim().optional(),
+})
+
+const createIntakeGroupSchema = z.object({
+  schoolCycle: z.string().min(1),
+  labels: z.array(z.string().regex(/^1[A-Z]$/)).min(1),
+})
+
+const listIntakeGroupsSchema = z.object({
+  schoolCycle: z.string().min(1),
+})
+
+const runAssignmentSchema = z.object({
+  schoolCycle: z.string().min(1),
+})
+
+const confirmAssignmentSchema = z.object({
+  schoolCycle: z.string().min(1),
+})
+
+const manualReassignSchema = z.object({
+  studentId: z.string().min(1),
+  toGroupId: z.string().min(1),
+  reason: z.string().trim().min(5),
+})
+
+const markNoShowSchema = z.object({
+  studentId: z.string().min(1),
+  reason: z.string().trim().min(5),
+})
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function paymentReceiptHtml(admission: z.infer<typeof admissionPrintSchema>) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Recibo de pago ${escapeHtml(admission.folio)}</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{margin:0 0 12px}p{margin:8px 0}.divider{border-top:1px solid #888;margin:16px 0}</style></head><body><h1>Recibo de pago de ficha</h1><div class='divider'></div><p><strong>Folio:</strong> ${escapeHtml(admission.folio)}</p><p><strong>CURP:</strong> ${escapeHtml(admission.curp)}</p><p><strong>Nombre:</strong> ${escapeHtml(admission.fullName)}</p><p><strong>Fecha de pago:</strong> ${escapeHtml(new Date(admission.paidAt).toLocaleString('es-MX'))}</p><p><strong>Estatus:</strong> ${escapeHtml(admission.status)}</p><div class='divider'></div><p>Presentar este recibo en Control Escolar para alta completa del alumno.</p></body></html>`
+}
+
+function admissionFichaHtml(admission: z.infer<typeof admissionPrintSchema>) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Ficha ${escapeHtml(admission.folio)}</title><style>body{font-family:Arial,sans-serif;margin:18px}.row{border:1px solid #666;padding:12px;margin-bottom:12px}h2{margin:0 0 10px;font-size:20px}.cut{border-top:2px dashed #000;margin:12px 0}</style></head><body><div class='row'><h2>Ficha de admision - Alumno</h2><p><strong>Folio:</strong> ${escapeHtml(admission.folio)}</p><p><strong>CURP:</strong> ${escapeHtml(admission.curp)}</p><p><strong>Nombre:</strong> ${escapeHtml(admission.fullName)}</p><p><strong>Pago:</strong> ${escapeHtml(new Date(admission.paidAt).toLocaleString('es-MX'))}</p></div><div class='cut'></div><div class='row'><h2>Ficha de admision - Archivo</h2><p><strong>Folio:</strong> ${escapeHtml(admission.folio)}</p><p><strong>CURP:</strong> ${escapeHtml(admission.curp)}</p><p><strong>Nombre:</strong> ${escapeHtml(admission.fullName)}</p><p><strong>Estatus:</strong> ${escapeHtml(admission.status)}</p><p><strong>Actualizado:</strong> ${escapeHtml(new Date(admission.updatedAt).toLocaleString('es-MX'))}</p></div></body></html>`
+}
+
+async function printHtmlWithFallback(html: string, fileName: string) {
+  const printWindow = new BrowserWindow({
+    width: 900,
+    height: 700,
+    show: false,
+    webPreferences: {
+      sandbox: true,
+    },
+  })
+
+  try {
+    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+
+    const printed = await new Promise<boolean>((resolve) => {
+      printWindow.webContents.print({ silent: false, printBackground: true }, (success) => {
+        resolve(success)
+      })
+    })
+
+    if (printed) {
+      return { ok: true, mode: 'browser-window-print' }
+    }
+
+    const outputPath = join(app.getPath('documents'), fileName)
+    const pdf = await printWindow.webContents.printToPDF({ printBackground: true })
+    await writeFile(outputPath, pdf)
+    return { ok: true, mode: 'print-to-pdf-fallback', outputPath }
+  } finally {
+    printWindow.destroy()
+  }
+}
+
+function preRegistrationAuditDetail(action: string, observationNotes: string | null) {
+  if (observationNotes && observationNotes.trim().length > 0) {
+    return `${action}: ${observationNotes.trim()}`
+  }
+
+  return `${action}: sin observaciones`
+}
+
+function csvCell(value: string | number | null | undefined) {
+  const text = `${value ?? ''}`.replace(/"/g, '""')
+  return `"${text}"`
+}
+
+async function exportSepCsv(input: z.infer<typeof sepExportSchema>) {
+  const whereByStatus = input.status && input.status.length > 0 ? { status: input.status } : { status: 'VALIDADO_PARA_PAGO' }
+  const whereByIds = input.ids && input.ids.length > 0 ? { id: { in: input.ids } } : {}
+  const rows = await prisma.preRegistration.findMany({
+    where: {
+      ...whereByStatus,
+      ...whereByIds,
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  const headers = [
+    'Nombre(s)',
+    'Apellido paterno',
+    'Apellido materno',
+    'CURP',
+    'Fecha nacimiento',
+    'Sexo',
+    'Domicilio',
+    'Municipio',
+    'Estado',
+    'Codigo postal',
+    'Tutor',
+    'Telefono tutor',
+    'Correo',
+    'Escuela procedencia',
+    'Promedio',
+    'Ciclo',
+    'Estatus',
+  ]
+
+  const lines = rows.map((item) => {
+    const values = [
+      item.firstName,
+      item.paternalLastName,
+      item.maternalLastName,
+      item.curp,
+      item.birthDate ? item.birthDate.toISOString().slice(0, 10) : '',
+      item.sex ?? '',
+      item.addressLine,
+      item.municipality ?? '',
+      item.state ?? '',
+      item.postalCode ?? '',
+      item.guardianFullName,
+      item.guardianPhone,
+      item.email ?? '',
+      item.previousSchool ?? '',
+      item.secondaryAverage != null ? Number(item.secondaryAverage).toString() : '',
+      item.schoolCycle,
+      item.status,
+    ]
+
+    return values.map(csvCell).join(',')
+  })
+
+  const csvContent = [headers.map(csvCell).join(','), ...lines].join('\n')
+  const now = new Date()
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+  const outputPath = join(app.getPath('documents'), `sep-export-${stamp}.csv`)
+  await writeFile(outputPath, csvContent, 'utf8')
+
+  return { outputPath, exportedCount: rows.length }
+}
+
+function hasOwn<T extends object, K extends PropertyKey>(value: T, key: K): value is T & Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
 
 function normalizeOptional(value: string | null | undefined) {
   if (!value) {
@@ -86,6 +342,31 @@ function normalizeOptional(value: string | null | undefined) {
 
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+function enrollmentStatusLabel(enrollmentStatus: string | null | undefined) {
+  switch (enrollmentStatus) {
+    case 'FICHA_ENTREGADA':
+      return 'Ficha entregada'
+    case 'INSCRITO':
+      return 'Inscrito'
+    case 'BAJA_TEMPORAL':
+      return 'Baja temporal'
+    case 'BAJA_DEFINITIVA':
+      return 'Baja definitiva'
+    case 'PORTABILIDAD':
+      return 'Portabilidad'
+    case 'RECURSADOR':
+      return 'Recursador'
+    case 'NO_SHOW':
+      return 'No presentado'
+    case 'ASIGNADO':
+      return 'Asignado a grupo'
+    case 'CONFIRMADO':
+      return 'Inscrito'
+    default:
+      return 'Ficha entregada'
+  }
 }
 
 function studentSummary(student: {
@@ -97,13 +378,22 @@ function studentSummary(student: {
   paternalLastName: string
   maternalLastName: string
   phone: string | null
+  studentPhoneSecondary: string | null
   email: string | null
+  motherTongue: string | null
   addressLine: string
   neighborhood: string | null
   locality: string | null
   municipality: string | null
   state: string | null
   status: string
+  enrollmentStatus?: string | null
+  groupAssignment?: {
+    group: {
+      label: string
+      shift: string
+    }
+  } | null
 }) {
   return {
     id: student.id,
@@ -119,7 +409,9 @@ function studentSummary(student: {
     address: [student.addressLine, student.neighborhood, student.locality, student.municipality, student.state]
       .filter(Boolean)
       .join(', '),
-    statusLabel: student.status,
+    statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
+    groupLabel: student.groupAssignment?.group.label ?? null,
+    shiftLabel: student.groupAssignment?.group.shift ?? null,
   }
 }
 
@@ -135,7 +427,9 @@ function studentDetail(student: {
   age: number | null
   sex: string | null
   phone: string | null
+  studentPhoneSecondary: string | null
   email: string | null
+  motherTongue: string | null
   addressLine: string
   neighborhood: string | null
   locality: string | null
@@ -144,13 +438,16 @@ function studentDetail(student: {
   postalCode: string | null
   previousSchool: string | null
   secondaryAverage: unknown
+  examRoom: string | null
   schoolCycle: string
   academicStatus: string | null
   status: string
+  enrollmentStatus?: string | null
   guardian: {
     fullName: string
     relationship: string | null
     phone: string
+    secondaryPhone: string | null
     email: string | null
   } | null
 }) {
@@ -166,7 +463,9 @@ function studentDetail(student: {
     age: student.age,
     sex: student.sex ?? '',
     phone: student.phone ?? '',
+    studentPhoneSecondary: student.studentPhoneSecondary ?? '',
     email: student.email ?? '',
+    motherTongue: student.motherTongue ?? '',
     addressLine: student.addressLine,
     neighborhood: student.neighborhood ?? '',
     locality: student.locality ?? '',
@@ -175,14 +474,16 @@ function studentDetail(student: {
     postalCode: student.postalCode ?? '',
     previousSchool: student.previousSchool ?? '',
     secondaryAverage: student.secondaryAverage == null ? null : Number(student.secondaryAverage),
+    examRoom: student.examRoom ?? '',
     schoolCycle: student.schoolCycle,
     academicStatus: student.academicStatus ?? '',
     guardianFullName: student.guardian?.fullName ?? '',
     guardianRelationship: student.guardian?.relationship ?? '',
     guardianPhone: student.guardian?.phone ?? '',
+    guardianPhoneSecondary: student.guardian?.secondaryPhone ?? '',
     guardianEmail: student.guardian?.email ?? '',
     validateNow: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'].includes(student.status),
-    statusLabel: student.status,
+    statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
   }
 }
 
@@ -283,11 +584,49 @@ function preRegistrationSummary(item: {
   }
 }
 
+function admissionSummary(item: {
+  id: string
+  folio: string
+  curp: string
+  fullName: string
+  paidAt: Date
+  status: string
+  student: { id: string } | null
+  createdAt: Date
+  updatedAt: Date
+}) {
+  return {
+    id: item.id,
+    folio: item.folio,
+    curp: item.curp,
+    fullName: item.fullName,
+    paidAt: item.paidAt.toISOString(),
+    status: item.status,
+    studentId: item.student?.id ?? null,
+    createdAt: item.createdAt.toISOString(),
+    updatedAt: item.updatedAt.toISOString(),
+  }
+}
+
 function buildPreRegistrationFolio() {
   const now = new Date()
   const ymd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
   const token = Math.random().toString(36).slice(2, 6).toUpperCase()
   return `PR-${ymd}-${token}`
+}
+
+async function buildAdmissionFolio() {
+  const year = new Date().getFullYear()
+  const prefix = `FIC-${year}-`
+  const latest = await prisma.admissionPayment.findFirst({
+    where: { folio: { startsWith: prefix } },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  const rawSequence = latest?.folio?.replace(prefix, '') ?? '0'
+  const parsedSequence = Number(rawSequence)
+  const nextSequence = Number.isFinite(parsedSequence) ? parsedSequence + 1 : 1
+  return `${prefix}${String(nextSequence).padStart(5, '0')}`
 }
 
 function unitsToWords(value: number): string {
@@ -385,7 +724,7 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
       .join(', '),
     grade: '',
     group: '',
-    shift: '',
+    shift: 'MATUTINO',
     printDate: new Date().toLocaleDateString('es-MX', {
       day: '2-digit',
       month: 'short',
@@ -403,8 +742,328 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
   return { receipt, outputPath }
 }
 
+const ASSIGNMENT_CAPACITY = 40
+const MATUTINO_SHIFT = 'MATUTINO'
+
+function avgBand(value: number | null) {
+  if (value == null) return 'medio'
+  if (value >= 9) return 'alto'
+  if (value < 7) return 'bajo'
+  return 'medio'
+}
+
+function sexBucket(value: string | null) {
+  const normalized = value?.trim().toUpperCase()
+  if (!normalized) return 'NO_ESPECIFICADO'
+  if (normalized.startsWith('M') || normalized.startsWith('F')) return 'MUJER'
+  if (normalized.startsWith('H')) return 'HOMBRE'
+  return 'NO_ESPECIFICADO'
+}
+
+function buildGroupLabel(index: number) {
+  return `1${String.fromCharCode(65 + index)}`
+}
+
+function buildAssignmentStats(groups: Array<{ id: string; label: string; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>) {
+  return groups.map((group) => {
+    const assigned = group.assignments.filter((item) => item.status !== 'NO_SHOW')
+    const totals = {
+      alto: 0,
+      medio: 0,
+      bajo: 0,
+      MUJER: 0,
+      HOMBRE: 0,
+      NO_ESPECIFICADO: 0,
+    }
+    for (const item of assigned) {
+      const avg = item.student.secondaryAverage == null ? null : Number(item.student.secondaryAverage)
+      totals[avgBand(avg)] += 1
+      totals[sexBucket(item.student.sex)] += 1
+    }
+
+    return {
+      groupId: group.id,
+      label: group.label,
+      capacity: ASSIGNMENT_CAPACITY,
+      assignedCount: assigned.length,
+      available: ASSIGNMENT_CAPACITY - assigned.length,
+      bands: { alto: totals.alto, medio: totals.medio, bajo: totals.bajo },
+      sex: { mujer: totals.MUJER, hombre: totals.HOMBRE, noEspecificado: totals.NO_ESPECIFICADO },
+    }
+  })
+}
+
+function selectBalancedTargetGroup<T extends { id: string; label: string }>(
+  groups: T[],
+  stats: Map<string, { assigned: number; MUJER: number; HOMBRE: number; NO_ESPECIFICADO: number; alto: number; medio: number; bajo: number }>,
+  sex: 'MUJER' | 'HOMBRE' | 'NO_ESPECIFICADO',
+  band: 'alto' | 'medio' | 'bajo',
+  totals: { MUJER: number; HOMBRE: number; NO_ESPECIFICADO: number; alto: number; medio: number; bajo: number; total: number },
+) {
+  const desiredSexRatio = totals.total > 0 ? totals[sex] / totals.total : 0
+  const desiredBandRatio = totals.total > 0 ? totals[band] / totals.total : 0
+  const groupCount = Math.max(1, groups.length)
+  const desiredBandPerGroup = totals[band] / groupCount
+
+  const candidates = groups.filter((group) => (stats.get(group.id)?.assigned ?? 0) < ASSIGNMENT_CAPACITY)
+  if (candidates.length === 0) return null
+
+  candidates.sort((left, right) => {
+    const leftStats = stats.get(left.id)
+    const rightStats = stats.get(right.id)
+    if (!leftStats || !rightStats) return left.label.localeCompare(right.label)
+
+    const leftProjectedAssigned = leftStats.assigned + 1
+    const rightProjectedAssigned = rightStats.assigned + 1
+
+    const leftBandGap = leftStats[band] - desiredBandPerGroup
+    const rightBandGap = rightStats[band] - desiredBandPerGroup
+    if (leftBandGap !== rightBandGap) return leftBandGap - rightBandGap
+
+    const leftSexRatio = (leftStats[sex] + 1) / leftProjectedAssigned
+    const rightSexRatio = (rightStats[sex] + 1) / rightProjectedAssigned
+    const leftSexPenalty = Math.abs(leftSexRatio - desiredSexRatio)
+    const rightSexPenalty = Math.abs(rightSexRatio - desiredSexRatio)
+
+    if (leftSexPenalty !== rightSexPenalty) return leftSexPenalty - rightSexPenalty
+
+    const leftBandRatio = (leftStats[band] + 1) / leftProjectedAssigned
+    const rightBandRatio = (rightStats[band] + 1) / rightProjectedAssigned
+    const leftBandPenalty = Math.abs(leftBandRatio - desiredBandRatio)
+    const rightBandPenalty = Math.abs(rightBandRatio - desiredBandRatio)
+
+    if (leftBandPenalty !== rightBandPenalty) return leftBandPenalty - rightBandPenalty
+    if (leftStats.assigned !== rightStats.assigned) return leftStats.assigned - rightStats.assigned
+    return left.label.localeCompare(right.label)
+  })
+
+  return candidates[0]
+}
+
+function batchRocHtml(entries: Array<{ receipt: { rocNumber: string; totalAmount: unknown; lines: Array<{ concept: { code: string; name: string }; unitAmount: unknown }> }; student: { firstName: string; paternalLastName: string; maternalLastName: string; enrollmentNumber: string; addressLine: string; neighborhood: string | null; locality: string | null; municipality: string | null; state: string | null } }>) {
+  const cards = entries
+    .map((entry) => {
+      const total = Number(entry.receipt.totalAmount)
+      const concepts = entry.receipt.lines
+        .map((line) => `${line.concept.code} ${line.concept.name} $${Number(line.unitAmount).toFixed(2)}`)
+        .join('<br/>')
+      const fullName = `${entry.student.paternalLastName} ${entry.student.maternalLastName} ${entry.student.firstName}`
+      const address = [entry.student.addressLine, entry.student.neighborhood, entry.student.locality, entry.student.municipality, entry.student.state]
+        .filter(Boolean)
+        .join(', ')
+      return `<article class="roc-card"><h3>ROC ${escapeHtml(entry.receipt.rocNumber)}</h3><p><strong>Alumno:</strong> ${escapeHtml(fullName)}</p><p><strong>Matricula:</strong> ${escapeHtml(entry.student.enrollmentNumber)}</p><p><strong>Grupo:</strong> MATUTINO</p><p><strong>Domicilio:</strong> ${escapeHtml(address)}</p><p><strong>Conceptos:</strong><br/>${concepts}</p><p><strong>Total:</strong> $${total.toFixed(2)}</p></article>`
+    })
+    .join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>ROC lote</title><style>@page{size:letter;margin:10mm}body{font-family:Arial,sans-serif;color:#111}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8mm}.roc-card{border:1px solid #555;padding:10px;break-inside:avoid;min-height:120mm}h3{margin:0 0 6px}</style></head><body><div class="grid">${cards}</div></body></html>`
+}
+
+function buildBatchRocWorkbook(entries: Array<{ receipt: { rocNumber: string; totalAmount: unknown; lines: Array<{ concept: { code: string; name: string }; unitAmount: unknown }> }; student: { firstName: string; paternalLastName: string; maternalLastName: string; enrollmentNumber: string } }>) {
+  const rows: string[][] = []
+
+  for (let i = 0; i < entries.length; i += 2) {
+    const left = entries[i]
+    const right = entries[i + 1]
+
+    const formatCard = (entry: { receipt: { rocNumber: string; totalAmount: unknown; lines: Array<{ concept: { code: string; name: string }; unitAmount: unknown }> }; student: { firstName: string; paternalLastName: string; maternalLastName: string; enrollmentNumber: string } } | undefined) => {
+      if (!entry) return ['', '', '', '']
+      const fullName = `${entry.student.paternalLastName} ${entry.student.maternalLastName} ${entry.student.firstName}`
+      const concepts = entry.receipt.lines.map((line) => `${line.concept.code} ${line.concept.name}`).join(' | ')
+      return [
+        `ROC ${entry.receipt.rocNumber}`,
+        `Alumno: ${fullName}`,
+        `Matricula: ${entry.student.enrollmentNumber}`,
+        `Total: $${Number(entry.receipt.totalAmount).toFixed(2)} | ${concepts}`,
+      ]
+    }
+
+    const leftCard = formatCard(left)
+    const rightCard = formatCard(right)
+    rows.push([leftCard[0], '', rightCard[0]])
+    rows.push([leftCard[1], '', rightCard[1]])
+    rows.push([leftCard[2], '', rightCard[2]])
+    rows.push([leftCard[3], '', rightCard[3]])
+    rows.push(['', '', ''])
+  }
+
+  const worksheet = XLSX.utils.aoa_to_sheet(rows)
+  worksheet['!cols'] = [{ wch: 48 }, { wch: 4 }, { wch: 48 }]
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'ROC_Lote_2xHoja')
+  return workbook
+}
+
 export function registerIpcHandlers() {
+  ipcMain.handle('auth:login', async (_event, payload) => {
+    const input = authLoginSchema.parse(payload)
+    const username = input.username.toLowerCase()
+    const user = await prisma.user.findUnique({ where: { username } })
+
+    if (!user || !user.isActive || !verifyPassword(input.password, user.passwordHash)) {
+      throw new Error('Credenciales invalidas.')
+    }
+
+    if (!['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'].includes(user.role)) {
+      throw new Error('El usuario tiene un rol no soportado por la aplicacion.')
+    }
+
+    currentSession = {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role as AppRole,
+    }
+
+    return authSessionSummary()
+  })
+
+  ipcMain.handle('auth:logout', async () => {
+    currentSession = null
+    return { ok: true }
+  })
+
+  ipcMain.handle('auth:session', async () => authSessionSummary())
+
+  ipcMain.handle('admissions:list', async (_event, rawFilters) => {
+    requireAuth()
+    const filters = admissionListFiltersSchema.parse(rawFilters)
+    const status = filters?.status?.trim()
+    const query = filters?.query?.trim()
+
+    const items = await prisma.admissionPayment.findMany({
+      where: {
+        ...(status ? { status } : {}),
+        ...(query
+          ? {
+              OR: [
+                { folio: { contains: query } },
+                { curp: { contains: query.toUpperCase() } },
+                { fullName: { contains: query } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { student: { select: { id: true } } },
+    })
+
+    return items.map(admissionSummary)
+  })
+
+  ipcMain.handle('admissions:createPayment', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'registrar pagos de admision')
+    const input = admissionPaymentCreateSchema.parse(payload)
+    try {
+      const folio = input.folio && input.folio.length > 0 ? input.folio.trim().toUpperCase() : await buildAdmissionFolio()
+      const item = await prisma.admissionPayment.create({
+        data: {
+          folio,
+          curp: input.curp.trim().toUpperCase(),
+          fullName: input.fullName.trim(),
+          status: 'PAGADO_PENDIENTE_CAPTURA',
+        },
+        include: { student: { select: { id: true } } },
+      })
+
+      return admissionSummary(item)
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new Error('El folio de pago ya existe. Usa el siguiente folio consecutivo.')
+      }
+
+      throw error
+    }
+  })
+
+  ipcMain.handle('admissions:startCapture', async (_event, admissionId) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'iniciar captura de alumnos')
+    const id = z.string().min(1).parse(admissionId)
+    const existing = await prisma.admissionPayment.findUnique({ where: { id } })
+    if (!existing) {
+      throw new Error('No se encontro el pago de ficha.')
+    }
+
+    const item = await prisma.admissionPayment.update({
+      where: { id },
+      data: {
+        status: existing.status === 'PAGADO_PENDIENTE_CAPTURA' ? 'EN_CAPTURA_CONTROL_ESCOLAR' : existing.status,
+      },
+      include: { student: { select: { id: true } } },
+    })
+
+    return admissionSummary(item)
+  })
+
+  ipcMain.handle('admissions:completeCapture', async (_event, admissionId, studentId) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'completar captura de alumnos')
+    const id = z.string().min(1).parse(admissionId)
+    const linkedStudentId = z.string().min(1).parse(studentId)
+
+    const item = await prisma.$transaction(async (tx) => {
+      await tx.student.update({
+        where: { id: linkedStudentId },
+        data: { admissionPaymentId: id },
+      })
+
+      return tx.admissionPayment.update({
+        where: { id },
+        data: { status: 'CAPTURADO_CONTROL_ESCOLAR' },
+        include: { student: { select: { id: true } } },
+      })
+    })
+
+    return admissionSummary(item)
+  })
+
+  ipcMain.handle('admissions:markPrinted', async (_event, admissionId) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'marcar ficha como impresa')
+    const id = z.string().min(1).parse(admissionId)
+
+    const existing = await prisma.admissionPayment.findUnique({ where: { id } })
+    if (!existing) {
+      throw new Error('No se encontro el pago de ficha.')
+    }
+    if (existing.status !== 'CAPTURADO_CONTROL_ESCOLAR' && existing.status !== 'FICHA_IMPRESA') {
+      throw new Error('Solo se puede imprimir ficha cuando la captura ya fue completada.')
+    }
+
+    const item = await prisma.admissionPayment.update({
+      where: { id },
+      data: { status: 'FICHA_IMPRESA' },
+      include: { student: { select: { id: true } } },
+    })
+
+    return admissionSummary(item)
+  })
+
+  ipcMain.handle('admissions:printPaymentReceipt', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'imprimir recibo de pago')
+    const input = admissionPrintSchema.parse(payload)
+    return printHtmlWithFallback(paymentReceiptHtml(input), `recibo-pago-${input.folio}.pdf`)
+  })
+
+  ipcMain.handle('admissions:printFicha', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'imprimir ficha de admision')
+    const input = admissionPrintSchema.parse(payload)
+    return printHtmlWithFallback(admissionFichaHtml(input), `ficha-admision-${input.folio}.pdf`)
+  })
+
+  ipcMain.handle('admissions:findByFolioOrCurp', async (_event, rawQuery) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'buscar pagos para captura')
+    const query = z.string().trim().min(1).parse(rawQuery)
+
+    const item = await prisma.admissionPayment.findFirst({
+      where: {
+        OR: [{ folio: query.toUpperCase() }, { curp: query.toUpperCase() }],
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { student: { select: { id: true } } },
+    })
+
+    return item ? admissionSummary(item) : null
+  })
+
   ipcMain.handle('preRegistrations:list', async () => {
+    requireAuth()
     const items = await prisma.preRegistration.findMany({
       orderBy: { createdAt: 'desc' },
     })
@@ -413,6 +1072,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('preRegistrations:create', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear pre-registros')
     const input = preRegistrationCreateSchema.parse(payload)
     const created = await prisma.$transaction(async (tx) => {
       const item = await tx.preRegistration.create({
@@ -426,7 +1086,9 @@ export function registerIpcHandlers() {
           birthDate: input.birthDate ? new Date(input.birthDate) : null,
           sex: normalizeOptional(input.sex),
           phone: normalizeOptional(input.phone),
+          studentPhoneSecondary: normalizeOptional(input.studentPhoneSecondary),
           email: normalizeOptional(input.email),
+          motherTongue: normalizeOptional(input.motherTongue),
           addressLine: input.addressLine.trim(),
           neighborhood: normalizeOptional(input.neighborhood),
           locality: normalizeOptional(input.locality),
@@ -435,10 +1097,12 @@ export function registerIpcHandlers() {
           postalCode: normalizeOptional(input.postalCode),
           previousSchool: normalizeOptional(input.previousSchool),
           secondaryAverage: input.secondaryAverage ?? null,
+          examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
           guardianFullName: input.guardianFullName.trim(),
           guardianRelationship: normalizeOptional(input.guardianRelationship),
           guardianPhone: input.guardianPhone.trim(),
+          guardianPhoneSecondary: normalizeOptional(input.guardianPhoneSecondary),
           guardianEmail: normalizeOptional(input.guardianEmail),
           voucherGeneratedAt: new Date(),
           submittedAt: new Date(),
@@ -462,6 +1126,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('preRegistrations:updateStatus', async (_event, preRegistrationId, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'actualizar estatus de pre-registro')
     const id = z.string().min(1).parse(preRegistrationId)
     const input = preRegistrationStatusUpdateSchema.parse(payload)
 
@@ -471,6 +1136,40 @@ export function registerIpcHandlers() {
         throw new Error('No se encontro el pre-registro solicitado.')
       }
 
+      const preRegistrationData: {
+        status: z.infer<typeof preRegistrationStatusUpdateSchema>['status']
+        reviewedAt: Date
+        reviewedBy: string
+        observationNotes: string | null
+        motherTongue?: string | null
+        examRoom?: string | null
+        studentPhoneSecondary?: string | null
+        guardianPhoneSecondary?: string | null
+      } = {
+        status: input.status,
+        reviewedAt: new Date(),
+        reviewedBy: actor.username,
+        observationNotes: normalizeOptional(input.observationNotes),
+      }
+
+      if (hasOwn(input, 'motherTongue')) {
+        preRegistrationData.motherTongue = normalizeOptional(input.motherTongue)
+      }
+      if (hasOwn(input, 'examRoom')) {
+        preRegistrationData.examRoom = normalizeOptional(input.examRoom)
+      }
+      if (hasOwn(input, 'studentPhoneSecondary')) {
+        preRegistrationData.studentPhoneSecondary = normalizeOptional(input.studentPhoneSecondary)
+      }
+      if (hasOwn(input, 'guardianPhoneSecondary')) {
+        preRegistrationData.guardianPhoneSecondary = normalizeOptional(input.guardianPhoneSecondary)
+      }
+
+      const item = await tx.preRegistration.update({
+        where: { id },
+        data: preRegistrationData,
+      })
+
       let linkedStudentId: string | null = null
       if (input.status === 'VALIDADO_PARA_PAGO') {
         const alreadyLinked = await tx.student.findFirst({ where: { preRegistrationId: existing.id } })
@@ -478,60 +1177,81 @@ export function registerIpcHandlers() {
         if (!alreadyLinked) {
           const student = await tx.student.create({
             data: {
-              enrollmentNumber: existing.folio,
-              curp: existing.curp,
-              firstName: existing.firstName,
-              paternalLastName: existing.paternalLastName,
-              maternalLastName: existing.maternalLastName,
-              birthDate: existing.birthDate,
-              sex: existing.sex,
-              phone: existing.phone,
-              email: existing.email,
-              addressLine: existing.addressLine,
-              neighborhood: existing.neighborhood,
-              locality: existing.locality,
-              municipality: existing.municipality,
-              state: existing.state,
-              postalCode: existing.postalCode,
-              previousSchool: existing.previousSchool,
-              secondaryAverage: existing.secondaryAverage,
-              schoolCycle: existing.schoolCycle,
+              enrollmentNumber: item.folio,
+              curp: item.curp,
+              firstName: item.firstName,
+              paternalLastName: item.paternalLastName,
+              maternalLastName: item.maternalLastName,
+              birthDate: item.birthDate,
+              sex: item.sex,
+              phone: item.phone,
+              studentPhoneSecondary: item.studentPhoneSecondary,
+              email: item.email,
+              motherTongue: item.motherTongue,
+              addressLine: item.addressLine,
+              neighborhood: item.neighborhood,
+              locality: item.locality,
+              municipality: item.municipality,
+              state: item.state,
+              postalCode: item.postalCode,
+              previousSchool: item.previousSchool,
+              secondaryAverage: item.secondaryAverage,
+              examRoom: item.examRoom,
+              schoolCycle: item.schoolCycle,
               status: 'LISTO_PARA_COBRO',
               validatedAt: new Date(),
               validatedBy: 'CONTROL_ESCOLAR',
-              preRegistrationId: existing.id,
+              preRegistrationId: item.id,
               guardian: {
                 create: {
-                  fullName: existing.guardianFullName,
-                  relationship: existing.guardianRelationship,
-                  phone: existing.guardianPhone,
-                  email: existing.guardianEmail,
+                  fullName: item.guardianFullName,
+                  relationship: item.guardianRelationship,
+                  phone: item.guardianPhone,
+                  secondaryPhone: item.guardianPhoneSecondary,
+                  email: item.guardianEmail,
                 },
               },
             },
           })
 
           linkedStudentId = student.id
+        } else {
+          await tx.student.update({
+            where: { id: alreadyLinked.id },
+            data: {
+              studentPhoneSecondary: item.studentPhoneSecondary,
+              motherTongue: item.motherTongue,
+              examRoom: item.examRoom,
+              guardian: {
+                upsert: {
+                  create: {
+                    fullName: item.guardianFullName,
+                    relationship: item.guardianRelationship,
+                    phone: item.guardianPhone,
+                    secondaryPhone: item.guardianPhoneSecondary,
+                    email: item.guardianEmail,
+                  },
+                  update: {
+                    fullName: item.guardianFullName,
+                    relationship: item.guardianRelationship,
+                    phone: item.guardianPhone,
+                    secondaryPhone: item.guardianPhoneSecondary,
+                    email: item.guardianEmail,
+                  },
+                },
+              },
+            },
+          })
         }
       }
-
-      const item = await tx.preRegistration.update({
-        where: { id },
-        data: {
-          status: input.status,
-          reviewedAt: new Date(),
-          reviewedBy: 'control.escolar',
-          observationNotes: normalizeOptional(input.observationNotes),
-        },
-      })
 
       await tx.preRegistrationAudit.create({
         data: {
           preRegistrationId: item.id,
-          action: input.status,
-          actorRole: 'CONTROL_ESCOLAR',
-          actorName: 'Control Escolar',
-          detail: normalizeOptional(input.observationNotes) ?? undefined,
+          action: `STATUS_${input.status}`,
+          actorRole: actor.role,
+          actorName: actor.displayName,
+          detail: preRegistrationAuditDetail(input.status, normalizeOptional(input.observationNotes)),
         },
       })
 
@@ -548,8 +1268,16 @@ export function registerIpcHandlers() {
     return preRegistrationSummary(updated)
   })
 
+  ipcMain.handle('preRegistrations:exportSep', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'exportar registros para SEP')
+    const input = sepExportSchema.parse(payload ?? {})
+    return exportSepCsv(input)
+  })
+
   ipcMain.handle('students:list', async () => {
+    requireAuth()
     const students = await prisma.student.findMany({
+      include: { groupAssignment: { include: { group: true } } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -557,8 +1285,10 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:listValidated', async () => {
+    requireAuth()
     const students = await prisma.student.findMany({
       where: { status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] } },
+      include: { groupAssignment: { include: { group: true } } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -566,6 +1296,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:get', async (_event, studentId) => {
+    requireAuth()
     const student = await prisma.student.findUnique({
       where: { id: z.string().min(1).parse(studentId) },
       include: { guardian: true },
@@ -579,12 +1310,17 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:create', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear alumnos')
     const input = studentInputSchema.parse(payload)
     const validated = input.validateNow
-
-    const controlEscolarUser = await prisma.user.findUnique({
-      where: { username: 'control.escolar' },
+    const paymentAnchor = await prisma.admissionPayment.findFirst({
+      where: { curp: input.curp.trim().toUpperCase() },
+      orderBy: { createdAt: 'desc' },
     })
+
+    if (!paymentAnchor) {
+      throw new Error('Primero debes registrar el pago de ficha para este CURP.')
+    }
 
     const student = await prisma.$transaction(async (tx) => {
       const createdStudent = await tx.student.create({
@@ -599,7 +1335,9 @@ export function registerIpcHandlers() {
           age: input.age ?? null,
           sex: normalizeOptional(input.sex),
           phone: normalizeOptional(input.phone),
+          studentPhoneSecondary: normalizeOptional(input.studentPhoneSecondary),
           email: normalizeOptional(input.email),
+          motherTongue: normalizeOptional(input.motherTongue),
           addressLine: input.addressLine.trim(),
           neighborhood: normalizeOptional(input.neighborhood),
           locality: normalizeOptional(input.locality),
@@ -608,16 +1346,20 @@ export function registerIpcHandlers() {
           postalCode: normalizeOptional(input.postalCode),
           previousSchool: normalizeOptional(input.previousSchool),
           secondaryAverage: input.secondaryAverage ?? null,
+          examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
           academicStatus: normalizeOptional(input.academicStatus),
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
+          enrollmentStatus: 'INSCRITO',
           validatedAt: validated ? new Date() : null,
           validatedBy: validated ? 'CONTROL_ESCOLAR' : null,
+          admissionPaymentId: paymentAnchor.id,
           guardian: {
             create: {
               fullName: input.guardianFullName.trim(),
               relationship: normalizeOptional(input.guardianRelationship),
               phone: input.guardianPhone.trim(),
+              secondaryPhone: normalizeOptional(input.guardianPhoneSecondary),
               email: normalizeOptional(input.guardianEmail),
             },
           },
@@ -626,7 +1368,7 @@ export function registerIpcHandlers() {
 
       await tx.auditLog.create({
         data: {
-          userId: controlEscolarUser?.id ?? null,
+          userId: actor.id,
           entityType: 'STUDENT',
           entityId: createdStudent.id,
           action: 'CREATE_STUDENT',
@@ -643,13 +1385,18 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:update', async (_event, studentId, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'editar alumnos')
     const id = z.string().min(1).parse(studentId)
     const input = studentInputSchema.parse(payload)
     const validated = input.validateNow
-
-    const controlEscolarUser = await prisma.user.findUnique({
-      where: { username: 'control.escolar' },
+    const paymentAnchor = await prisma.admissionPayment.findFirst({
+      where: { curp: input.curp.trim().toUpperCase() },
+      orderBy: { createdAt: 'desc' },
     })
+
+    if (!paymentAnchor) {
+      throw new Error('Primero debes registrar el pago de ficha para este CURP.')
+    }
 
     const existing = await prisma.student.findUnique({
       where: { id },
@@ -674,7 +1421,9 @@ export function registerIpcHandlers() {
           age: input.age ?? null,
           sex: normalizeOptional(input.sex),
           phone: normalizeOptional(input.phone),
+          studentPhoneSecondary: normalizeOptional(input.studentPhoneSecondary),
           email: normalizeOptional(input.email),
+          motherTongue: normalizeOptional(input.motherTongue),
           addressLine: input.addressLine.trim(),
           neighborhood: normalizeOptional(input.neighborhood),
           locality: normalizeOptional(input.locality),
@@ -683,23 +1432,28 @@ export function registerIpcHandlers() {
           postalCode: normalizeOptional(input.postalCode),
           previousSchool: normalizeOptional(input.previousSchool),
           secondaryAverage: input.secondaryAverage ?? null,
+          examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
           academicStatus: normalizeOptional(input.academicStatus),
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
+          enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
           validatedAt: validated ? existing.validatedAt ?? new Date() : null,
           validatedBy: validated ? existing.validatedBy ?? 'CONTROL_ESCOLAR' : null,
+          admissionPaymentId: paymentAnchor.id,
           guardian: {
             upsert: {
               create: {
                 fullName: input.guardianFullName.trim(),
                 relationship: normalizeOptional(input.guardianRelationship),
                 phone: input.guardianPhone.trim(),
+                secondaryPhone: normalizeOptional(input.guardianPhoneSecondary),
                 email: normalizeOptional(input.guardianEmail),
               },
               update: {
                 fullName: input.guardianFullName.trim(),
                 relationship: normalizeOptional(input.guardianRelationship),
                 phone: input.guardianPhone.trim(),
+                secondaryPhone: normalizeOptional(input.guardianPhoneSecondary),
                 email: normalizeOptional(input.guardianEmail),
               },
             },
@@ -709,7 +1463,7 @@ export function registerIpcHandlers() {
 
       await tx.auditLog.create({
         data: {
-          userId: controlEscolarUser?.id ?? null,
+          userId: actor.id,
           entityType: 'STUDENT',
           entityId: updatedStudent.id,
           action: 'UPDATE_STUDENT',
@@ -729,6 +1483,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('concepts:listActive', async () => {
+    requireAuth()
     const concepts = await prisma.chargeConcept.findMany({
       where: { isActive: true },
       include: {
@@ -745,10 +1500,8 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('concepts:updateTariff', async (_event, payload) => {
+    const actor = requireRole(['ADMIN'], 'actualizar tarifas')
     const input = tariffUpdateSchema.parse(payload)
-    const createdBy = await prisma.user.findUnique({
-      where: { username: 'ingresos.propios' },
-    })
 
     const concept = await prisma.chargeConcept.findUnique({
       where: { code: input.code },
@@ -784,7 +1537,7 @@ export function registerIpcHandlers() {
 
       await tx.auditLog.create({
         data: {
-          userId: createdBy?.id ?? null,
+          userId: actor.id,
           entityType: 'CHARGE_CONCEPT',
           entityId: concept.id,
           action: 'UPDATE_TARIFF',
@@ -810,15 +1563,8 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('receipts:create', async (_event, payload) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'emitir ROC')
     const input = receiptInputSchema.parse(payload)
-
-    const createdBy = await prisma.user.findUnique({
-      where: { username: 'ingresos.propios' },
-    })
-
-    if (!createdBy) {
-      throw new Error('No existe el usuario base de Ingresos Propios.')
-    }
 
     const concepts = await prisma.chargeConcept.findMany({
       where: { code: { in: input.conceptCodes }, isActive: true },
@@ -835,19 +1581,25 @@ export function registerIpcHandlers() {
       throw new Error('Hay claves de cobro invalidas o inactivas.')
     }
 
-    const totalAmount = concepts.reduce((sum, concept) => sum + Number(concept.tariffs[0]?.amount ?? 0), 0)
+    const amountByCode = new Map((input.conceptItems ?? []).map((item) => [item.code, item.amount]))
+    const totalAmount = concepts.reduce((sum, concept) => {
+      const fallback = Number(concept.tariffs[0]?.amount ?? 0)
+      const selected = amountByCode.get(concept.code)
+      return sum + (selected ?? fallback)
+    }, 0)
 
     const receipt = await prisma.$transaction(async (tx) => {
       const created = await tx.rocReceipt.create({
         data: {
           rocNumber: input.rocNumber.trim(),
           studentId: input.studentId,
-          createdById: createdBy.id,
+          createdById: actor.id,
           totalAmount,
           status: 'EMITIDO',
           lines: {
             create: concepts.map((concept) => {
-              const amount = Number(concept.tariffs[0]?.amount ?? 0)
+              const fallback = Number(concept.tariffs[0]?.amount ?? 0)
+              const amount = amountByCode.get(concept.code) ?? fallback
               return {
                 conceptId: concept.id,
                 quantity: 1,
@@ -874,7 +1626,7 @@ export function registerIpcHandlers() {
 
       await tx.auditLog.create({
         data: {
-          userId: createdBy.id,
+          userId: actor.id,
           entityType: 'ROC_RECEIPT',
           entityId: created.id,
           action: 'CREATE_ROC',
@@ -891,6 +1643,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('receipts:listByStudent', async (_event, studentId) => {
+    requireAuth()
     const parsedStudentId = z.string().min(1).parse(studentId)
     const receipts = await prisma.rocReceipt.findMany({
       where: { studentId: parsedStudentId },
@@ -909,6 +1662,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('receipts:listAll', async () => {
+    requireAuth()
     const receipts = await prisma.rocReceipt.findMany({
       orderBy: { issuedAt: 'desc' },
       include: {
@@ -925,6 +1679,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('receipts:openOfficialTemplate', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'abrir plantilla oficial de ROC')
     const input = printReceiptSchema.parse(payload)
 
     const student = await prisma.student.findUnique({
@@ -956,7 +1711,7 @@ export function registerIpcHandlers() {
         .join(', '),
       grade: '',
       group: '',
-      shift: '',
+      shift: 'MATUTINO',
       printDate: new Date().toLocaleDateString('es-MX', {
         day: '2-digit',
         month: 'short',
@@ -975,10 +1730,8 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('receipts:reprint', async (_event, receiptId) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'reimprimir ROC')
     const parsedReceiptId = z.string().min(1).parse(receiptId)
-    const createdBy = await prisma.user.findUnique({
-      where: { username: 'ingresos.propios' },
-    })
 
     const { receipt, outputPath } = await buildOfficialTemplateFromReceipt(parsedReceiptId)
 
@@ -990,7 +1743,7 @@ export function registerIpcHandlers() {
 
       await tx.auditLog.create({
         data: {
-          userId: createdBy?.id ?? null,
+          userId: actor.id,
           entityType: 'ROC_RECEIPT',
           entityId: parsedReceiptId,
           action: 'REPRINT_ROC',
@@ -1004,7 +1757,327 @@ export function registerIpcHandlers() {
     return { outputPath, mode: app.isPackaged ? 'electron-packaged' : 'electron-dev' }
   })
 
+  ipcMain.handle('receipts:printBatch', async () => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'imprimir lote de ROC')
+    const receipts = await prisma.rocReceipt.findMany({
+      orderBy: { issuedAt: 'desc' },
+      take: 40,
+      include: {
+        student: true,
+        lines: { include: { concept: true } },
+      },
+    })
+    const entries = receipts.map((receipt) => ({ receipt, student: receipt.student }))
+    const workbook = buildBatchRocWorkbook(entries)
+    const outputPath = join(app.getPath('documents'), `roc-lote-2xhoja-${Date.now()}.xlsx`)
+    XLSX.writeFile(workbook, outputPath)
+    return { ok: true, mode: app.isPackaged ? 'electron-packaged' : 'electron-dev', outputPath }
+  })
+
+  ipcMain.handle('groups:createForIntake', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear grupos de nuevo ingreso')
+    const input = createIntakeGroupSchema.parse(payload)
+    return prisma.$transaction(
+      input.labels.map((label) =>
+        prisma.intakeGroup.upsert({
+          where: { schoolCycle_label_shift: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT } },
+          update: { isActive: true, capacity: ASSIGNMENT_CAPACITY },
+          create: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_CAPACITY },
+        }),
+      ),
+    )
+  })
+
+  ipcMain.handle('groups:listForIntake', async (_event, payload) => {
+    requireAuth()
+    const input = listIntakeGroupsSchema.parse(payload)
+    const groups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle: input.schoolCycle.trim(), shift: MATUTINO_SHIFT, isActive: true },
+      orderBy: { label: 'asc' },
+      include: { assignments: { include: { student: true } } },
+    })
+    return {
+      groups: groups.map((group) => ({ id: group.id, label: group.label, shift: group.shift, capacity: group.capacity })),
+      stats: buildAssignmentStats(groups),
+    }
+  })
+
+  ipcMain.handle('groups:stats', async (_event, payload) => {
+    requireAuth()
+    const input = listIntakeGroupsSchema.parse(payload)
+    const groups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle: input.schoolCycle.trim(), shift: MATUTINO_SHIFT, isActive: true },
+      orderBy: { label: 'asc' },
+      include: { assignments: { include: { student: true } } },
+    })
+    return buildAssignmentStats(groups)
+  })
+
+  ipcMain.handle('groups:preview', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'previsualizar asignacion de grupos')
+    const input = runAssignmentSchema.parse(payload)
+    const schoolCycle = input.schoolCycle.trim()
+    const students = await prisma.student.findMany({
+      where: {
+        schoolCycle,
+        status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
+        enrollmentStatus: { not: 'NO_SHOW' },
+      },
+      orderBy: [{ secondaryAverage: 'desc' }, { curp: 'asc' }],
+      select: { sex: true, secondaryAverage: true },
+    })
+
+    const groupCount = Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY))
+    const totals = {
+      MUJER: 0,
+      HOMBRE: 0,
+      NO_ESPECIFICADO: 0,
+      alto: 0,
+      medio: 0,
+      bajo: 0,
+      total: students.length,
+    }
+
+    for (const student of students) {
+      totals[sexBucket(student.sex)] += 1
+      totals[avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))] += 1
+    }
+
+    const buckets = Array.from({ length: groupCount }, (_item, index) => ({
+      id: `preview-${index + 1}`,
+      groupId: `preview-${index + 1}`,
+      label: buildGroupLabel(index),
+      capacity: ASSIGNMENT_CAPACITY,
+      assignedCount: 0,
+      available: ASSIGNMENT_CAPACITY,
+      bands: { alto: 0, medio: 0, bajo: 0 },
+      sex: { mujer: 0, hombre: 0, noEspecificado: 0 },
+    }))
+
+    const bucketStats = new Map(
+      buckets.map((bucket) => [
+        bucket.id,
+        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
+      ]),
+    )
+
+    for (const student of students) {
+      const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
+      const sex = sexBucket(student.sex)
+      const target = selectBalancedTargetGroup(buckets, bucketStats, sex, band, totals)
+
+      if (!target) {
+        break
+      }
+
+      const targetStats = bucketStats.get(target.id)
+      if (!targetStats) {
+        break
+      }
+
+      target.assignedCount += 1
+      target.available = target.capacity - target.assignedCount
+      target.bands[band] += 1
+      if (sex === 'MUJER') target.sex.mujer += 1
+      else if (sex === 'HOMBRE') target.sex.hombre += 1
+      else target.sex.noEspecificado += 1
+
+      targetStats.assigned += 1
+      targetStats[band] += 1
+      targetStats[sex] += 1
+    }
+
+    return buckets
+  })
+
+  ipcMain.handle('groups:previewRoster', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'ver listado previo de grupos')
+    const input = runAssignmentSchema.parse(payload)
+    const schoolCycle = input.schoolCycle.trim()
+    const students = await prisma.student.findMany({
+      where: {
+        schoolCycle,
+        status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
+        enrollmentStatus: { not: 'NO_SHOW' },
+      },
+      orderBy: [{ secondaryAverage: 'desc' }, { curp: 'asc' }],
+      select: {
+        enrollmentNumber: true,
+        firstName: true,
+        paternalLastName: true,
+        maternalLastName: true,
+        curp: true,
+        sex: true,
+        secondaryAverage: true,
+      },
+    })
+
+    const groupCount = Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY))
+    const totals = {
+      MUJER: 0,
+      HOMBRE: 0,
+      NO_ESPECIFICADO: 0,
+      alto: 0,
+      medio: 0,
+      bajo: 0,
+      total: students.length,
+    }
+
+    for (const student of students) {
+      totals[sexBucket(student.sex)] += 1
+      totals[avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))] += 1
+    }
+
+    const groups = Array.from({ length: groupCount }, (_item, index) => ({
+      id: `preview-${index + 1}`,
+      label: buildGroupLabel(index),
+    }))
+
+    const stats = new Map(
+      groups.map((group) => [
+        group.id,
+        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
+      ]),
+    )
+
+    const rows: Array<{
+      groupLabel: string
+      enrollmentNumber: string
+      fullName: string
+      curp: string
+      sex: string
+      averageBand: 'alto' | 'medio' | 'bajo'
+      secondaryAverage: number | null
+    }> = []
+
+    for (const student of students) {
+      const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
+      const sex = sexBucket(student.sex)
+      const target = selectBalancedTargetGroup(groups, stats, sex, band, totals)
+      if (!target) break
+
+      const targetStats = stats.get(target.id)
+      if (targetStats) {
+        targetStats.assigned += 1
+        targetStats[band] += 1
+        targetStats[sex] += 1
+      }
+
+      rows.push({
+        groupLabel: target.label,
+        enrollmentNumber: student.enrollmentNumber,
+        fullName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`,
+        curp: student.curp,
+        sex: student.sex ?? 'N/E',
+        averageBand: band,
+        secondaryAverage: student.secondaryAverage == null ? null : Number(student.secondaryAverage),
+      })
+    }
+
+    return rows.sort((left, right) => {
+      if (left.groupLabel !== right.groupLabel) return left.groupLabel.localeCompare(right.groupLabel)
+      return left.fullName.localeCompare(right.fullName)
+    })
+  })
+
+  ipcMain.handle('groups:autoAssign', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'asignar grupos automaticamente')
+    const input = runAssignmentSchema.parse(payload)
+    const schoolCycle = input.schoolCycle.trim()
+    const students = await prisma.student.findMany({
+      where: {
+        schoolCycle,
+        status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
+        enrollmentStatus: { not: 'NO_SHOW' },
+      },
+      include: { groupAssignment: true },
+      orderBy: [{ secondaryAverage: 'desc' }, { curp: 'asc' }],
+    })
+    const labels = Array.from({ length: Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY)) }, (_item, index) => buildGroupLabel(index))
+    await prisma.$transaction(labels.map((label) => prisma.intakeGroup.upsert({ where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } }, update: { isActive: true, capacity: ASSIGNMENT_CAPACITY }, create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_CAPACITY } })))
+    const groups = await prisma.intakeGroup.findMany({ where: { schoolCycle, shift: MATUTINO_SHIFT, isActive: true }, orderBy: { label: 'asc' } })
+    const totals = {
+      MUJER: 0,
+      HOMBRE: 0,
+      NO_ESPECIFICADO: 0,
+      alto: 0,
+      medio: 0,
+      bajo: 0,
+      total: students.length,
+    }
+
+    for (const student of students) {
+      totals[sexBucket(student.sex)] += 1
+      totals[avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))] += 1
+    }
+
+    const assignmentStats = new Map(
+      groups.map((group) => [
+        group.id,
+        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
+      ]),
+    )
+
+    await prisma.$transaction(async (tx) => {
+      for (const student of students) {
+        const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
+        const sex = sexBucket(student.sex)
+        const target = selectBalancedTargetGroup(groups, assignmentStats, sex, band, totals)
+        if (!target) throw new Error('No hay cupo disponible para continuar la asignacion.')
+        const existing = student.groupAssignment
+        const assignment = existing
+          ? await tx.studentGroupAssignment.update({ where: { id: existing.id }, data: { groupId: target.id, status: 'ASIGNADO', updatedById: actor.id, reason: 'AUTO_ASIGNACION' } })
+          : await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: target.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: 'AUTO_ASIGNACION' } })
+        await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'ASIGNADO' } })
+        await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: student.id, beforeGroupId: existing?.groupId ?? null, afterGroupId: target.id, beforeGroupLabel: null, afterGroupLabel: target.label, actorId: actor.id, actorRole: actor.role, reason: 'AUTO_ASIGNACION' } })
+
+        const targetStats = assignmentStats.get(target.id)
+        if (targetStats) {
+          targetStats.assigned += 1
+          targetStats[band] += 1
+          targetStats[sex] += 1
+        }
+      }
+    })
+    return { ok: true, assignedCount: students.length, groupCount: groups.length }
+  })
+
+  ipcMain.handle('groups:confirmAssignment', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'confirmar asignacion de grupos')
+    const input = confirmAssignmentSchema.parse(payload)
+    const count = await prisma.studentGroupAssignment.updateMany({ where: { student: { schoolCycle: input.schoolCycle.trim() }, status: 'ASIGNADO' }, data: { status: 'CONFIRMADO', confirmedAt: new Date() } })
+    await prisma.student.updateMany({ where: { schoolCycle: input.schoolCycle.trim(), enrollmentStatus: 'ASIGNADO' }, data: { enrollmentStatus: 'CONFIRMADO' } })
+    return { ok: true, confirmed: count.count }
+  })
+
+  ipcMain.handle('groups:manualReassign', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'reasignar grupo manualmente')
+    const input = manualReassignSchema.parse(payload)
+    const assignment = await prisma.studentGroupAssignment.findUnique({ where: { studentId: input.studentId }, include: { group: true } })
+    if (!assignment) throw new Error('El alumno no tiene grupo asignado.')
+    const target = await prisma.intakeGroup.findUnique({ where: { id: input.toGroupId }, include: { assignments: { where: { status: { not: 'NO_SHOW' } } } } })
+    if (!target) throw new Error('Grupo destino no encontrado.')
+    if (target.assignments.length >= ASSIGNMENT_CAPACITY) throw new Error('El grupo destino ya alcanzo el cupo maximo de 40.')
+    const item = await prisma.studentGroupAssignment.update({ where: { id: assignment.id }, data: { groupId: target.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.reason.trim() } })
+    await prisma.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: input.studentId, beforeGroupId: assignment.groupId, beforeGroupLabel: assignment.group.label, afterGroupId: target.id, afterGroupLabel: target.label, actorId: actor.id, actorRole: actor.role, reason: input.reason.trim() } })
+    return { ok: true, assignmentId: item.id }
+  })
+
+  ipcMain.handle('groups:markNoShow', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'marcar no-show')
+    const input = markNoShowSchema.parse(payload)
+    const assignment = await prisma.studentGroupAssignment.findUnique({ where: { studentId: input.studentId } })
+    if (!assignment) throw new Error('El alumno no tiene una asignacion previa.')
+    await prisma.$transaction(async (tx) => {
+      await tx.studentGroupAssignment.update({ where: { id: assignment.id }, data: { status: 'NO_SHOW', updatedById: actor.id, reason: input.reason.trim() } })
+      await tx.student.update({ where: { id: input.studentId }, data: { enrollmentStatus: 'NO_SHOW' } })
+      await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: input.studentId, beforeGroupId: assignment.groupId, afterGroupId: assignment.groupId, actorId: actor.id, actorRole: actor.role, reason: `NO_SHOW: ${input.reason.trim()}` } })
+    })
+    return { ok: true }
+  })
+
   ipcMain.handle('audit:listRecent', async () => {
+    requireAuth()
     const logs = await prisma.auditLog.findMany({
       orderBy: { createdAt: 'desc' },
       take: 12,
