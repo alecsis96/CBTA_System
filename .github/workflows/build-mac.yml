@@ -29,6 +29,11 @@ jobs:
       - name: Generate Prisma client
         run: pnpm prisma generate
 
+      - name: Create packaged SQLite database
+        run: pnpm prisma db push --schema prisma/schema.prisma
+        env:
+          DATABASE_URL: file:./prisma/dev.db
+
       - name: Sync Prisma runtime
         run: |
           mkdir -p node_modules/.prisma
@@ -44,10 +49,10 @@ jobs:
         run: pnpm build:renderer && pnpm build:electron
 
       - name: Build DMG
-        run: pnpm exec electron-builder --mac dmg
+        run: pnpm exec electron-builder --mac dmg --publish never
 
       - name: Build ZIP
-        run: pnpm exec electron-builder --mac zip
+        run: pnpm exec electron-builder --mac zip --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
