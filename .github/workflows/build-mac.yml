@@ -24,13 +24,13 @@ jobs:
         run: pnpm --version
 
       - name: Install deps
-        run: corepack pnpm install
+        run: pnpm install
 
       - name: Build DMG
-        run: corepack pnpm dist:mac
+        run: pnpm dist:mac
 
       - name: Build ZIP
-        run: corepack pnpm dist:mac:zip
+        run: pnpm dist:mac:zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
