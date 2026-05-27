@@ -48,11 +48,11 @@ jobs:
       - name: Build renderer and electron
         run: pnpm build:renderer && pnpm build:electron
 
-      - name: Build DMG
-        run: pnpm exec electron-builder --mac dmg --publish never
+      - name: Build DMG (universal)
+        run: pnpm exec electron-builder --mac dmg --universal --publish never
 
-      - name: Build ZIP
-        run: pnpm exec electron-builder --mac zip --publish never
+      - name: Build ZIP (universal)
+        run: pnpm exec electron-builder --mac zip --universal --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
