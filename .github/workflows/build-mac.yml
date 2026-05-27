@@ -18,7 +18,7 @@ jobs:
         run: corepack enable
 
       - name: Install pnpm
-        run: npm install -g pnpm@11.1.2
+        run: npm install -g pnpm@11.1.2 --force
 
       - name: Check pnpm
         run: pnpm --version
