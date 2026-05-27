@@ -292,6 +292,13 @@ function loadStudentsFromExcel(): ExcelStudentRow[] {
 }
 
 export async function ensureBaseData() {
+  async function hasTable(tableName: string) {
+    const result = await prisma.$queryRaw<Array<{ name: string }>>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${tableName}
+    `
+    return result.length > 0
+  }
+
   const userTable = await prisma.$queryRaw<Array<{ name: string }>>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'User'
   `
@@ -388,6 +395,17 @@ export async function ensureBaseData() {
         },
       })
     }
+  }
+
+  const hasEnrollmentRequirementTable = await hasTable('EnrollmentRequirement')
+  const hasStudentRequirementStatusTable = await hasTable('StudentRequirementStatus')
+  const hasSequenceCounterTable = await hasTable('SequenceCounter')
+
+  if (!hasEnrollmentRequirementTable || !hasStudentRequirementStatusTable || !hasSequenceCounterTable) {
+    console.warn(
+      '[seed] Required enrollment tables are missing in local database. Skipping enrollment checklist seed to avoid startup crash.',
+    )
+    return
   }
 
   for (const requirement of enrollmentRequirements) {
