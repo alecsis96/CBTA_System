@@ -61,7 +61,7 @@ function requireRole(allowedRoles: AppRole[], actionLabel: string) {
 }
 
 const studentInputSchema = z.object({
-  enrollmentNumber: z.string().min(1),
+  enrollmentNumber: z.string().trim().optional().or(z.literal('')),
   curp: z.string().min(18).max(18),
   rfc: z.string().trim().optional().nullable(),
   firstName: z.string().min(1),
@@ -153,6 +153,7 @@ const admissionPaymentCreateSchema = z.object({
   folio: z.string().trim().optional(),
   curp: z.string().min(18).max(18),
   fullName: z.string().min(1),
+  insurancePaid: z.boolean().default(false),
 })
 
 const admissionListFiltersSchema = z
@@ -203,6 +204,20 @@ const manualReassignSchema = z.object({
 const markNoShowSchema = z.object({
   studentId: z.string().min(1),
   reason: z.string().trim().min(5),
+})
+
+const saveRequirementChecklistSchema = z.object({
+  items: z.array(z.object({
+    requirementId: z.string().min(1),
+    isDelivered: z.boolean(),
+    missingJustification: z.string().trim().optional(),
+    deadlineAt: z.string().trim().optional(),
+    notes: z.string().trim().optional(),
+  })),
+})
+
+const groupAssignedRosterSchema = z.object({
+  schoolCycle: z.string().min(1),
 })
 
 function escapeHtml(value: string) {
@@ -372,6 +387,7 @@ function enrollmentStatusLabel(enrollmentStatus: string | null | undefined) {
 function studentSummary(student: {
   id: string
   enrollmentNumber: string
+  officialEnrollmentNumber: string | null
   curp: string
   rfc: string | null
   firstName: string
@@ -387,7 +403,15 @@ function studentSummary(student: {
   municipality: string | null
   state: string | null
   status: string
+  documentationStatus: string
   enrollmentStatus?: string | null
+  admissionPayment?: {
+    status: string
+  } | null
+  guardian?: {
+    fullName: string
+    phone: string
+  } | null
   groupAssignment?: {
     group: {
       label: string
@@ -398,10 +422,16 @@ function studentSummary(student: {
   return {
     id: student.id,
     enrollmentNumber: student.enrollmentNumber,
+    officialEnrollmentNumber: student.officialEnrollmentNumber,
     curp: student.curp,
     rfc: student.rfc,
     phone: student.phone ?? null,
     email: student.email ?? null,
+    guardianFullName: student.guardian?.fullName ?? null,
+    guardianPhone: student.guardian?.phone ?? null,
+    admissionPaid: Boolean(student.admissionPayment),
+    admissionPaymentStatus: student.admissionPayment?.status ?? null,
+    documentationStatus: student.documentationStatus,
     firstName: student.firstName,
     paternalLastName: student.paternalLastName,
     maternalLastName: student.maternalLastName,
@@ -589,6 +619,7 @@ function admissionSummary(item: {
   folio: string
   curp: string
   fullName: string
+  insurancePaid: boolean
   paidAt: Date
   status: string
   student: { id: string } | null
@@ -600,11 +631,66 @@ function admissionSummary(item: {
     folio: item.folio,
     curp: item.curp,
     fullName: item.fullName,
+    insurancePaid: item.insurancePaid,
     paidAt: item.paidAt.toISOString(),
     status: item.status,
     studentId: item.student?.id ?? null,
     createdAt: item.createdAt.toISOString(),
     updatedAt: item.updatedAt.toISOString(),
+  }
+}
+
+const INTERNAL_FOLIO_PREFIX = '2610701044'
+
+async function buildStudentInternalFolio(tx: { sequenceCounter: typeof prisma.sequenceCounter }) {
+  const sequence = await tx.sequenceCounter.upsert({
+    where: { scope: 'STUDENT_INTERNAL_FOLIO' },
+    update: { lastValue: { increment: 1 } },
+    create: { scope: 'STUDENT_INTERNAL_FOLIO', lastValue: 1 },
+  })
+
+  return `${INTERNAL_FOLIO_PREFIX}${String(sequence.lastValue).padStart(4, '0')}`
+}
+
+function checklistStatusLabel(items: Array<{ isDelivered: boolean; deadlineAt: Date | null }>) {
+  if (items.length === 0) return 'PENDIENTE'
+  if (items.every((item) => item.isDelivered)) return 'COMPLETA'
+  if (items.some((item) => item.deadlineAt && item.deadlineAt.getTime() < Date.now() && !item.isDelivered)) return 'VENCIDA'
+  return 'PENDIENTE'
+}
+
+function requirementChecklistSummary(student: { id: string; firstName: string; paternalLastName: string; maternalLastName: string; documentationStatus: string; requirementStatuses: Array<{ isDelivered: boolean; missingJustification: string | null; deadlineAt: Date | null; notes: string | null; requirement: { id: string; code: string; label: string; requiredOriginals: number; requiredCopies: number; sortOrder: number } }> }) {
+  return {
+    studentId: student.id,
+    studentName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim(),
+    documentationStatus: student.documentationStatus,
+    items: student.requirementStatuses
+      .sort((left, right) => left.requirement.sortOrder - right.requirement.sortOrder)
+      .map((item) => ({
+        requirementId: item.requirement.id,
+        code: item.requirement.code,
+        label: item.requirement.label,
+        requiredOriginals: item.requirement.requiredOriginals,
+        requiredCopies: item.requirement.requiredCopies,
+        isDelivered: item.isDelivered,
+        missingJustification: item.missingJustification ?? '',
+        deadlineAt: item.deadlineAt ? item.deadlineAt.toISOString().slice(0, 10) : '',
+        notes: item.notes ?? '',
+      })),
+  }
+}
+
+function assignedRosterRow(entry: { status: string; student: { enrollmentNumber: string; firstName: string; paternalLastName: string; maternalLastName: string; curp: string; sex: string | null; secondaryAverage: unknown }; group: { label: string } }) {
+  const average = entry.student.secondaryAverage == null ? null : Number(entry.student.secondaryAverage)
+  return {
+    groupLabel: entry.group.label,
+    enrollmentNumber: entry.student.enrollmentNumber,
+    fullName: `${entry.student.firstName} ${entry.student.paternalLastName} ${entry.student.maternalLastName}`.trim(),
+    curp: entry.student.curp,
+    sex: entry.student.sex ?? 'N/E',
+    averageBand: avgBand(average),
+    secondaryAverage: average,
+    status: entry.status,
   }
 }
 
@@ -742,7 +828,8 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
   return { receipt, outputPath }
 }
 
-const ASSIGNMENT_CAPACITY = 40
+const ASSIGNMENT_GROUP_COUNT = 10
+const ASSIGNMENT_MAX_CAPACITY = 40
 const MATUTINO_SHIFT = 'MATUTINO'
 
 function avgBand(value: number | null) {
@@ -760,11 +847,14 @@ function sexBucket(value: string | null) {
   return 'NO_ESPECIFICADO'
 }
 
+type AssignmentSex = 'MUJER' | 'HOMBRE' | 'NO_ESPECIFICADO'
+type AssignmentBand = 'alto' | 'medio' | 'bajo'
+
 function buildGroupLabel(index: number) {
   return `1${String.fromCharCode(65 + index)}`
 }
 
-function buildAssignmentStats(groups: Array<{ id: string; label: string; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>) {
+function buildAssignmentStats(groups: Array<{ id: string; label: string; capacity: number; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>) {
   return groups.map((group) => {
     const assigned = group.assignments.filter((item) => item.status !== 'NO_SHOW')
     const totals = {
@@ -784,16 +874,16 @@ function buildAssignmentStats(groups: Array<{ id: string; label: string; assignm
     return {
       groupId: group.id,
       label: group.label,
-      capacity: ASSIGNMENT_CAPACITY,
+      capacity: group.capacity,
       assignedCount: assigned.length,
-      available: ASSIGNMENT_CAPACITY - assigned.length,
+      available: group.capacity - assigned.length,
       bands: { alto: totals.alto, medio: totals.medio, bajo: totals.bajo },
       sex: { mujer: totals.MUJER, hombre: totals.HOMBRE, noEspecificado: totals.NO_ESPECIFICADO },
     }
   })
 }
 
-function selectBalancedTargetGroup<T extends { id: string; label: string }>(
+function selectBalancedTargetGroup<T extends { id: string; label: string; capacity: number }>(
   groups: T[],
   stats: Map<string, { assigned: number; MUJER: number; HOMBRE: number; NO_ESPECIFICADO: number; alto: number; medio: number; bajo: number }>,
   sex: 'MUJER' | 'HOMBRE' | 'NO_ESPECIFICADO',
@@ -803,9 +893,10 @@ function selectBalancedTargetGroup<T extends { id: string; label: string }>(
   const desiredSexRatio = totals.total > 0 ? totals[sex] / totals.total : 0
   const desiredBandRatio = totals.total > 0 ? totals[band] / totals.total : 0
   const groupCount = Math.max(1, groups.length)
+  const desiredSexPerGroup = totals[sex] / groupCount
   const desiredBandPerGroup = totals[band] / groupCount
 
-  const candidates = groups.filter((group) => (stats.get(group.id)?.assigned ?? 0) < ASSIGNMENT_CAPACITY)
+  const candidates = groups.filter((group) => (stats.get(group.id)?.assigned ?? 0) < group.capacity)
   if (candidates.length === 0) return null
 
   candidates.sort((left, right) => {
@@ -815,6 +906,12 @@ function selectBalancedTargetGroup<T extends { id: string; label: string }>(
 
     const leftProjectedAssigned = leftStats.assigned + 1
     const rightProjectedAssigned = rightStats.assigned + 1
+
+    if (leftStats.assigned !== rightStats.assigned) return leftStats.assigned - rightStats.assigned
+
+    const leftSexGap = Math.abs(leftStats[sex] + 1 - desiredSexPerGroup)
+    const rightSexGap = Math.abs(rightStats[sex] + 1 - desiredSexPerGroup)
+    if (leftSexGap !== rightSexGap) return leftSexGap - rightSexGap
 
     const leftBandGap = leftStats[band] - desiredBandPerGroup
     const rightBandGap = rightStats[band] - desiredBandPerGroup
@@ -833,11 +930,164 @@ function selectBalancedTargetGroup<T extends { id: string; label: string }>(
     const rightBandPenalty = Math.abs(rightBandRatio - desiredBandRatio)
 
     if (leftBandPenalty !== rightBandPenalty) return leftBandPenalty - rightBandPenalty
-    if (leftStats.assigned !== rightStats.assigned) return leftStats.assigned - rightStats.assigned
     return left.label.localeCompare(right.label)
   })
 
   return candidates[0]
+}
+
+function buildPerGroupTargets(total: number, groupCount: number) {
+  const base = Math.floor(total / groupCount)
+  const remainder = total % groupCount
+  return Array.from({ length: groupCount }, (_item, index) => base + (index < remainder ? 1 : 0))
+}
+
+function buildProportionalTargets(capacities: number[], totalCount: number) {
+  const totalCapacity = capacities.reduce((sum, value) => sum + value, 0)
+  if (totalCapacity === 0) {
+    return capacities.map(() => 0)
+  }
+
+  const bases = capacities.map((capacity) => Math.min(capacity, Math.floor((totalCount * capacity) / totalCapacity)))
+  let remainder = totalCount - bases.reduce((sum, value) => sum + value, 0)
+
+  const rankedFractions = capacities
+    .map((capacity, index) => ({
+      index,
+      fraction: (totalCount * capacity) / totalCapacity - bases[index],
+    }))
+    .filter((item) => bases[item.index] < capacities[item.index])
+    .sort((left, right) => {
+      if (left.fraction !== right.fraction) return right.fraction - left.fraction
+      return left.index - right.index
+    })
+
+  for (const item of rankedFractions) {
+    if (remainder <= 0) break
+    bases[item.index] += 1
+    remainder -= 1
+  }
+
+  return bases
+}
+
+function selectTargetGroupByQuota<TGroup extends { id: string; label: string; capacity: number }>(
+  groups: TGroup[],
+  stats: Map<string, { assigned: number; MUJER: number; HOMBRE: number; NO_ESPECIFICADO: number; alto: number; medio: number; bajo: number }>,
+  sexTargets: Map<string, { MUJER: number; HOMBRE: number; NO_ESPECIFICADO: number }>,
+  sex: AssignmentSex,
+  band: AssignmentBand,
+  desiredBandPerGroup: { alto: number; medio: number; bajo: number },
+) {
+  const candidates = groups.filter((group) => {
+    const target = sexTargets.get(group.id)
+    const stat = stats.get(group.id)
+    if (!target || !stat) return false
+    if (stat.assigned >= group.capacity) return false
+    return stat[sex] < target[sex]
+  })
+
+  const pool = candidates.length > 0 ? candidates : groups.filter((group) => (stats.get(group.id)?.assigned ?? 0) < group.capacity)
+  if (pool.length === 0) return null
+
+  pool.sort((left, right) => {
+    const leftStats = stats.get(left.id)
+    const rightStats = stats.get(right.id)
+    const leftTarget = sexTargets.get(left.id)
+    const rightTarget = sexTargets.get(right.id)
+    if (!leftStats || !rightStats || !leftTarget || !rightTarget) return left.label.localeCompare(right.label)
+
+    const leftRemainingSex = leftTarget[sex] - leftStats[sex]
+    const rightRemainingSex = rightTarget[sex] - rightStats[sex]
+    if (leftRemainingSex !== rightRemainingSex) return rightRemainingSex - leftRemainingSex
+
+    if (leftStats.assigned !== rightStats.assigned) return leftStats.assigned - rightStats.assigned
+
+    const leftBandGap = Math.abs((leftStats[band] + 1) - desiredBandPerGroup[band])
+    const rightBandGap = Math.abs((rightStats[band] + 1) - desiredBandPerGroup[band])
+    if (leftBandGap !== rightBandGap) return leftBandGap - rightBandGap
+
+    return left.label.localeCompare(right.label)
+  })
+
+  return pool[0]
+}
+
+function buildFixedAssignmentPlan<TStudent extends { sex: string | null; secondaryAverage: unknown }, TGroup extends { id: string; label: string; capacity: number }>(
+  students: TStudent[],
+  groups: TGroup[],
+) {
+  const normalizedStudents: Array<{ student: TStudent; band: AssignmentBand; sex: AssignmentSex }> = students.map((student) => {
+    const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
+    const sex = sexBucket(student.sex)
+    return { student, band, sex }
+  })
+
+  const totals = {
+    MUJER: normalizedStudents.filter((item) => item.sex === 'MUJER').length,
+    HOMBRE: normalizedStudents.filter((item) => item.sex === 'HOMBRE').length,
+    NO_ESPECIFICADO: normalizedStudents.filter((item) => item.sex === 'NO_ESPECIFICADO').length,
+    alto: normalizedStudents.filter((item) => item.band === 'alto').length,
+    medio: normalizedStudents.filter((item) => item.band === 'medio').length,
+    bajo: normalizedStudents.filter((item) => item.band === 'bajo').length,
+  }
+
+  const totalTargets = buildPerGroupTargets(normalizedStudents.length, groups.length)
+  const mujerTargets = buildProportionalTargets(totalTargets, totals.MUJER)
+  const remainingAfterWomen = totalTargets.map((target, index) => target - mujerTargets[index])
+  const hombreTargets = buildProportionalTargets(remainingAfterWomen, totals.HOMBRE)
+  const remainingAfterMen = remainingAfterWomen.map((target, index) => target - hombreTargets[index])
+  const noTargets = buildProportionalTargets(remainingAfterMen, totals.NO_ESPECIFICADO)
+  const desiredBandPerGroup = {
+    alto: totals.alto / Math.max(1, groups.length),
+    medio: totals.medio / Math.max(1, groups.length),
+    bajo: totals.bajo / Math.max(1, groups.length),
+  }
+
+  const sexTargets = new Map(
+    groups.map((group, index) => [
+      group.id,
+      {
+        MUJER: mujerTargets[index],
+        HOMBRE: hombreTargets[index],
+        NO_ESPECIFICADO: noTargets[index],
+      },
+    ]),
+  )
+
+  const stats = new Map(
+    groups.map((group) => [
+      group.id,
+      { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
+    ]),
+  )
+
+  const assignments: Array<{ group: TGroup; student: TStudent; band: AssignmentBand; sex: AssignmentSex }> = []
+
+  for (const item of normalizedStudents) {
+    const target = selectTargetGroupByQuota(
+      groups.filter((group) => (stats.get(group.id)?.assigned ?? 0) < (sexTargets.get(group.id)?.MUJER ?? 0) + (sexTargets.get(group.id)?.HOMBRE ?? 0) + (sexTargets.get(group.id)?.NO_ESPECIFICADO ?? 0)),
+      stats,
+      sexTargets,
+      item.sex,
+      item.band,
+      desiredBandPerGroup,
+    )
+    if (!target) {
+      continue
+    }
+
+    assignments.push({ group: target, student: item.student, band: item.band, sex: item.sex })
+
+    const stat = stats.get(target.id)
+    if (stat) {
+      stat.assigned += 1
+      stat[item.sex] += 1
+      stat[item.band] += 1
+    }
+  }
+
+  return assignments
 }
 
 function batchRocHtml(entries: Array<{ receipt: { rocNumber: string; totalAmount: unknown; lines: Array<{ concept: { code: string; name: string }; unitAmount: unknown }> }; student: { firstName: string; paternalLastName: string; maternalLastName: string; enrollmentNumber: string; addressLine: string; neighborhood: string | null; locality: string | null; municipality: string | null; state: string | null } }>) {
@@ -851,7 +1101,7 @@ function batchRocHtml(entries: Array<{ receipt: { rocNumber: string; totalAmount
       const address = [entry.student.addressLine, entry.student.neighborhood, entry.student.locality, entry.student.municipality, entry.student.state]
         .filter(Boolean)
         .join(', ')
-      return `<article class="roc-card"><h3>ROC ${escapeHtml(entry.receipt.rocNumber)}</h3><p><strong>Alumno:</strong> ${escapeHtml(fullName)}</p><p><strong>Matricula:</strong> ${escapeHtml(entry.student.enrollmentNumber)}</p><p><strong>Grupo:</strong> MATUTINO</p><p><strong>Domicilio:</strong> ${escapeHtml(address)}</p><p><strong>Conceptos:</strong><br/>${concepts}</p><p><strong>Total:</strong> $${total.toFixed(2)}</p></article>`
+      return `<article class="roc-card"><h3>ROC ${escapeHtml(entry.receipt.rocNumber)}</h3><p><strong>Alumno:</strong> ${escapeHtml(fullName)}</p><p><strong>Folio interno:</strong> ${escapeHtml(entry.student.enrollmentNumber)}</p><p><strong>Grupo:</strong> MATUTINO</p><p><strong>Domicilio:</strong> ${escapeHtml(address)}</p><p><strong>Conceptos:</strong><br/>${concepts}</p><p><strong>Total:</strong> $${total.toFixed(2)}</p></article>`
     })
     .join('')
   return `<!doctype html><html><head><meta charset="utf-8"><title>ROC lote</title><style>@page{size:letter;margin:10mm}body{font-family:Arial,sans-serif;color:#111}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8mm}.roc-card{border:1px solid #555;padding:10px;break-inside:avoid;min-height:120mm}h3{margin:0 0 6px}</style></head><body><div class="grid">${cards}</div></body></html>`
@@ -871,7 +1121,7 @@ function buildBatchRocWorkbook(entries: Array<{ receipt: { rocNumber: string; to
       return [
         `ROC ${entry.receipt.rocNumber}`,
         `Alumno: ${fullName}`,
-        `Matricula: ${entry.student.enrollmentNumber}`,
+        `Folio interno: ${entry.student.enrollmentNumber}`,
         `Total: $${Number(entry.receipt.totalAmount).toFixed(2)} | ${concepts}`,
       ]
     }
@@ -890,6 +1140,48 @@ function buildBatchRocWorkbook(entries: Array<{ receipt: { rocNumber: string; to
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, worksheet, 'ROC_Lote_2xHoja')
   return workbook
+}
+
+function buildAssignedRosterWorkbook(rows: Array<{ groupLabel: string; enrollmentNumber: string; fullName: string; curp: string; sex: string; secondaryAverage: number | null; averageBand: string; status: string }>) {
+  const grouped = new Map<string, string[][]>()
+
+  for (const row of rows) {
+    const list = grouped.get(row.groupLabel) ?? []
+    list.push([
+      row.groupLabel,
+      row.enrollmentNumber,
+      row.fullName,
+      row.curp,
+      row.sex,
+      row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1),
+      row.averageBand.toUpperCase(),
+      row.status,
+    ])
+    grouped.set(row.groupLabel, list)
+  }
+
+  const workbook = XLSX.utils.book_new()
+  for (const [groupLabel, data] of grouped) {
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['Grupo', 'Folio interno', 'Alumno', 'CURP', 'Sexo', 'Promedio', 'Banda', 'Estatus'],
+      ...data,
+    ])
+    worksheet['!cols'] = [{ wch: 10 }, { wch: 18 }, { wch: 42 }, { wch: 22 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 14 }]
+    XLSX.utils.book_append_sheet(workbook, worksheet, groupLabel)
+  }
+  return workbook
+}
+
+function assignedRosterHtml(rows: Array<{ groupLabel: string; enrollmentNumber: string; fullName: string; curp: string; sex: string; secondaryAverage: number | null; averageBand: string; status: string }>) {
+  const groups = Array.from(new Set(rows.map((row) => row.groupLabel))).sort((a, b) => a.localeCompare(b))
+  const sections = groups.map((group) => {
+    const items = rows.filter((row) => row.groupLabel === group)
+      .map((row) => `<tr><td>${escapeHtml(row.enrollmentNumber)}</td><td>${escapeHtml(row.fullName)}</td><td>${escapeHtml(row.curp)}</td><td>${escapeHtml(row.sex)}</td><td>${escapeHtml(row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1))}</td><td>${escapeHtml(row.averageBand.toUpperCase())}</td><td>${escapeHtml(row.status)}</td></tr>`)
+      .join('')
+    return `<section class="group-roster"><h2>Grupo ${escapeHtml(group)}</h2><table><thead><tr><th>Folio interno</th><th>Alumno</th><th>CURP</th><th>Sexo</th><th>Promedio</th><th>Banda</th><th>Estatus</th></tr></thead><tbody>${items}</tbody></table></section>`
+  }).join('')
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Listado de grupos</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{margin:0 0 18px}h2{margin:22px 0 10px}table{width:100%;border-collapse:collapse;margin-bottom:12px}th,td{border:1px solid #c9d6c9;padding:8px;text-align:left;font-size:12px}th{background:#eef5ee}</style></head><body><h1>Listado de grupos asignados</h1>${sections}</body></html>`
 }
 
 export function registerIpcHandlers() {
@@ -959,6 +1251,7 @@ export function registerIpcHandlers() {
           folio,
           curp: input.curp.trim().toUpperCase(),
           fullName: input.fullName.trim(),
+          insurancePaid: input.insurancePaid,
           status: 'PAGADO_PENDIENTE_CAPTURA',
         },
         include: { student: { select: { id: true } } },
@@ -1277,7 +1570,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('students:list', async () => {
     requireAuth()
     const students = await prisma.student.findMany({
-      include: { groupAssignment: { include: { group: true } } },
+      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -1288,7 +1581,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const students = await prisma.student.findMany({
       where: { status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] } },
-      include: { groupAssignment: { include: { group: true } } },
+      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -1309,6 +1602,79 @@ export function registerIpcHandlers() {
     return studentDetail(student)
   })
 
+  ipcMain.handle('students:getNextInternalFolioPreview', async () => {
+    requireAuth()
+    const sequence = await prisma.sequenceCounter.findUnique({ where: { scope: 'STUDENT_INTERNAL_FOLIO' } })
+    const nextValue = (sequence?.lastValue ?? 0) + 1
+    return `${INTERNAL_FOLIO_PREFIX}${String(nextValue).padStart(4, '0')}`
+  })
+
+  ipcMain.handle('students:getRequirementChecklist', async (_event, studentId) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'consultar checklist documental')
+    const id = z.string().min(1).parse(studentId)
+    const student = await prisma.student.findUnique({
+      where: { id },
+      include: {
+        requirementStatuses: {
+          include: { requirement: true },
+        },
+      },
+    })
+
+    if (!student) throw new Error('No se encontro el alumno para el checklist documental.')
+    return requirementChecklistSummary(student)
+  })
+
+  ipcMain.handle('students:saveRequirementChecklist', async (_event, studentId, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'guardar checklist documental')
+    const id = z.string().min(1).parse(studentId)
+    const input = saveRequirementChecklistSchema.parse(payload)
+
+    const student = await prisma.$transaction(async (tx) => {
+      for (const item of input.items) {
+        await tx.studentRequirementStatus.update({
+          where: { studentId_requirementId: { studentId: id, requirementId: item.requirementId } },
+          data: {
+            isDelivered: item.isDelivered,
+            missingJustification: item.isDelivered ? null : normalizeOptional(item.missingJustification),
+            deadlineAt: item.isDelivered || !item.deadlineAt ? null : new Date(item.deadlineAt),
+            notes: normalizeOptional(item.notes),
+            reviewedAt: new Date(),
+            reviewedBy: actor.displayName,
+          },
+        })
+      }
+
+      const refreshed = await tx.student.findUnique({
+        where: { id },
+        include: {
+          requirementStatuses: {
+            include: { requirement: true },
+          },
+        },
+      })
+
+      if (!refreshed) throw new Error('No se encontro el alumno despues de guardar el checklist.')
+
+      await tx.student.update({
+        where: { id },
+        data: { documentationStatus: checklistStatusLabel(refreshed.requirementStatuses) },
+      })
+
+      return tx.student.findUnique({
+        where: { id },
+        include: {
+          requirementStatuses: {
+            include: { requirement: true },
+          },
+        },
+      })
+    })
+
+    if (!student) throw new Error('No se pudo reconstruir el checklist documental.')
+    return requirementChecklistSummary(student)
+  })
+
   ipcMain.handle('students:create', async (_event, payload) => {
     const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear alumnos')
     const input = studentInputSchema.parse(payload)
@@ -1325,7 +1691,7 @@ export function registerIpcHandlers() {
     const student = await prisma.$transaction(async (tx) => {
       const createdStudent = await tx.student.create({
         data: {
-          enrollmentNumber: input.enrollmentNumber.trim(),
+          enrollmentNumber: await buildStudentInternalFolio(tx),
           curp: input.curp.trim().toUpperCase(),
           rfc: normalizeOptional(input.rfc)?.toUpperCase(),
           firstName: input.firstName.trim(),
@@ -1349,6 +1715,7 @@ export function registerIpcHandlers() {
           examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
           academicStatus: normalizeOptional(input.academicStatus),
+          documentationStatus: 'PENDIENTE',
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: 'INSCRITO',
           validatedAt: validated ? new Date() : null,
@@ -1365,6 +1732,13 @@ export function registerIpcHandlers() {
           },
         },
       })
+
+      const requirements = await tx.enrollmentRequirement.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } })
+      if (requirements.length > 0) {
+        await tx.studentRequirementStatus.createMany({
+          data: requirements.map((requirement) => ({ studentId: createdStudent.id, requirementId: requirement.id })),
+        })
+      }
 
       await tx.auditLog.create({
         data: {
@@ -1411,7 +1785,6 @@ export function registerIpcHandlers() {
       const updatedStudent = await tx.student.update({
         where: { id },
         data: {
-          enrollmentNumber: input.enrollmentNumber.trim(),
           curp: input.curp.trim().toUpperCase(),
           rfc: normalizeOptional(input.rfc)?.toUpperCase(),
           firstName: input.firstName.trim(),
@@ -1781,8 +2154,8 @@ export function registerIpcHandlers() {
       input.labels.map((label) =>
         prisma.intakeGroup.upsert({
           where: { schoolCycle_label_shift: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT } },
-          update: { isActive: true, capacity: ASSIGNMENT_CAPACITY },
-          create: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_CAPACITY },
+          update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY },
+          create: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
         }),
       ),
     )
@@ -1827,7 +2200,7 @@ export function registerIpcHandlers() {
       select: { sex: true, secondaryAverage: true },
     })
 
-    const groupCount = Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY))
+    const groupCount = ASSIGNMENT_GROUP_COUNT
     const totals = {
       MUJER: 0,
       HOMBRE: 0,
@@ -1847,44 +2220,22 @@ export function registerIpcHandlers() {
       id: `preview-${index + 1}`,
       groupId: `preview-${index + 1}`,
       label: buildGroupLabel(index),
-      capacity: ASSIGNMENT_CAPACITY,
+      capacity: ASSIGNMENT_MAX_CAPACITY,
       assignedCount: 0,
-      available: ASSIGNMENT_CAPACITY,
+      available: ASSIGNMENT_MAX_CAPACITY,
       bands: { alto: 0, medio: 0, bajo: 0 },
       sex: { mujer: 0, hombre: 0, noEspecificado: 0 },
     }))
 
-    const bucketStats = new Map(
-      buckets.map((bucket) => [
-        bucket.id,
-        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
-      ]),
-    )
+    const plan = buildFixedAssignmentPlan(students, buckets)
 
-    for (const student of students) {
-      const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
-      const sex = sexBucket(student.sex)
-      const target = selectBalancedTargetGroup(buckets, bucketStats, sex, band, totals)
-
-      if (!target) {
-        break
-      }
-
-      const targetStats = bucketStats.get(target.id)
-      if (!targetStats) {
-        break
-      }
-
-      target.assignedCount += 1
-      target.available = target.capacity - target.assignedCount
-      target.bands[band] += 1
-      if (sex === 'MUJER') target.sex.mujer += 1
-      else if (sex === 'HOMBRE') target.sex.hombre += 1
-      else target.sex.noEspecificado += 1
-
-      targetStats.assigned += 1
-      targetStats[band] += 1
-      targetStats[sex] += 1
+    for (const entry of plan) {
+      entry.group.assignedCount += 1
+      entry.group.available = entry.group.capacity - entry.group.assignedCount
+      entry.group.bands[entry.band] += 1
+      if (entry.sex === 'MUJER') entry.group.sex.mujer += 1
+      else if (entry.sex === 'HOMBRE') entry.group.sex.hombre += 1
+      else entry.group.sex.noEspecificado += 1
     }
 
     return buckets
@@ -1912,7 +2263,7 @@ export function registerIpcHandlers() {
       },
     })
 
-    const groupCount = Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY))
+    const groupCount = ASSIGNMENT_GROUP_COUNT
     const totals = {
       MUJER: 0,
       HOMBRE: 0,
@@ -1931,14 +2282,8 @@ export function registerIpcHandlers() {
     const groups = Array.from({ length: groupCount }, (_item, index) => ({
       id: `preview-${index + 1}`,
       label: buildGroupLabel(index),
+      capacity: ASSIGNMENT_MAX_CAPACITY,
     }))
-
-    const stats = new Map(
-      groups.map((group) => [
-        group.id,
-        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
-      ]),
-    )
 
     const rows: Array<{
       groupLabel: string
@@ -1950,27 +2295,17 @@ export function registerIpcHandlers() {
       secondaryAverage: number | null
     }> = []
 
-    for (const student of students) {
-      const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
-      const sex = sexBucket(student.sex)
-      const target = selectBalancedTargetGroup(groups, stats, sex, band, totals)
-      if (!target) break
+    const plan = buildFixedAssignmentPlan(students, groups)
 
-      const targetStats = stats.get(target.id)
-      if (targetStats) {
-        targetStats.assigned += 1
-        targetStats[band] += 1
-        targetStats[sex] += 1
-      }
-
+    for (const entry of plan) {
       rows.push({
-        groupLabel: target.label,
-        enrollmentNumber: student.enrollmentNumber,
-        fullName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`,
-        curp: student.curp,
-        sex: student.sex ?? 'N/E',
-        averageBand: band,
-        secondaryAverage: student.secondaryAverage == null ? null : Number(student.secondaryAverage),
+        groupLabel: entry.group.label,
+        enrollmentNumber: entry.student.enrollmentNumber,
+        fullName: `${entry.student.firstName} ${entry.student.paternalLastName} ${entry.student.maternalLastName}`,
+        curp: entry.student.curp,
+        sex: entry.student.sex ?? 'N/E',
+        averageBand: entry.band,
+        secondaryAverage: entry.student.secondaryAverage == null ? null : Number(entry.student.secondaryAverage),
       })
     }
 
@@ -1993,8 +2328,8 @@ export function registerIpcHandlers() {
       include: { groupAssignment: true },
       orderBy: [{ secondaryAverage: 'desc' }, { curp: 'asc' }],
     })
-    const labels = Array.from({ length: Math.max(1, Math.ceil(students.length / ASSIGNMENT_CAPACITY)) }, (_item, index) => buildGroupLabel(index))
-    await prisma.$transaction(labels.map((label) => prisma.intakeGroup.upsert({ where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } }, update: { isActive: true, capacity: ASSIGNMENT_CAPACITY }, create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_CAPACITY } })))
+    const labels = Array.from({ length: ASSIGNMENT_GROUP_COUNT }, (_item, index) => buildGroupLabel(index))
+    await prisma.$transaction(labels.map((label) => prisma.intakeGroup.upsert({ where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } }, update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY }, create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY } })))
     const groups = await prisma.intakeGroup.findMany({ where: { schoolCycle, shift: MATUTINO_SHIFT, isActive: true }, orderBy: { label: 'asc' } })
     const totals = {
       MUJER: 0,
@@ -2011,18 +2346,12 @@ export function registerIpcHandlers() {
       totals[avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))] += 1
     }
 
-    const assignmentStats = new Map(
-      groups.map((group) => [
-        group.id,
-        { assigned: 0, MUJER: 0, HOMBRE: 0, NO_ESPECIFICADO: 0, alto: 0, medio: 0, bajo: 0 },
-      ]),
-    )
+    const plannedAssignments = buildFixedAssignmentPlan(students, groups)
+    const plannedGroupByStudentId = new Map(plannedAssignments.map((entry) => [entry.student.id, entry.group]))
 
     await prisma.$transaction(async (tx) => {
       for (const student of students) {
-        const band = avgBand(student.secondaryAverage == null ? null : Number(student.secondaryAverage))
-        const sex = sexBucket(student.sex)
-        const target = selectBalancedTargetGroup(groups, assignmentStats, sex, band, totals)
+        const target = plannedGroupByStudentId.get(student.id)
         if (!target) throw new Error('No hay cupo disponible para continuar la asignacion.')
         const existing = student.groupAssignment
         const assignment = existing
@@ -2030,13 +2359,6 @@ export function registerIpcHandlers() {
           : await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: target.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: 'AUTO_ASIGNACION' } })
         await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'ASIGNADO' } })
         await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: student.id, beforeGroupId: existing?.groupId ?? null, afterGroupId: target.id, beforeGroupLabel: null, afterGroupLabel: target.label, actorId: actor.id, actorRole: actor.role, reason: 'AUTO_ASIGNACION' } })
-
-        const targetStats = assignmentStats.get(target.id)
-        if (targetStats) {
-          targetStats.assigned += 1
-          targetStats[band] += 1
-          targetStats[sex] += 1
-        }
       }
     })
     return { ok: true, assignedCount: students.length, groupCount: groups.length }
@@ -2050,6 +2372,64 @@ export function registerIpcHandlers() {
     return { ok: true, confirmed: count.count }
   })
 
+  ipcMain.handle('groups:listAssignedRoster', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'consultar listado de grupos asignados')
+    const input = groupAssignedRosterSchema.parse(payload)
+    const rows = await prisma.studentGroupAssignment.findMany({
+      where: {
+        status: { in: ['ASIGNADO', 'CONFIRMADO'] },
+        student: { schoolCycle: input.schoolCycle.trim() },
+      },
+      include: {
+        student: true,
+        group: true,
+      },
+      orderBy: [{ group: { label: 'asc' } }, { student: { paternalLastName: 'asc' } }],
+    })
+
+    return rows.map(assignedRosterRow)
+  })
+
+  ipcMain.handle('groups:exportAssignedRoster', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'exportar listado de grupos asignados')
+    const input = groupAssignedRosterSchema.parse(payload)
+    const rows = await prisma.studentGroupAssignment.findMany({
+      where: {
+        status: { in: ['ASIGNADO', 'CONFIRMADO'] },
+        student: { schoolCycle: input.schoolCycle.trim() },
+      },
+      include: {
+        student: true,
+        group: true,
+      },
+      orderBy: [{ group: { label: 'asc' } }, { student: { paternalLastName: 'asc' } }],
+    })
+
+    const roster = rows.map(assignedRosterRow)
+    const workbook = buildAssignedRosterWorkbook(roster)
+    const outputPath = join(app.getPath('documents'), `grupos-asignados-${Date.now()}.xlsx`)
+    XLSX.writeFile(workbook, outputPath)
+    return { outputPath, exportedCount: roster.length }
+  })
+
+  ipcMain.handle('groups:printAssignedRoster', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'imprimir listado de grupos asignados')
+    const input = groupAssignedRosterSchema.parse(payload)
+    const rows = await prisma.studentGroupAssignment.findMany({
+      where: {
+        status: { in: ['ASIGNADO', 'CONFIRMADO'] },
+        student: { schoolCycle: input.schoolCycle.trim() },
+      },
+      include: {
+        student: true,
+        group: true,
+      },
+      orderBy: [{ group: { label: 'asc' } }, { student: { paternalLastName: 'asc' } }],
+    })
+
+    return printHtmlWithFallback(assignedRosterHtml(rows.map(assignedRosterRow)), `grupos-asignados-${Date.now()}.pdf`)
+  })
+
   ipcMain.handle('groups:manualReassign', async (_event, payload) => {
     const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'reasignar grupo manualmente')
     const input = manualReassignSchema.parse(payload)
@@ -2057,7 +2437,7 @@ export function registerIpcHandlers() {
     if (!assignment) throw new Error('El alumno no tiene grupo asignado.')
     const target = await prisma.intakeGroup.findUnique({ where: { id: input.toGroupId }, include: { assignments: { where: { status: { not: 'NO_SHOW' } } } } })
     if (!target) throw new Error('Grupo destino no encontrado.')
-    if (target.assignments.length >= ASSIGNMENT_CAPACITY) throw new Error('El grupo destino ya alcanzo el cupo maximo de 40.')
+    if (target.assignments.length >= target.capacity) throw new Error(`El grupo destino ya alcanzo el cupo maximo de ${target.capacity}.`)
     const item = await prisma.studentGroupAssignment.update({ where: { id: assignment.id }, data: { groupId: target.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.reason.trim() } })
     await prisma.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: input.studentId, beforeGroupId: assignment.groupId, beforeGroupLabel: assignment.group.label, afterGroupId: target.id, afterGroupLabel: target.label, actorId: actor.id, actorRole: actor.role, reason: input.reason.trim() } })
     return { ok: true, assignmentId: item.id }

@@ -2,7 +2,7 @@ import { contextBridge } from 'electron'
 import { ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('cbta', {
-  appName: 'CBTA Financieros',
+  appName: 'CBTA 44 Sistema',
   auth: {
     login: (input: unknown) => ipcRenderer.invoke('auth:login', input),
     logout: () => ipcRenderer.invoke('auth:logout'),
@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('cbta', {
     list: () => ipcRenderer.invoke('students:list'),
     listValidated: () => ipcRenderer.invoke('students:listValidated'),
     get: (studentId: string) => ipcRenderer.invoke('students:get', studentId),
+    getNextInternalFolioPreview: () => ipcRenderer.invoke('students:getNextInternalFolioPreview'),
+    getRequirementChecklist: (studentId: string) => ipcRenderer.invoke('students:getRequirementChecklist', studentId),
+    saveRequirementChecklist: (studentId: string, input: unknown) => ipcRenderer.invoke('students:saveRequirementChecklist', studentId, input),
     create: (input: unknown) => ipcRenderer.invoke('students:create', input),
     update: (studentId: string, input: unknown) => ipcRenderer.invoke('students:update', studentId, input),
   },
@@ -44,6 +47,9 @@ contextBridge.exposeInMainWorld('cbta', {
     stats: (input: unknown) => ipcRenderer.invoke('groups:stats', input),
     preview: (input: unknown) => ipcRenderer.invoke('groups:preview', input),
     previewRoster: (input: unknown) => ipcRenderer.invoke('groups:previewRoster', input),
+    listAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:listAssignedRoster', input),
+    exportAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:exportAssignedRoster', input),
+    printAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:printAssignedRoster', input),
   },
   audit: {
     listRecent: () => ipcRenderer.invoke('audit:listRecent'),

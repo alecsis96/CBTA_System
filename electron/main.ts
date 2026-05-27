@@ -1,7 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import * as path from 'node:path'
-import { registerIpcHandlers } from './ipc'
-import { ensureBaseData } from './seed'
+import { initializeDatabaseEnvironment } from './db-bootstrap'
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL)
 
@@ -11,7 +10,7 @@ function createWindow() {
     height: 920,
     minWidth: 1100,
     minHeight: 760,
-    title: 'CBTA Financieros',
+    title: 'CBTA 44 Sistema',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -25,12 +24,19 @@ function createWindow() {
     return
   }
 
-  void win.loadFile(path.join(__dirname, '../dist/index.html'))
+  void win.loadFile(path.join(app.getAppPath(), 'dist/index.html'))
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  initializeDatabaseEnvironment()
+
+  const [{ registerIpcHandlers }, { ensureBaseData }] = await Promise.all([
+    import('./ipc'),
+    import('./seed'),
+  ])
+
   registerIpcHandlers()
-  void ensureBaseData()
+  await ensureBaseData()
   createWindow()
 
   app.on('activate', () => {

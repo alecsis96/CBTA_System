@@ -1,4 +1,4 @@
-# Guia de instalacion - CBTA Financieros
+# Guia de instalacion - CBTA 44 Sistema
 
 Esta guia instala el sistema en una computadora nueva para operacion local.
 
@@ -164,3 +164,26 @@ Para restaurar:
 
 5. Electron no abre en Mac por permisos
 - Confirmar permisos en `Privacidad y seguridad` y reintentar `corepack pnpm dev`.
+
+## 13) Generar instalador .exe (Windows)
+
+Para crear un instalador para usuarios finales:
+
+```bash
+corepack pnpm install
+corepack pnpm run dist:win
+```
+
+Salida:
+- carpeta `release/`
+- instalador tipo `CBTA44_SYS-<version>-<arch>.exe`
+
+Opcional (version portable):
+
+```bash
+corepack pnpm run dist:win:portable
+```
+
+Notas de despliegue:
+- El build incluye `roc 2026.xlsx` y `FICHAS 2026.xlsx`.
+- En modo instalado, la base SQLite se guarda en el perfil del usuario (`userData`) para no perder datos al actualizar la app.

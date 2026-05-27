@@ -1,7 +1,7 @@
-import { prisma } from './db'
+import { prisma, resetPrismaClient, getLocalDbPath, getPackagedTemplateDbPath } from './db'
 import { scryptSync, randomBytes } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import * as XLSX from 'xlsx'
 
 const AUTH_HASH_PREFIX = 'scrypt'
@@ -154,6 +154,20 @@ const baseConcepts = [
   },
 ]
 
+const enrollmentRequirements = [
+  { code: 'CERT_ESTUDIOS', label: 'Certificado de estudios', requiredOriginals: 1, requiredCopies: 2, sortOrder: 10 },
+  { code: 'ACTA_NACIMIENTO', label: 'Acta de nacimiento actualizada', requiredOriginals: 1, requiredCopies: 2, sortOrder: 20 },
+  { code: 'CARTA_CONDUCTA', label: 'Carta de conducta', requiredOriginals: 1, requiredCopies: 1, sortOrder: 30 },
+  { code: 'CURP_COPIAS', label: 'CURP actual', requiredOriginals: 0, requiredCopies: 3, sortOrder: 40 },
+  { code: 'NSS', label: 'Numero de seguro social IMSS/ISSSTE/ISSTECH', requiredOriginals: 0, requiredCopies: 2, sortOrder: 50 },
+  { code: 'INE_TUTOR', label: 'Copia de credencial de elector del tutor', requiredOriginals: 0, requiredCopies: 1, sortOrder: 60 },
+  { code: 'TELEFONOS', label: 'Numero telefonico del alumno y tutor', requiredOriginals: 0, requiredCopies: 0, sortOrder: 70 },
+  { code: 'CORREO', label: 'Correo vigente del alumno', requiredOriginals: 0, requiredCopies: 0, sortOrder: 80 },
+  { code: 'FOTOS', label: '6 fotografias tamano infantil', requiredOriginals: 0, requiredCopies: 6, sortOrder: 90 },
+] as const
+
+const INTERNAL_FOLIO_PREFIX = '2610701044'
+
 type ExcelStudentRow = {
   enrollmentNumber: string
   curp: string
@@ -278,6 +292,22 @@ function loadStudentsFromExcel(): ExcelStudentRow[] {
 }
 
 export async function ensureBaseData() {
+  const userTable = await prisma.$queryRaw<Array<{ name: string }>>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'User'
+  `
+
+  if (userTable.length === 0) {
+    const sourceDbPath = getPackagedTemplateDbPath()
+    const targetDbPath = getLocalDbPath()
+
+    if (existsSync(sourceDbPath)) {
+      mkdirSync(dirname(targetDbPath), { recursive: true })
+      await prisma.$disconnect()
+      copyFileSync(sourceDbPath, targetDbPath)
+      await resetPrismaClient()
+    }
+  }
+
   for (const user of seedUsers) {
     const existing = await prisma.user.findUnique({ where: { username: user.username } })
     const passwordHash = existing?.passwordHash && isValidPasswordHash(existing.passwordHash)
@@ -360,6 +390,27 @@ export async function ensureBaseData() {
     }
   }
 
+  for (const requirement of enrollmentRequirements) {
+    await prisma.enrollmentRequirement.upsert({
+      where: { code: requirement.code },
+      update: {
+        label: requirement.label,
+        requiredOriginals: requirement.requiredOriginals,
+        requiredCopies: requirement.requiredCopies,
+        sortOrder: requirement.sortOrder,
+        isActive: true,
+      },
+      create: {
+        code: requirement.code,
+        label: requirement.label,
+        requiredOriginals: requirement.requiredOriginals,
+        requiredCopies: requirement.requiredCopies,
+        sortOrder: requirement.sortOrder,
+        isActive: true,
+      },
+    })
+  }
+
   const excelStudents = loadStudentsFromExcel()
   if (excelStudents.length === 0) {
     return
@@ -371,18 +422,22 @@ export async function ensureBaseData() {
     await tx.intakeGroup.deleteMany({})
     await tx.rocReceiptLine.deleteMany({})
     await tx.rocReceipt.deleteMany({})
+    await tx.studentRequirementStatus.deleteMany({})
     await tx.preRegistrationAudit.deleteMany({})
     await tx.preRegistration.deleteMany({})
     await tx.admissionPayment.deleteMany({})
     await tx.guardian.deleteMany({})
     await tx.student.deleteMany({})
+    await tx.sequenceCounter.upsert({ where: { scope: 'STUDENT_INTERNAL_FOLIO' }, update: { lastValue: 0 }, create: { scope: 'STUDENT_INTERNAL_FOLIO', lastValue: 0 } })
   })
 
-  for (const student of excelStudents) {
+  const requirementCatalog = await prisma.enrollmentRequirement.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } })
+
+  for (const [index, student] of excelStudents.entries()) {
     const location = parseLocationParts(student.locality)
-    await prisma.student.create({
+    const createdStudent = await prisma.student.create({
       data: {
-        enrollmentNumber: student.enrollmentNumber,
+        enrollmentNumber: `${INTERNAL_FOLIO_PREFIX}${String(index + 1).padStart(4, '0')}`,
         curp: student.curp,
         firstName: student.firstName,
         paternalLastName: student.paternalLastName,
@@ -400,6 +455,7 @@ export async function ensureBaseData() {
         secondaryAverage: student.secondaryAverage,
         schoolCycle: '2026-2027',
         academicStatus: 'REGULAR',
+        documentationStatus: 'PENDIENTE',
         enrollmentStatus: 'FICHA_ENTREGADA',
         status: 'LISTO_PARA_COBRO',
         validatedAt: new Date(),
@@ -412,5 +468,20 @@ export async function ensureBaseData() {
         },
       },
     })
+
+    if (requirementCatalog.length > 0) {
+      await prisma.studentRequirementStatus.createMany({
+        data: requirementCatalog.map((requirement) => ({
+          studentId: createdStudent.id,
+          requirementId: requirement.id,
+        })),
+      })
+    }
   }
+
+  await prisma.sequenceCounter.upsert({
+    where: { scope: 'STUDENT_INTERNAL_FOLIO' },
+    update: { lastValue: excelStudents.length },
+    create: { scope: 'STUDENT_INTERNAL_FOLIO', lastValue: excelStudents.length },
+  })
 }

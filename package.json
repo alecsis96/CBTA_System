@@ -1,7 +1,8 @@
 {
-  "name": "cbta-financieros",
+  "name": "cbta44_sys",
   "version": "0.1.0",
   "private": true,
+  "author": "CBTA 44 Sistema",
   "packageManager": "pnpm@11.1.2",
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -25,9 +26,87 @@
     "typecheck:app": "tsc --noEmit",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "electron:compile": "tsc -p tsconfig.node.json",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "prisma:sync-client": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\"",
+    "build:desktop": "prisma generate && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\" && vite build && tsc -p tsconfig.node.json",
+    "predist:win": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"taskkill /F /IM 'CBTA44_SYS.exe' 2>$null | Out-Null; taskkill /F /IM electron.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 300; Remove-Item -Recurse -Force 'release/win-unpacked' -ErrorAction SilentlyContinue; exit 0\"",
+    "dist:win": "prisma generate && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\" && vite build && tsc -p tsconfig.node.json && electron-builder --win nsis",
+    "predist:win:portable": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"taskkill /F /IM 'CBTA44_SYS.exe' 2>$null | Out-Null; taskkill /F /IM electron.exe 2>$null | Out-Null; Start-Sleep -Milliseconds 300; Remove-Item -Recurse -Force 'release/win-unpacked' -ErrorAction SilentlyContinue; exit 0\"",
+    "dist:win:portable": "prisma generate && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\" && vite build && tsc -p tsconfig.node.json && electron-builder --win portable",
+    "dist:mac": "prisma generate && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\" && vite build && tsc -p tsconfig.node.json && electron-builder --mac dmg",
+    "dist:mac:zip": "prisma generate && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$source = Get-ChildItem 'node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client' -Directory | Select-Object -First 1; if (-not $source) { throw 'Prisma generated client not found under pnpm store.' }; Remove-Item -Recurse -Force 'node_modules/.prisma' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path 'node_modules/.prisma' | Out-Null; Copy-Item -Recurse -Force $source.FullName 'node_modules/.prisma/client'\" && vite build && tsc -p tsconfig.node.json && electron-builder --mac zip",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
     "prisma:validate": "prisma validate"
+  },
+  "build": {
+    "appId": "mx.cbta.cbta44_sys",
+    "productName": "CBTA44_SYS",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "files": [
+      {
+        "from": "dist",
+        "to": "dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist-electron",
+        "to": "dist-electron",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/@prisma/client",
+        "to": "node_modules/@prisma/client",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/.prisma",
+        "to": "node_modules/.prisma",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "prisma/schema.prisma",
+      "roc 2026.xlsx",
+      "FICHAS 2026.xlsx",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "prisma/dev.db",
+        "to": "prisma/dev.db"
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/.prisma/**/*"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "CBTA44_SYS-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   },
   "dependencies": {
     "@prisma/client": "^5.19.1",
@@ -46,6 +125,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
+    "electron-builder": "^24.13.3",
     "electron": "^33.2.1",
     "prisma": "^5.19.1",
     "tsx": "^4.22.0",

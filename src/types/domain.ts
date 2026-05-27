@@ -11,11 +11,17 @@ export type StudentSummary = {
   paternalLastName: string
   maternalLastName: string
   enrollmentNumber: string
+  officialEnrollmentNumber: string | null
   curp: string
   rfc: string | null
   phone: string | null
   email: string | null
   address: string
+  guardianFullName: string | null
+  guardianPhone: string | null
+  admissionPaid: boolean
+  admissionPaymentStatus: string | null
+  documentationStatus: string
   statusLabel: string
   groupLabel: string | null
   shiftLabel: string | null
@@ -175,6 +181,7 @@ export type AdmissionSummary = {
   folio: string
   curp: string
   fullName: string
+  insurancePaid: boolean
   paidAt: string
   status: AdmissionStatus
   studentId: string | null
@@ -186,6 +193,52 @@ export type AdmissionCreatePaymentInput = {
   folio?: string
   curp: string
   fullName: string
+  insurancePaid: boolean
+}
+
+export type StudentRequirementChecklistItem = {
+  requirementId: string
+  code: string
+  label: string
+  requiredOriginals: number
+  requiredCopies: number
+  isDelivered: boolean
+  missingJustification: string
+  deadlineAt: string
+  notes: string
+}
+
+export type StudentRequirementChecklist = {
+  studentId: string
+  studentName: string
+  documentationStatus: string
+  items: StudentRequirementChecklistItem[]
+}
+
+export type SaveStudentRequirementChecklistInput = {
+  items: Array<{
+    requirementId: string
+    isDelivered: boolean
+    missingJustification?: string
+    deadlineAt?: string
+    notes?: string
+  }>
+}
+
+export type GroupAssignedRosterRow = {
+  groupLabel: string
+  enrollmentNumber: string
+  fullName: string
+  curp: string
+  sex: string
+  averageBand: 'alto' | 'medio' | 'bajo'
+  secondaryAverage: number | null
+  status: string
+}
+
+export type GroupRosterExportResult = {
+  outputPath: string
+  exportedCount: number
 }
 
 export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'

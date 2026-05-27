@@ -5,14 +5,18 @@ import type {
   AuthSession,
   AuditLogSummary,
   ChargeConceptSummary,
+  GroupAssignedRosterRow,
+  GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
   PreRegistrationSummary,
   RocCreateInput,
   RocReceiptSummary,
+  SaveStudentRequirementChecklistInput,
   SepExportResult,
   StudentDetail,
   StudentFormInput,
+  StudentRequirementChecklist,
   StudentSummary,
   TariffUpdateInput,
 } from '@/types/domain'
@@ -301,12 +305,18 @@ function toStudentSummary(student: StudentDetail): StudentSummary {
     paternalLastName: student.paternalLastName,
     maternalLastName: student.maternalLastName,
     enrollmentNumber: student.enrollmentNumber,
+    officialEnrollmentNumber: null,
     curp: student.curp,
     rfc: student.rfc || null,
     phone: student.phone || null,
     email: student.email || null,
     fullName,
     address,
+    guardianFullName: student.guardianFullName || null,
+    guardianPhone: student.guardianPhone || null,
+    admissionPaid: true,
+    admissionPaymentStatus: 'PAGADO_PENDIENTE_CAPTURA',
+    documentationStatus: 'PENDIENTE',
     statusLabel: student.statusLabel,
     groupLabel: null,
     shiftLabel: null,
@@ -314,7 +324,7 @@ function toStudentSummary(student: StudentDetail): StudentSummary {
 }
 
 export const browserFallbackApi = {
-  appName: 'CBTA Financieros (Browser Mode)',
+  appName: 'CBTA 44 Sistema (Browser Mode)',
   auth: {
     async login(input: AuthLoginInput) {
       const username = input.username.trim().toLowerCase()
@@ -356,6 +366,31 @@ export const browserFallbackApi = {
       }
 
       return student
+    },
+    async getNextInternalFolioPreview() {
+      const next = getStudents().length + 1
+      return `2610701044${String(next).padStart(4, '0')}`
+    },
+    async getRequirementChecklist(studentId: string): Promise<StudentRequirementChecklist> {
+      const student = getStudents().find((item) => item.id === studentId)
+      if (!student) throw new Error('Alumno no encontrado en modo navegador.')
+      return {
+        studentId,
+        studentName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim(),
+        documentationStatus: 'PENDIENTE',
+        items: [
+          { requirementId: 'browser-cert', code: 'CERT_ESTUDIOS', label: 'Certificado de estudios', requiredOriginals: 1, requiredCopies: 2, isDelivered: false, missingJustification: '', deadlineAt: '', notes: '' },
+          { requirementId: 'browser-acta', code: 'ACTA_NACIMIENTO', label: 'Acta de nacimiento actualizada', requiredOriginals: 1, requiredCopies: 2, isDelivered: false, missingJustification: '', deadlineAt: '', notes: '' },
+        ],
+      }
+    },
+    async saveRequirementChecklist(studentId: string, input: SaveStudentRequirementChecklistInput): Promise<StudentRequirementChecklist> {
+      return {
+        studentId,
+        studentName: 'Modo navegador',
+        documentationStatus: input.items.every((item) => item.isDelivered) ? 'COMPLETA' : 'PENDIENTE',
+        items: input.items.map((item, index) => ({ requirementId: item.requirementId, code: `REQ-${index + 1}`, label: `Requisito ${index + 1}`, requiredOriginals: 0, requiredCopies: 0, isDelivered: item.isDelivered, missingJustification: item.missingJustification ?? '', deadlineAt: item.deadlineAt ?? '', notes: item.notes ?? '' })),
+      }
     },
     async create(input: StudentFormInput) {
       const students = getStudents()
@@ -568,6 +603,16 @@ export const browserFallbackApi = {
     async previewRoster() {
       return []
     },
+    async listAssignedRoster(): Promise<GroupAssignedRosterRow[]> {
+      return []
+    },
+    async exportAssignedRoster(): Promise<GroupRosterExportResult> {
+      return { outputPath: 'browser-download', exportedCount: 0 }
+    },
+    async printAssignedRoster() {
+      window.print()
+      return { ok: true, mode: 'browser-fallback' }
+    },
   },
   audit: {
     async listRecent() {
@@ -596,6 +641,7 @@ export const browserFallbackApi = {
         folio,
         curp: input.curp.trim().toUpperCase(),
         fullName: input.fullName.trim(),
+        insurancePaid: input.insurancePaid,
         paidAt: now,
         status: 'PAGADO_PENDIENTE_CAPTURA',
         studentId: null,

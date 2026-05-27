@@ -17,11 +17,14 @@ import type {
   AuthSession,
   AuditLogSummary,
   ChargeConceptSummary,
+  GroupAssignedRosterRow,
   PreRegistrationSummary,
   RocReceiptSummary,
+  SaveStudentRequirementChecklistInput,
   GroupStat,
   GroupPreviewRow,
   StudentFormInput,
+  StudentRequirementChecklist,
   StudentSummary,
 } from '@/types/domain'
 
@@ -124,6 +127,23 @@ function groupConcepts(concepts: ChargeConceptSummary[], query?: string) {
     .filter((group) => group.items.length > 0)
 }
 
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function highlightMatch(text: string, query: string) {
+  const normalizedQuery = query.trim()
+  if (!normalizedQuery) return text
+  const regex = new RegExp(`(${escapeRegex(normalizedQuery)})`, 'gi')
+  const parts = text.split(regex)
+  if (parts.length === 1) return text
+  return parts.map((part, index) =>
+    part.toLowerCase() === normalizedQuery.toLowerCase()
+      ? <mark key={`${part}-${index}`} className="search-highlight">{part}</mark>
+      : part,
+  )
+}
+
 function deriveGradeFromGroup(groupLabel: string | null) {
   if (!groupLabel) return 'Sin grado'
   const match = groupLabel.trim().match(/^(\d+)/)
@@ -204,6 +224,7 @@ const initialPaymentForm: AdmissionCreatePaymentInput = {
   folio: '',
   curp: '',
   fullName: '',
+  insurancePaid: false,
 }
 
 function App() {
@@ -250,6 +271,7 @@ function App() {
   const [syncing, setSyncing] = useState(false)
   const studentsSectionRef = useRef<HTMLElement | null>(null)
   const captureSectionRef = useRef<HTMLElement | null>(null)
+  const ingresosFeedbackTimerRef = useRef<number | null>(null)
 
   function setScopedFeedback(scope: FeedbackScope, message: string | null) {
     setFeedbackByScope((current) => ({
@@ -270,6 +292,16 @@ function App() {
 
   function setIngresosFeedback(message: string | null) {
     setFeedback(message, 'ingresos-propios')
+  }
+
+  function scheduleIngresosFeedbackClear(delayMs = 3500) {
+    if (ingresosFeedbackTimerRef.current) {
+      window.clearTimeout(ingresosFeedbackTimerRef.current)
+    }
+
+    ingresosFeedbackTimerRef.current = window.setTimeout(() => {
+      setIngresosFeedback(null)
+    }, delayMs)
   }
 
   function setConfigFeedback(message: string | null) {
@@ -463,6 +495,15 @@ function App() {
     setReceipts(studentReceipts)
   }
 
+  async function prepareNextInternalFolio() {
+    if (typeof appApi.students.getNextInternalFolioPreview !== 'function') {
+      return
+    }
+
+    const nextFolio = await appApi.students.getNextInternalFolioPreview()
+    setForm((current) => ({ ...current, enrollmentNumber: nextFolio }))
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setSaving(true)
@@ -507,6 +548,9 @@ function App() {
       )
       await loadData()
       if (!wasEditing) {
+        await prepareNextInternalFolio()
+      }
+      if (!wasEditing) {
         setScreen('ingresos-propios')
       }
     } catch (error) {
@@ -532,13 +576,15 @@ function App() {
 
     setIngresosFeedback(null)
     try {
-      const createdPayment = await appApi.admissions.createPayment(paymentForm)
-      await printPaymentReceipt(createdPayment)
+      await appApi.admissions.createPayment(paymentForm)
       setPaymentForm(initialPaymentForm)
+      setSelectedPaymentStudent(null)
+      setPaymentSearchQuery('')
       await loadData()
-      setIngresosFeedback('Pago de ficha registrado e impreso. Ya esta disponible para captura en Control Escolar.')
+      setIngresosFeedback('Pago de inscripcion registrado. Control Escolar ya puede identificar este CURP como pagado.')
+      scheduleIngresosFeedbackClear()
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo registrar el pago de ficha.'
+      const message = error instanceof Error ? error.message : 'No se pudo registrar el pago de inscripcion.'
       setIngresosFeedback(message)
     }
   }
@@ -587,6 +633,7 @@ function App() {
         paternalLastName: parsedName.paternalLastName,
         maternalLastName: parsedName.maternalLastName,
       }))
+      await prepareNextInternalFolio()
       setControlFeedback('Pago seleccionado. Completa la captura y guarda el alumno.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo abrir la captura de ficha.'
@@ -635,6 +682,7 @@ function App() {
     setEditingStudentId(null)
     setForm(initialForm)
     setControlFeedback(null)
+    void prepareNextInternalFolio()
   }
 
   function toggleConcept(concept: ChargeConceptSummary) {
@@ -861,12 +909,37 @@ function App() {
   if (!authSession) {
     return (
       <div className="auth-shell">
+        <section className="auth-hero">
+          <div className="auth-hero-copy">
+            <p className="auth-kicker">CBTA 44 Sistema</p>
+            <h1>Operacion escolar y financiera en una sola ventanilla</h1>
+            <p>
+              Control Escolar e Ingresos Propios comparten el mismo seguimiento para inscripcion,
+              pagos, grupos y ROC institucional.
+            </p>
+          </div>
+          <div className="auth-hero-metrics">
+            <article>
+              <strong>Control Escolar</strong>
+              <span>Captura, grupos y seguimiento documental</span>
+            </article>
+            <article>
+              <strong>Ingresos Propios</strong>
+              <span>Pagos de inscripcion, historial y ROC por lote</span>
+            </article>
+          </div>
+        </section>
+
         <form className="auth-card" onSubmit={handleLogin}>
-          <p className="eyebrow">CBTA Financieros</p>
-          <h1>Iniciar sesion</h1>
+          <div className="auth-card-header">
+            <p className="eyebrow">Acceso institucional</p>
+            <h2>Iniciar sesion</h2>
+            <p>Entrá con tu usuario asignado para continuar con la operacion del plantel.</p>
+          </div>
           <label className="form-field">
             <span>Usuario</span>
             <input
+              placeholder="Ej. admin.1"
               value={authForm.username}
               onChange={(event) => setAuthForm((current) => ({ ...current, username: event.target.value }))}
             />
@@ -875,13 +948,14 @@ function App() {
             <span>Contrasena</span>
             <input
               type="password"
+              placeholder="Tu contrasena"
               value={authForm.password}
               onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))}
             />
           </label>
           {authError ? <p className="feedback-banner">{authError}</p> : null}
-          <button className="primary-button" disabled={authSaving} type="submit">
-            {authSaving ? 'Ingresando...' : 'Entrar'}
+          <button className="primary-button auth-submit" disabled={authSaving} type="submit">
+            {authSaving ? 'Ingresando...' : 'Entrar al sistema'}
           </button>
         </form>
       </div>
@@ -893,7 +967,7 @@ function App() {
       <aside className={isSidebarCollapsed ? 'sidebar collapsed' : 'sidebar'}>
         <div className="sidebar-brand">
           <div>
-            <p className="eyebrow">CBTA Financieros</p>
+            <p className="eyebrow">CBTA 44 Sistema</p>
             <h1>Operacion escolar</h1>
             <p className="muted">Inscripciones, grupos y ROC oficial.</p>
           </div>
@@ -1009,6 +1083,7 @@ function App() {
             onSelectAdmissionForCapture={handleSelectAdmissionForCapture}
             onUpdateCaptureQuery={setCaptureQuery}
             onExportSep={handleExportSep}
+            onReloadData={loadData}
           />
         ) : screen === 'ingresos-propios' ? (
           <IngresosPropiosOverview
@@ -1026,6 +1101,7 @@ function App() {
             total={total}
             conceptAmounts={conceptAmounts}
             conceptQuery={conceptQuery}
+            feedback={feedbackByScope['ingresos-propios']}
             onChangeRocNumber={setRocNumber}
             onCreateReceipt={handleCreateReceipt}
             onChangeConceptQuery={setConceptQuery}
@@ -1226,6 +1302,7 @@ type ControlEscolarProps = {
   onSelectAdmissionForCapture: (admission: AdmissionSummary) => Promise<void>
   onUpdateCaptureQuery: (value: string) => void
   onExportSep: () => Promise<void>
+  onReloadData: () => Promise<void>
 }
 
 function ControlEscolarOverview({
@@ -1248,9 +1325,10 @@ function ControlEscolarOverview({
   onSelectAdmissionForCapture,
   onUpdateCaptureQuery,
   onExportSep,
+  onReloadData,
 }: ControlEscolarProps) {
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas')
-  const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'alumnos'>('alumnos')
+  const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'inscripcion' | 'alumnos'>('alumnos')
   const [studentQuery, setStudentQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [studentPage, setStudentPage] = useState(1)
@@ -1267,6 +1345,13 @@ function ControlEscolarOverview({
   const [moveReason, setMoveReason] = useState('')
   const [noShowStudentId, setNoShowStudentId] = useState('')
   const [noShowReason, setNoShowReason] = useState('')
+  const [selectedChecklistStudentId, setSelectedChecklistStudentId] = useState('')
+  const [requirementChecklist, setRequirementChecklist] = useState<StudentRequirementChecklist | null>(null)
+  const [savingChecklist, setSavingChecklist] = useState(false)
+  const [checklistFeedback, setChecklistFeedback] = useState<string | null>(null)
+  const [isChecklistModalOpen, setIsChecklistModalOpen] = useState(false)
+  const [inscriptionQuery, setInscriptionQuery] = useState('')
+  const [inscriptionPage, setInscriptionPage] = useState(1)
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
   const filteredStudents = students.filter((student) => {
     const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
@@ -1321,12 +1406,32 @@ function ControlEscolarOverview({
   })
   const previewTotalPages = Math.max(1, Math.ceil(filteredPreviewRows.length / 20))
   const paginatedPreviewRows = filteredPreviewRows.slice((previewPage - 1) * 20, previewPage * 20)
+  const normalizedInscriptionQuery = inscriptionQuery.trim().toLowerCase()
+  const filteredInscriptionStudents = students.filter((student) => {
+    const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
+    return normalizedInscriptionQuery.length === 0 || haystack.includes(normalizedInscriptionQuery)
+  })
+  const totalInscriptionPages = Math.max(1, Math.ceil(filteredInscriptionStudents.length / CONTROL_STUDENTS_PER_PAGE))
+  const paginatedInscriptionStudents = filteredInscriptionStudents.slice(
+    (inscriptionPage - 1) * CONTROL_STUDENTS_PER_PAGE,
+    inscriptionPage * CONTROL_STUDENTS_PER_PAGE,
+  )
 
   useEffect(() => {
     if (previewPage > previewTotalPages) {
       setPreviewPage(previewTotalPages)
     }
   }, [previewPage, previewTotalPages])
+
+  useEffect(() => {
+    setInscriptionPage(1)
+  }, [normalizedInscriptionQuery])
+
+  useEffect(() => {
+    if (inscriptionPage > totalInscriptionPages) {
+      setInscriptionPage(totalInscriptionPages)
+    }
+  }, [inscriptionPage, totalInscriptionPages])
 
   async function handleSelectAdmissionRow(admission: AdmissionSummary) {
     await onSelectAdmissionForCapture(admission)
@@ -1389,6 +1494,78 @@ function ControlEscolarOverview({
     await refreshGroupStats()
   }
 
+  async function handleExportAssignedRoster() {
+    if (!window.cbta?.groups?.exportAssignedRoster) return
+    const result = await window.cbta.groups.exportAssignedRoster({ schoolCycle: form.schoolCycle })
+    setChecklistFeedback(`Listado exportado (${result.exportedCount} alumnos): ${result.outputPath}`)
+  }
+
+  async function handlePrintAssignedRoster() {
+    if (!window.cbta?.groups?.printAssignedRoster) return
+    await window.cbta.groups.printAssignedRoster({ schoolCycle: form.schoolCycle })
+    setChecklistFeedback('Listado de grupos enviado a impresion.')
+  }
+
+  async function handleLoadRequirementChecklist(studentId: string) {
+    if (!window.cbta?.students?.getRequirementChecklist) return
+    const checklist = await window.cbta.students.getRequirementChecklist(studentId)
+    setSelectedChecklistStudentId(studentId)
+    setRequirementChecklist(checklist)
+    setChecklistFeedback(null)
+    setIsChecklistModalOpen(true)
+  }
+
+  function handleCloseChecklistModal() {
+    setIsChecklistModalOpen(false)
+  }
+
+  function handleChecklistItemChange(index: number, patch: Partial<StudentRequirementChecklist['items'][number]>) {
+    setRequirementChecklist((current) => {
+      if (!current) return current
+      const items = current.items.map((item, itemIndex) => {
+        if (itemIndex !== index) return item
+        return { ...item, ...patch }
+      })
+      return { ...current, items }
+    })
+  }
+
+  async function handleSaveRequirementChecklist() {
+    if (!window.cbta?.students?.saveRequirementChecklist || !selectedChecklistStudentId || !requirementChecklist) return
+    setSavingChecklist(true)
+    try {
+      const payload: SaveStudentRequirementChecklistInput = {
+        items: requirementChecklist.items.map((item) => ({
+          requirementId: item.requirementId,
+          isDelivered: item.isDelivered,
+          missingJustification: item.missingJustification,
+          deadlineAt: item.deadlineAt,
+          notes: item.notes,
+        })),
+      }
+      const saved = await window.cbta.students.saveRequirementChecklist(selectedChecklistStudentId, payload)
+      setRequirementChecklist(saved)
+      setChecklistFeedback('Checklist documental guardado correctamente.')
+      await onReloadData()
+      setIsChecklistModalOpen(false)
+    } finally {
+      setSavingChecklist(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!isChecklistModalOpen) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsChecklistModalOpen(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isChecklistModalOpen])
+
   useEffect(() => {
     void refreshGroupStats()
   }, [form.schoolCycle])
@@ -1419,6 +1596,13 @@ function ControlEscolarOverview({
             type="button"
           >
             Asignacion
+          </button>
+          <button
+            className={operationsTab === 'inscripcion' ? 'primary-button small-button' : 'secondary-button small-button'}
+            onClick={() => setOperationsTab('inscripcion')}
+            type="button"
+          >
+            Inscripcion
           </button>
           <button
             className={operationsTab === 'alumnos' ? 'primary-button small-button' : 'secondary-button small-button'}
@@ -1479,7 +1663,10 @@ function ControlEscolarOverview({
           <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
           <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
           <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
+          <button className="secondary-button small-button" onClick={() => void handleExportAssignedRoster()} type="button">Exportar Excel</button>
+          <button className="secondary-button small-button" onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
         </div>
+        {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
         {isPreviewStats ? <p className="table-summary">Previsualizacion calculada sin guardar cambios.</p> : null}
         <div className="student-table-wrap">
           <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>
@@ -1511,7 +1698,7 @@ function ControlEscolarOverview({
                 <thead>
                   <tr>
                     <th>Grupo</th>
-                    <th>Matricula</th>
+                    <th>Folio interno</th>
                     <th>Alumno</th>
                     <th>CURP</th>
                     <th>Sexo</th>
@@ -1592,6 +1779,80 @@ function ControlEscolarOverview({
       </section>
       ) : null}
 
+      {operationsTab === 'inscripcion' ? (
+      <section className="panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Control Escolar</p>
+            <h2>Inscripcion documental</h2>
+          </div>
+          <span className="status-tag">Checklist y plazo de entrega</span>
+        </div>
+        {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
+        <div className="student-search-row">
+          <Field className="span-2" label="Buscar alumno">
+            <input
+              placeholder="Buscar por folio interno, CURP o nombre"
+              value={inscriptionQuery}
+              onChange={(event) => setInscriptionQuery(event.target.value)}
+            />
+          </Field>
+        </div>
+        <div className="student-table-wrap">
+          <table className="student-table">
+            <thead>
+              <tr>
+                <th>Folio interno</th>
+                <th>Alumno</th>
+                <th>Pago</th>
+                <th>Documentacion</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {paginatedInscriptionStudents.map((student) => (
+                <tr key={`checklist-${student.id}`} className={selectedChecklistStudentId === student.id ? 'student-row active' : 'student-row'}>
+                  <td><strong>{student.enrollmentNumber}</strong></td>
+                  <td>{student.fullName}</td>
+                  <td>{student.admissionPaid ? 'Pagado' : 'Pendiente'}</td>
+                  <td>{student.documentationStatus}</td>
+                  <td>
+                    <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
+                      Revisar
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {filteredInscriptionStudents.length > CONTROL_STUDENTS_PER_PAGE ? (
+          <div className="pagination-row">
+            <button
+              className="secondary-button small-button"
+              disabled={inscriptionPage === 1}
+              onClick={() => setInscriptionPage((page) => Math.max(1, page - 1))}
+              type="button"
+            >
+              Anterior
+            </button>
+            <span>Pagina {inscriptionPage} de {totalInscriptionPages}</span>
+            <button
+              className="secondary-button small-button"
+              disabled={inscriptionPage === totalInscriptionPages}
+              onClick={() => setInscriptionPage((page) => Math.min(totalInscriptionPages, page + 1))}
+              type="button"
+            >
+              Siguiente
+            </button>
+          </div>
+        ) : null}
+        {filteredInscriptionStudents.length === 0 ? (
+          <p className="empty-state">No hay alumnos que coincidan con la busqueda.</p>
+        ) : null}
+      </section>
+      ) : null}
+
       {operationsTab === 'alumnos' ? (
       <section className="panel" ref={studentsSectionRef}>
         <div className="section-header">
@@ -1608,7 +1869,7 @@ function ControlEscolarOverview({
           <div className="student-search-row">
             <Field className="span-2" label="Buscar alumno">
               <input
-                placeholder="Buscar por matricula, nombre o CURP"
+                placeholder="Buscar por folio interno, nombre o CURP"
                 value={studentQuery}
                 onChange={(event) => setStudentQuery(event.target.value)}
               />
@@ -1638,7 +1899,7 @@ function ControlEscolarOverview({
             <table className="student-table">
               <thead>
                 <tr>
-                  <th>Matricula</th>
+                  <th>Folio interno</th>
                   <th>Alumno</th>
                   <th>CURP</th>
                   <th>Grado</th>
@@ -1651,10 +1912,10 @@ function ControlEscolarOverview({
                 {paginatedStudents.map((student) => {
                   const active = editingStudentId === student.id
                   const expanded = expandedStudentId === student.id
-                  const address = student.address?.trim().length ? student.address : 'Sin domicilio capturado'
+                  const guardianName = student.guardianFullName?.trim().length ? student.guardianFullName : 'Sin tutor capturado'
+                  const guardianPhone = student.guardianPhone?.trim().length ? student.guardianPhone : 'Sin telefono de tutor'
                   const rfc = student.rfc?.trim().length ? student.rfc : 'Sin RFC'
-                  const phone = student.phone?.trim().length ? student.phone : 'Sin telefono'
-                  const email = student.email?.trim().length ? student.email : 'Sin correo'
+                  void rfc
 
                   return (
                     <Fragment key={student.id}>
@@ -1698,16 +1959,16 @@ function ControlEscolarOverview({
                           <td colSpan={7}>
                             <div className="student-detail-grid">
                               <div>
-                                <span className="detail-label">Telefono</span>
-                                <strong>{phone}</strong>
+                                <span className="detail-label">Tutor</span>
+                                <strong>{guardianName}</strong>
                               </div>
                               <div>
-                                <span className="detail-label">Correo</span>
-                                <strong>{email}</strong>
+                                <span className="detail-label">Telefono tutor</span>
+                                <strong>{guardianPhone}</strong>
                               </div>
                               <div>
-                                <span className="detail-label">Domicilio</span>
-                                <strong>{address}</strong>
+                                <span className="detail-label">Pago inscripcion</span>
+                                <strong>{student.admissionPaid ? 'Registrado' : 'Pendiente'}</strong>
                               </div>
                             </div>
                           </td>
@@ -1770,6 +2031,82 @@ function ControlEscolarOverview({
         saving={saving}
       />
       ) : null}
+      {isChecklistModalOpen ? (
+        <div className="modal-overlay" role="dialog" aria-modal="true" onClick={handleCloseChecklistModal}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Checklist</p>
+                <h3>{requirementChecklist?.studentName ?? 'Selecciona un alumno'}</h3>
+              </div>
+              <span className="status-tag">{requirementChecklist?.documentationStatus ?? 'Sin seleccionar'}</span>
+            </div>
+            {requirementChecklist ? (
+              <div className="checklist-modal">
+                <p className="table-summary">
+                  Pendientes: {requirementChecklist.items.filter((item) => !item.isDelivered).length} | Entregados: {requirementChecklist.items.filter((item) => item.isDelivered).length}
+                </p>
+                <div className="checklist-list">
+                  {requirementChecklist.items.map((item, index) => (
+                      <article className="checklist-item" key={item.requirementId}>
+                        <div className="checklist-item-header">
+                          <div>
+                            <strong>{item.label}</strong>
+                            <span>Req. {item.requiredOriginals} orig / {item.requiredCopies} copias</span>
+                          </div>
+                          <div className="checklist-toggle">
+                            <label>
+                              <input
+                                checked={item.isDelivered}
+                                type="radio"
+                                name={`delivered-${item.requirementId}`}
+                                onChange={() => handleChecklistItemChange(index, { isDelivered: true, missingJustification: '', deadlineAt: '' })}
+                              />
+                              Entregado
+                            </label>
+                            <label>
+                              <input
+                                checked={!item.isDelivered}
+                                type="radio"
+                                name={`delivered-${item.requirementId}`}
+                                onChange={() => handleChecklistItemChange(index, { isDelivered: false })}
+                              />
+                              No entrego
+                            </label>
+                          </div>
+                        </div>
+                        {!item.isDelivered ? (
+                          <div className="checklist-item-details">
+                            <label className="form-field">
+                              <span>Motivo</span>
+                              <input value={item.missingJustification} onChange={(event) => handleChecklistItemChange(index, { missingJustification: event.target.value })} />
+                            </label>
+                            <label className="form-field">
+                              <span>Fecha compromiso</span>
+                              <input type="date" value={item.deadlineAt} onChange={(event) => handleChecklistItemChange(index, { deadlineAt: event.target.value })} />
+                            </label>
+                            <label className="form-field">
+                              <span>Nota</span>
+                              <input value={item.notes} onChange={(event) => handleChecklistItemChange(index, { notes: event.target.value })} />
+                            </label>
+                          </div>
+                        ) : null}
+                      </article>
+                  ))}
+                </div>
+                <div className="button-row">
+                  <button className="secondary-button" onClick={handleCloseChecklistModal} type="button">Cerrar</button>
+                  <button className="primary-button" disabled={savingChecklist} onClick={() => void handleSaveRequirementChecklist()} type="button">
+                    {savingChecklist ? 'Guardando checklist...' : 'Guardar checklist'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="empty-state">Selecciona un alumno para revisar y marcar la documentacion.</p>
+            )}
+          </div>
+        </div>
+      ) : null}
     </>
   )
 }
@@ -1789,6 +2126,7 @@ type IngresosProps = {
   loading: boolean
   total: number
   conceptAmounts: Record<string, number>
+  feedback: string | null
   onChangeConceptQuery: (value: string) => void
   onChangeRocNumber: (value: string) => void
   onCreateReceipt: () => Promise<void>
@@ -1819,6 +2157,7 @@ function IngresosPropiosOverview({
   loading,
   total,
   conceptAmounts,
+  feedback,
   onChangeConceptQuery,
   onChangeRocNumber,
   onCreateReceipt,
@@ -1833,7 +2172,7 @@ function IngresosPropiosOverview({
   onCreatePayment,
   onUpdatePaymentField,
 }: IngresosProps) {
-  const [operationsTab, setOperationsTab] = useState<'pagos' | 'inscripcion-roc' | 'fichas' | 'historial'>('inscripcion-roc')
+  const [operationsTab, setOperationsTab] = useState<'pagos' | 'inscripcion-roc' | 'fichas' | 'historial'>('pagos')
   const printedAt = new Date()
   const amountInWords = amountToWords(total)
   const normalizedQuery = conceptQuery.trim().toLowerCase()
@@ -1844,9 +2183,21 @@ function IngresosPropiosOverview({
         return haystack.includes(normalizedQuery)
       })
     : paymentConcepts
+  const [paymentSearchQuery, setPaymentSearchQuery] = useState('')
+  const [selectedPaymentStudent, setSelectedPaymentStudent] = useState<StudentSummary | null>(null)
+  const [paymentAmount, setPaymentAmount] = useState('100')
+  const [insuranceAmount, setInsuranceAmount] = useState('80')
   const [studentQuery, setStudentQuery] = useState('')
   const [studentPage, setStudentPage] = useState(1)
   const [receiptPage, setReceiptPage] = useState(1)
+  const normalizedPaymentQuery = paymentSearchQuery.trim().toLowerCase()
+  const paymentCandidates = normalizedPaymentQuery
+    ? students.filter((student) => {
+        const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
+        return haystack.includes(normalizedPaymentQuery)
+      })
+    : []
+  const paymentCandidatesLimited = paymentCandidates.slice(0, 10)
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
   const filteredStudents = normalizedStudentQuery
     ? students.filter((student) => {
@@ -1925,7 +2276,7 @@ function IngresosPropiosOverview({
           <p>{selectedStudent?.address ?? ''}</p>
         </div>
         <div>
-          <label>R.F.C. y/o MATRICULA</label>
+            <label>R.F.C. y/o FOLIO INTERNO</label>
           <p>{selectedStudent?.rfc || selectedStudent?.enrollmentNumber || ''}</p>
         </div>
       </div>
@@ -1989,14 +2340,14 @@ function IngresosPropiosOverview({
             onClick={() => setOperationsTab('pagos')}
             type="button"
           >
-            Pago ficha
+            Inscripcion
           </button>
           <button
             className={operationsTab === 'inscripcion-roc' ? 'primary-button small-button' : 'secondary-button small-button'}
             onClick={() => setOperationsTab('inscripcion-roc')}
             type="button"
           >
-            Pagos
+            ROC inscripcion
           </button>
           <button
             className={operationsTab === 'fichas' ? 'primary-button small-button' : 'secondary-button small-button'}
@@ -2015,31 +2366,154 @@ function IngresosPropiosOverview({
         </div>
       </article>
 
+      {feedback ? <p className="feedback-banner">{feedback}</p> : null}
+
       {operationsTab === 'pagos' ? (
-      <article className="panel">
+      <article className="panel wide">
         <div className="section-header">
           <div>
             <p className="eyebrow">Financieros</p>
-            <h2>Pago de ficha e impresion de recibo</h2>
+            <h2>Registro manual de pago de inscripcion</h2>
           </div>
-          <span className="status-tag">Paso 1 obligatorio</span>
+            <span className="status-tag">B002 para ROC posterior</span>
         </div>
-        <form className="student-form" onSubmit={(event) => void onCreatePayment(event)}>
-          <div className="form-grid">
-            <Field label="CURP" required>
-              <input maxLength={18} value={paymentForm.curp} onChange={(event) => onUpdatePaymentField('curp', event.target.value.toUpperCase())} />
-            </Field>
-            <Field className="span-2" label="Nombre completo" required>
-              <input value={paymentForm.fullName} onChange={(event) => onUpdatePaymentField('fullName', event.target.value)} />
-            </Field>
-            <Field className="span-2" label="Folio">
-              <input disabled value="Se genera automatico (FIC-AAAA-00001)" />
-            </Field>
+        <div className="payment-layout">
+          <div>
+            <div className="student-search-row">
+              <Field className="span-2" label="Buscar alumno">
+                <input
+                  placeholder="Buscar por folio interno, CURP o nombre"
+                  value={paymentSearchQuery}
+                  onChange={(event) => {
+                    setPaymentSearchQuery(event.target.value)
+                    if (selectedPaymentStudent) {
+                      setSelectedPaymentStudent(null)
+                    }
+                  }}
+                />
+              </Field>
+            </div>
+            {selectedPaymentStudent ? (
+              <div className="selected-student-card">
+                <div>
+                  <span className="eyebrow">Alumno seleccionado</span>
+                  <h3>{selectedPaymentStudent.fullName}</h3>
+                  <p>Folio interno: {selectedPaymentStudent.enrollmentNumber}</p>
+                  <p>CURP: {selectedPaymentStudent.curp}</p>
+                  <p>Grupo: {selectedPaymentStudent.groupLabel ?? 'Sin asignar'}</p>
+                </div>
+                <button
+                  className="secondary-button small-button"
+                  onClick={() => setSelectedPaymentStudent(null)}
+                  type="button"
+                >
+                  Cambiar alumno
+                </button>
+              </div>
+            ) : normalizedPaymentQuery.length === 0 ? (
+              <p className="empty-state">Escribi para buscar y seleccionar un alumno.</p>
+            ) : paymentCandidates.length === 0 ? (
+              <p className="empty-state">No hay alumnos que coincidan con la busqueda.</p>
+            ) : (
+              <div className="student-table-wrap">
+                <table className="student-table">
+                  <thead>
+                    <tr>
+                      <th>Folio interno</th>
+                      <th>Alumno</th>
+                      <th>CURP</th>
+                      <th>Grupo</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentCandidatesLimited.map((student) => (
+                      <tr
+                        className="student-row"
+                        key={`payment-${student.id}`}
+                        onClick={() => {
+                          setSelectedPaymentStudent(student)
+                          onUpdatePaymentField('curp', student.curp)
+                          onUpdatePaymentField('fullName', student.fullName)
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            setSelectedPaymentStudent(student)
+                            onUpdatePaymentField('curp', student.curp)
+                            onUpdatePaymentField('fullName', student.fullName)
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <td><strong>{highlightMatch(student.enrollmentNumber, paymentSearchQuery)}</strong></td>
+                        <td>{highlightMatch(student.fullName, paymentSearchQuery)}</td>
+                        <td>{highlightMatch(student.curp, paymentSearchQuery)}</td>
+                        <td>{student.groupLabel ?? 'Sin asignar'}</td>
+                        <td>
+                          <button
+                            className="secondary-button small-button"
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              setSelectedPaymentStudent(student)
+                              onUpdatePaymentField('curp', student.curp)
+                              onUpdatePaymentField('fullName', student.fullName)
+                            }}
+                            type="button"
+                          >
+                            Usar
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-          <div className="form-actions control-actions">
-            <button className="primary-button" type="submit">Guardar pago e imprimir recibo</button>
-          </div>
-        </form>
+          <form className="student-form" onSubmit={(event) => void onCreatePayment(event)}>
+            <p className="table-summary">Este registro marca el pago de inscripcion para Control Escolar. El seguro de vida queda fuera del ROC oficial.</p>
+            {selectedPaymentStudent ? (
+              <div className="selected-student-summary">
+                <div>
+                  <span className="detail-label">Alumno</span>
+                  <strong>{selectedPaymentStudent.fullName}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Folio interno</span>
+                  <strong>{selectedPaymentStudent.enrollmentNumber}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">CURP</span>
+                  <strong>{selectedPaymentStudent.curp}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Grupo</span>
+                  <strong>{selectedPaymentStudent.groupLabel ?? 'Sin asignar'}</strong>
+                </div>
+              </div>
+            ) : (
+              <p className="empty-state">Selecciona un alumno para registrar el pago.</p>
+            )}
+            <div className="form-grid">
+              <Field label="Monto inscripcion">
+                <input type="number" min="0" step="1" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} />
+              </Field>
+              <Field label="Monto seguro">
+                <input type="number" min="0" step="1" value={insuranceAmount} onChange={(event) => setInsuranceAmount(event.target.value)} />
+              </Field>
+            </div>
+            <label className="checkbox-row">
+              <input checked={paymentForm.insurancePaid} type="checkbox" onChange={(event) => onUpdatePaymentField('insurancePaid', event.target.checked)} />
+              Pago de seguro de vida registrado (no se incluye en el ROC oficial)
+            </label>
+            <div className="form-actions control-actions">
+              <button className="primary-button" disabled={!selectedPaymentStudent} type="submit">Registrar pago</button>
+            </div>
+          </form>
+        </div>
       </article>
       ) : null}
 
@@ -2048,9 +2522,9 @@ function IngresosPropiosOverview({
         <div className="section-header">
           <div>
             <p className="eyebrow">Ingresos Propios</p>
-            <h2>Paso 1: seleccionar alumno</h2>
+            <h2>Seleccionar alumno para ROC de inscripcion</h2>
           </div>
-          <span className="status-tag">Wizard de inscripcion</span>
+            <span className="status-tag">Solo pagos de inscripcion</span>
         </div>
 
         {loading ? <p>Cargando alumnos validados...</p> : null}
@@ -2058,7 +2532,7 @@ function IngresosPropiosOverview({
         <div className="student-search-row">
           <Field className="span-2" label="Buscar alumno">
             <input
-              placeholder="Buscar por matricula o nombre"
+                placeholder="Buscar por folio interno o nombre"
               value={studentQuery}
               onChange={(event) => setStudentQuery(event.target.value)}
             />
@@ -2074,7 +2548,7 @@ function IngresosPropiosOverview({
             <table className="student-table">
               <thead>
                 <tr>
-                  <th>Matricula</th>
+                  <th>Folio interno</th>
                   <th>Alumno</th>
                   <th>CURP</th>
                   <th>Grupo</th>
@@ -2147,7 +2621,7 @@ function IngresosPropiosOverview({
         <div className="section-header">
           <div>
             <p className="eyebrow">ROC</p>
-            <h2>Paso 2: claves, guardar e imprimir ROC</h2>
+            <h2>Claves, guardar e imprimir ROC de inscripcion</h2>
           </div>
           <span className="status-tag">{paymentConcepts.length} claves activas</span>
         </div>
@@ -2161,7 +2635,7 @@ function IngresosPropiosOverview({
                   <p>{selectedStudent.fullName}</p>
                 </div>
                 <div>
-                  <label>Matricula</label>
+                  <label>Folio interno</label>
                   <p>{selectedStudent.enrollmentNumber}</p>
                 </div>
                 <div>

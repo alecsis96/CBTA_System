@@ -64,8 +64,8 @@ export function StudentCaptureFormPanel({
 
       <form className="student-form" onSubmit={(event) => void onSubmit(event)}>
         <div className="form-grid">
-          <Field label="Matricula" required>
-            <input value={form.enrollmentNumber} onChange={(event) => onUpdateField('enrollmentNumber', event.target.value)} />
+          <Field label="Folio interno">
+            <input placeholder="Se asigna automaticamente al guardar" readOnly value={form.enrollmentNumber} onChange={(event) => onUpdateField('enrollmentNumber', event.target.value)} />
           </Field>
           <Field label="CURP" required>
             <input maxLength={18} value={form.curp} onChange={(event) => onUpdateField('curp', event.target.value.toUpperCase())} />

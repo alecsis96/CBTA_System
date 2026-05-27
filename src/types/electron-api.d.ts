@@ -5,15 +5,19 @@ import type {
   AdmissionSummary,
   AuditLogSummary,
   ChargeConceptSummary,
+  GroupAssignedRosterRow,
+  GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
   PreRegistrationSummary,
   RocCreateInput,
   RocReceiptSummary,
+  SaveStudentRequirementChecklistInput,
   SepExportResult,
   GroupStat,
   GroupPreviewRow,
   StudentDetail,
+  StudentRequirementChecklist,
   StudentFormInput,
   StudentSummary,
   TariffUpdateInput,
@@ -30,6 +34,9 @@ type CbtaApi = {
     list: () => Promise<StudentSummary[]>
     listValidated: () => Promise<StudentSummary[]>
     get: (studentId: string) => Promise<StudentDetail>
+    getNextInternalFolioPreview: () => Promise<string>
+    getRequirementChecklist: (studentId: string) => Promise<StudentRequirementChecklist>
+    saveRequirementChecklist: (studentId: string, input: SaveStudentRequirementChecklistInput) => Promise<StudentRequirementChecklist>
     create: (input: StudentFormInput) => Promise<StudentSummary>
     update: (studentId: string, input: StudentFormInput) => Promise<StudentSummary>
   }
@@ -61,6 +68,9 @@ type CbtaApi = {
     stats: (input: { schoolCycle: string }) => Promise<GroupStat[]>
     preview: (input: { schoolCycle: string }) => Promise<GroupStat[]>
     previewRoster: (input: { schoolCycle: string }) => Promise<GroupPreviewRow[]>
+    listAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupAssignedRosterRow[]>
+    exportAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupRosterExportResult>
+    printAssignedRoster: (input: { schoolCycle: string }) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
   }
   audit: {
     listRecent: () => Promise<AuditLogSummary[]>
