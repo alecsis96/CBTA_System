@@ -26,11 +26,28 @@ jobs:
       - name: Install deps
         run: pnpm install
 
+      - name: Generate Prisma client
+        run: pnpm prisma generate
+
+      - name: Sync Prisma runtime
+        run: |
+          mkdir -p node_modules/.prisma
+          SOURCE=$(ls -d node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client | head -n 1)
+          if [ -z "$SOURCE" ]; then
+            echo "Prisma generated client not found under pnpm store."
+            exit 1
+          fi
+          rm -rf node_modules/.prisma/client
+          cp -R "$SOURCE" node_modules/.prisma/client
+
+      - name: Build renderer and electron
+        run: pnpm build:renderer && pnpm build:electron
+
       - name: Build DMG
-        run: pnpm dist:mac
+        run: pnpm exec electron-builder --mac dmg
 
       - name: Build ZIP
-        run: pnpm dist:mac:zip
+        run: pnpm exec electron-builder --mac zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
