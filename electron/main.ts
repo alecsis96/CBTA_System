@@ -36,7 +36,11 @@ app.whenReady().then(async () => {
   ])
 
   registerIpcHandlers()
-  await ensureBaseData()
+  try {
+    await ensureBaseData()
+  } catch (error) {
+    console.error('[startup] Seed initialization failed. Continuing app startup.', error)
+  }
   createWindow()
 
   app.on('activate', () => {
