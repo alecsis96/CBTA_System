@@ -1,5 +1,6 @@
-import { FormEvent, Fragment, MutableRefObject, ReactNode, useEffect, useRef, useState } from 'react'
+﻿import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { browserFallbackApi } from '@/lib/browser-fallback'
+import { createHybridApi } from '@/lib/hybrid-api'
 import {
   AdmissionCaptureTable,
   PreRegistrationInboxPanel,
@@ -16,6 +17,8 @@ import type {
   AuthLoginInput,
   AuthSession,
   AuditLogSummary,
+  CashPaymentBatchCreateResult,
+  CashPaymentSummary,
   ChargeConceptSummary,
   GroupAssignedRosterRow,
   PreRegistrationSummary,
@@ -33,9 +36,10 @@ type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'configuracion' | 
 
 const relationshipOptions = ['Padre', 'Madre', 'Tutor', 'Abuelo', 'Abuela', 'Otro']
 
-const STUDENTS_PER_PAGE = 20
 const CONTROL_STUDENTS_PER_PAGE = 20
 const RECEIPTS_PER_PAGE = 5
+const CURRENT_DATE = new Date()
+const INSCRIPTION_CONCEPT_CODE = 'B002'
 
 const EMPTY_SYNC_STATUS: SyncStatusSnapshot = {
   lastSuccessfulSyncAt: null,
@@ -47,11 +51,14 @@ const EMPTY_SYNC_STATUS: SyncStatusSnapshot = {
     STUDENT_UPDATE: 0,
     RECEIPT_CREATE: 0,
     RECEIPT_REPRINT: 0,
+    CASH_PAYMENT_CREATE: 0,
+    CONCEPT_TARIFF_UPDATE: 0,
+    CONCEPT_SUGGESTED_UPDATE: 0,
   },
 }
 
 function isSelectableConcept(concept: ChargeConceptSummary) {
-  return !concept.code.endsWith('000')
+  return !concept.code.endsWith('000') && !concept.isLifeInsurance
 }
 
 function resolveGroupKey(concept: ChargeConceptSummary) {
@@ -182,6 +189,9 @@ function groupedSelectableConcepts(concepts: ChargeConceptSummary[]) {
       description: conceptGroupHeaders[key]?.description ?? 'Grupo derivado automaticamente desde la clave.',
       amount: 0,
       periodLabel: 'Sin tarifa',
+      isSuggested: false,
+      excludeFromRoc: false,
+      isLifeInsurance: false,
     },
     items: groupItems,
   }))
@@ -229,7 +239,7 @@ const initialPaymentForm: AdmissionCreatePaymentInput = {
 
 function App() {
   const desktopApi = typeof window !== 'undefined' && 'cbta' in window ? window.cbta : null
-  const appApi = desktopApi ?? browserFallbackApi
+  const localApi = (desktopApi ?? browserFallbackApi) as Window['cbta']
   const isBrowserMode = !desktopApi
   const [screen, setScreen] = useState<Screen>('control-escolar')
   const [authSession, setAuthSession] = useState<AuthSession | null>(null)
@@ -251,13 +261,20 @@ function App() {
   const [conceptAmounts, setConceptAmounts] = useState<Record<string, number>>({})
   const [receipts, setReceipts] = useState<RocReceiptSummary[]>([])
   const [allReceipts, setAllReceipts] = useState<RocReceiptSummary[]>([])
+  const [cashPayments, setCashPayments] = useState<CashPaymentSummary[]>([])
   const [recentAuditLogs, setRecentAuditLogs] = useState<AuditLogSummary[]>([])
+  const [includeLifeInsurance, setIncludeLifeInsurance] = useState(false)
   const [rocNumber, setRocNumber] = useState('DGETAYCM-ROC-0001')
+  const [suggestedRocNumber, setSuggestedRocNumber] = useState('DGETAYCM-ROC-0001')
+  const [rocInitialNumber, setRocInitialNumber] = useState('DGETAYCM-ROC-0001')
+  const [rocBatchMonth, setRocBatchMonth] = useState(CURRENT_DATE.getMonth() + 1)
+  const [rocBatchYear, setRocBatchYear] = useState(CURRENT_DATE.getFullYear())
   const [conceptQuery, setConceptQuery] = useState('')
   const [form, setForm] = useState<StudentFormInput>(initialForm)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savingReceipt, setSavingReceipt] = useState(false)
+  const [savingRocConfig, setSavingRocConfig] = useState(false)
   const [savingTariffCode, setSavingTariffCode] = useState<string | null>(null)
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
   const [feedbackByScope, setFeedbackByScope] = useState<Record<FeedbackScope, string | null>>({
@@ -269,9 +286,14 @@ function App() {
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === 'undefined' ? true : navigator.onLine)
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(EMPTY_SYNC_STATUS)
   const [syncing, setSyncing] = useState(false)
+  const appApi = useMemo(() => createHybridApi(localApi, () => authSession), [localApi, authSession])
+  const insuranceConcept = useMemo(() => concepts.find((concept) => concept.isLifeInsurance) ?? null, [concepts])
+  const inscriptionSelected = selectedConcepts.some((concept) => concept.code === INSCRIPTION_CONCEPT_CODE)
+  const [isRecentActivityCollapsed, setIsRecentActivityCollapsed] = useState(false)
   const studentsSectionRef = useRef<HTMLElement | null>(null)
   const captureSectionRef = useRef<HTMLElement | null>(null)
   const ingresosFeedbackTimerRef = useRef<number | null>(null)
+  const rocNumberEditedRef = useRef(false)
 
   function setScopedFeedback(scope: FeedbackScope, message: string | null) {
     setFeedbackByScope((current) => ({
@@ -292,6 +314,32 @@ function App() {
 
   function setIngresosFeedback(message: string | null) {
     setFeedback(message, 'ingresos-propios')
+  }
+
+  function handleChangeRocNumber(value: string) {
+    rocNumberEditedRef.current = true
+    setRocNumber(value)
+  }
+
+  function applySuggestedRocNumber(value: string, force = false) {
+    setSuggestedRocNumber(value)
+    setRocNumber((current) => {
+      if (force || !rocNumberEditedRef.current || current.trim().length === 0) {
+        return value
+      }
+
+      return current
+    })
+  }
+
+  async function refreshSuggestedRocNumber(force = false) {
+    if (typeof appApi.receipts.getConfig !== 'function') {
+      return
+    }
+
+    const config = await appApi.receipts.getConfig()
+    setRocInitialNumber(config.initialRocNumber)
+    applySuggestedRocNumber(config.nextSuggestedRocNumber, force)
   }
 
   function scheduleIngresosFeedbackClear(delayMs = 3500) {
@@ -319,6 +367,18 @@ function App() {
   useEffect(() => {
     void initializeSession()
   }, [])
+
+  useEffect(() => {
+    if (!feedback) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setScopedFeedback(screen, null)
+    }, 4200)
+
+    return () => window.clearTimeout(timer)
+  }, [feedback, screen])
 
   useEffect(() => {
     if (!authSession) {
@@ -396,22 +456,53 @@ function App() {
     void loadReceipts(selectedStudent.id)
   }, [selectedStudent])
 
+  useEffect(() => {
+    if (inscriptionSelected) {
+      return
+    }
+
+    setIncludeLifeInsurance(false)
+    if (!insuranceConcept) {
+      return
+    }
+
+    setSelectedConcepts((current) => current.filter((concept) => concept.code !== insuranceConcept.code))
+    setConceptAmounts((current) => {
+      if (!(insuranceConcept.code in current)) {
+        return current
+      }
+
+      const next = { ...current }
+      delete next[insuranceConcept.code]
+      return next
+    })
+  }, [inscriptionSelected, insuranceConcept])
+
   async function loadData() {
     setLoading(true)
     try {
       const receiptsAllPromise =
         typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
+      const cashPaymentsPromise =
+        typeof appApi.payments?.list === 'function' ? appApi.payments.list() : Promise.resolve([])
       const admissionsPromise =
         typeof appApi.admissions?.list === 'function' ? appApi.admissions.list() : Promise.resolve([])
+      const rocConfigPromise =
+        typeof appApi.receipts.getConfig === 'function'
+          ? appApi.receipts.getConfig()
+              .catch(() => ({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' }))
+          : Promise.resolve({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' })
 
-      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, admissions] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig] = await Promise.all([
         appApi.students.list(),
         appApi.preRegistrations.list(),
         appApi.students.listValidated(),
         appApi.concepts.listActive(),
         appApi.audit.listRecent(),
         receiptsAllPromise,
+        cashPaymentsPromise,
         admissionsPromise,
+        rocConfigPromise,
       ])
 
       setStudents(allStudents)
@@ -420,10 +511,13 @@ function App() {
       setConcepts(activeConcepts)
       setRecentAuditLogs(auditLogs)
       setAllReceipts(receiptsAll)
+      setCashPayments(cashPayments)
       setAdmissions(admissions)
+      setRocInitialNumber(rocConfig.initialRocNumber)
+      applySuggestedRocNumber(rocConfig.nextSuggestedRocNumber)
       setSelectedStudent((current) => {
         if (current) {
-          return validatedStudents.find((student) => student.id === current.id) ?? validatedStudents[0] ?? null
+          return validatedStudents.find((student: StudentSummary) => student.id === current.id) ?? validatedStudents[0] ?? null
         }
 
         return validatedStudents[0] ?? null
@@ -431,7 +525,7 @@ function App() {
       setSelectedConcepts((current) => {
         if (current.length > 0) {
           const refreshedSelection = current
-            .map((selected) => activeConcepts.find((concept) => concept.code === selected.code))
+            .map((selected) => activeConcepts.find((concept: ChargeConceptSummary) => concept.code === selected.code))
             .filter((concept): concept is ChargeConceptSummary => Boolean(concept))
 
           if (refreshedSelection.length > 0) {
@@ -512,23 +606,11 @@ function App() {
     try {
       if (editingStudentId) {
         const updated = await appApi.students.update(editingStudentId, form)
-        addPendingSyncOp({
-          type: 'STUDENT_UPDATE',
-          entityId: updated.id,
-          payload: { studentId: updated.id },
-          deviceId: getDeviceId(),
-        })
         if (activeAdmission && typeof appApi.admissions?.completeCapture === 'function') {
           await appApi.admissions.completeCapture(activeAdmission.id, updated.id)
         }
       } else {
         const created = await appApi.students.create(form)
-        addPendingSyncOp({
-          type: 'STUDENT_CREATE',
-          entityId: created.id,
-          payload: { studentId: created.id },
-          deviceId: getDeviceId(),
-        })
         if (activeAdmission && typeof appApi.admissions?.completeCapture === 'function') {
           await appApi.admissions.completeCapture(activeAdmission.id, created.id)
         }
@@ -568,8 +650,7 @@ function App() {
     }))
   }
 
-  async function handleCreatePayment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  async function handleCreatePayment() {
     if (typeof appApi.admissions?.createPayment !== 'function') {
       return
     }
@@ -578,8 +659,6 @@ function App() {
     try {
       await appApi.admissions.createPayment(paymentForm)
       setPaymentForm(initialPaymentForm)
-      setSelectedPaymentStudent(null)
-      setPaymentSearchQuery('')
       await loadData()
       setIngresosFeedback('Pago de inscripcion registrado. Control Escolar ya puede identificar este CURP como pagado.')
       scheduleIngresosFeedbackClear()
@@ -634,7 +713,7 @@ function App() {
         maternalLastName: parsedName.maternalLastName,
       }))
       await prepareNextInternalFolio()
-      setControlFeedback('Pago seleccionado. Completa la captura y guarda el alumno.')
+      setControlFeedback('Pago selecci?nado. Completa la captura y guarda el alumno.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo abrir la captura de ficha.'
       setControlFeedback(message)
@@ -689,6 +768,9 @@ function App() {
     setSelectedConcepts((current) => {
       const exists = current.some((item) => item.code === concept.code)
       if (exists) {
+        if (concept.code === INSCRIPTION_CONCEPT_CODE) {
+          setIncludeLifeInsurance(false)
+        }
         setConceptAmounts((amounts) => {
           const next = { ...amounts }
           delete next[concept.code]
@@ -700,6 +782,41 @@ function App() {
       setConceptAmounts((amounts) => ({ ...amounts, [concept.code]: amounts[concept.code] ?? concept.amount }))
 
       return [...current, concept]
+    })
+  }
+
+  function handleToggleLifeInsurance(checked: boolean) {
+    setIncludeLifeInsurance(checked)
+
+    if (!insuranceConcept) {
+      return
+    }
+
+    setSelectedConcepts((current) => {
+      const exists = current.some((item) => item.code === insuranceConcept.code)
+      if (checked && !exists) {
+        return [...current, insuranceConcept]
+      }
+
+      if (!checked && exists) {
+        return current.filter((item) => item.code !== insuranceConcept.code)
+      }
+
+      return current
+    })
+
+    setConceptAmounts((amounts) => {
+      if (checked) {
+        return { ...amounts, [insuranceConcept.code]: amounts[insuranceConcept.code] ?? insuranceConcept.amount }
+      }
+
+      if (!(insuranceConcept.code in amounts)) {
+        return amounts
+      }
+
+      const next = { ...amounts }
+      delete next[insuranceConcept.code]
+      return next
     })
   }
 
@@ -743,6 +860,8 @@ function App() {
       setAllReceipts((current) => [createdReceipt, ...current])
       await loadReceipts(selectedStudent.id)
       await loadData()
+      rocNumberEditedRef.current = false
+      await refreshSuggestedRocNumber(true)
       setIngresosFeedback('ROC guardado correctamente en el historial del alumno.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo guardar el ROC.'
@@ -787,6 +906,34 @@ function App() {
     }
   }
 
+  async function handleCancelReceipt(receiptId: string, reason: string) {
+    setIngresosFeedback(null)
+
+    try {
+      const cancelled = await appApi.receipts.cancel({
+        receiptId,
+        reason: reason.trim(),
+      })
+
+      setAllReceipts((current) =>
+        current.map((receipt) =>
+          receipt.id === receiptId ? cancelled : receipt,
+        ),
+      )
+
+      if (selectedStudent) {
+        await loadReceipts(selectedStudent.id)
+      }
+
+      await loadData()
+      await refreshSuggestedRocNumber(true)
+      setIngresosFeedback(`ROC ${cancelled.rocNumber} anulado correctamente.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo anular el ROC.'
+      setIngresosFeedback(message)
+    }
+  }
+
   async function handleUpdateTariff(code: string, amount: number, periodLabel: string) {
     setSavingTariffCode(code)
     setConfigFeedback(null)
@@ -800,6 +947,49 @@ function App() {
       setConfigFeedback(message)
     } finally {
       setSavingTariffCode(null)
+    }
+  }
+
+  async function handleUpdateConceptSuggested(code: string, isSuggested: boolean) {
+    setSavingTariffCode(code)
+    setConfigFeedback(null)
+
+    try {
+      await appApi.concepts.updateSuggested({ code, isSuggested })
+      await loadData()
+      setConfigFeedback(
+        isSuggested
+          ? `La clave ${code} quedo marcada como sugerida para Caja.`
+          : `La clave ${code} ya no se mostrara como sugerida en Caja.`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar la sugerencia de la clave.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingTariffCode(null)
+    }
+  }
+
+  async function handleUpdateRocConfig(initialRocNumber: string) {
+    if (typeof appApi.receipts.updateConfig !== 'function') {
+      setConfigFeedback('La configuracion de ROC no esta disponible en este modo.')
+      return
+    }
+
+    setSavingRocConfig(true)
+    setConfigFeedback(null)
+
+    try {
+      const config = await appApi.receipts.updateConfig({ initialRocNumber })
+      setRocInitialNumber(config.initialRocNumber)
+      rocNumberEditedRef.current = false
+      applySuggestedRocNumber(config.nextSuggestedRocNumber, true)
+      setConfigFeedback(`ROC inicial guardado. Siguiente sugerido: ${config.nextSuggestedRocNumber}.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar la configuracion de ROC.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingRocConfig(false)
     }
   }
 
@@ -842,6 +1032,8 @@ function App() {
       await appApi.receipts.reprint(createdReceipt.id)
       await loadReceipts(selectedStudent.id)
       await loadData()
+      rocNumberEditedRef.current = false
+      await refreshSuggestedRocNumber(true)
       setIngresosFeedback('ROC guardado e impreso correctamente.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo guardar e imprimir el ROC.'
@@ -851,17 +1043,142 @@ function App() {
     }
   }
 
-  async function handlePrintBatchReceipts() {
-    if (typeof appApi.receipts.printBatch !== 'function') {
-      setIngresosFeedback('La impresion por lote no esta disponible en este modo.')
+  async function handleCreateCashPayment() {
+    if (!selectedStudent) {
+      setIngresosFeedback('Selecciona primero un alumno validado para registrar el cobro.')
+      return false
+    }
+
+    if (selectedConcepts.length === 0) {
+      setIngresosFeedback('Selecciona al menos una clave antes de registrar el cobro.')
+      return false
+    }
+
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+
+    try {
+      await appApi.payments.create({
+        studentId: selectedStudent.id,
+        conceptItems: selectedConcepts.map((concept) => ({
+          code: concept.code,
+          amount: conceptAmounts[concept.code] ?? concept.amount,
+        })),
+      })
+      await loadData()
+      await loadReceipts(selectedStudent.id)
+      setSelectedConcepts([])
+      setConceptAmounts({})
+      setIncludeLifeInsurance(false)
+      setIngresosFeedback('Cobro registrado. El alumno ya esta en pendientes de ROC.')
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo registrar el cobro.'
+      setIngresosFeedback(message)
+      return false
+    } finally {
+      setSavingReceipt(false)
+    }
+  }
+
+  async function handlePreviewOfficialReceipt() {
+    if (!selectedStudent) {
+      setIngresosFeedback('Selecciona primero un alumno para generar el ejemplo del ROC.')
       return
     }
+
+    if (selectedConcepts.length === 0) {
+      setIngresosFeedback('Selecciona al menos una clave para abrir el ejemplo del ROC.')
+      return
+    }
+
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+
     try {
-      await appApi.receipts.printBatch()
-      setIngresosFeedback('Se genero el lote final de ROC para impresion (2 por hoja).')
+      await appApi.receipts.openOfficialTemplate({
+        rocNumber: rocNumber.trim() || `EJEMPLO-${Date.now()}`,
+        studentId: selectedStudent.id,
+        conceptCodes: selectedConcepts.map((concept) => concept.code),
+      })
+      setIngresosFeedback('Ejemplo del ROC abierto con los datos actuales.')
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo imprimir el lote de ROC.'
+      const message = error instanceof Error ? error.message : 'No se pudo abrir el ejemplo del ROC.'
       setIngresosFeedback(message)
+    } finally {
+      setSavingReceipt(false)
+    }
+  }
+
+  async function handleGenerateBatchReceipts(paymentIds: string[]): Promise<CashPaymentBatchCreateResult | null> {
+    const today = new Date()
+    const currentMonth = today.getMonth() + 1
+    const currentYear = today.getFullYear()
+
+    if (rocBatchMonth !== currentMonth || rocBatchYear !== currentYear) {
+      setIngresosFeedback('Para generar nuevos ROC y acumularlos correctamente, selecci?na el mes actual. Los meses anteriores se reimprimen con "Reimprimir mes completo".')
+      return null
+    }
+
+    if (paymentIds.length === 0) {
+      setIngresosFeedback('Selecciona al menos un cobro pendiente para generar el ROC masivo.')
+      return null
+    }
+
+    if (!suggestedRocNumber.trim()) {
+      setIngresosFeedback('No hay un ROC sugerido disponible. Revisa la configuracion de Ingresos Propios.')
+      return null
+    }
+
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+
+    try {
+      const result = await appApi.payments.generateBatch({
+        paymentIds,
+        startingRocNumber: suggestedRocNumber.trim(),
+      })
+      await loadData()
+      if (selectedStudent) {
+        await loadReceipts(selectedStudent.id)
+      }
+      rocNumberEditedRef.current = false
+      await refreshSuggestedRocNumber(true)
+      setIngresosFeedback(`ROC del mes actualizado (${result.createdCount} alumnos nuevos). Archivo: ${getOutputFileName(result.outputPath)}.`)
+      return result
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo generar el ROC mensual.'
+      setIngresosFeedback(message)
+      return null
+    } finally {
+      setSavingReceipt(false)
+    }
+  }
+
+  function handleSelectIngresosStudent(student: StudentSummary | null) {
+    setSelectedStudent(student)
+    setSelectedConcepts([])
+    setConceptAmounts({})
+    setIncludeLifeInsurance(false)
+    setConceptQuery('')
+    setIngresosFeedback(null)
+  }
+
+  async function handlePrintMonthlyReceipts() {
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+
+    try {
+      const result = await appApi.receipts.printBatch({
+        month: rocBatchMonth,
+        year: rocBatchYear,
+      })
+      setIngresosFeedback(`ROC mensual ${result.periodLabel} generado (${result.exportedCount} ROC). Archivo: ${getOutputFileName(result.outputPath)}.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo generar el ROC mensual.'
+      setIngresosFeedback(message)
+    } finally {
+      setSavingReceipt(false)
     }
   }
 
@@ -878,7 +1195,7 @@ function App() {
     try {
       const result = await syncAll()
       refreshSyncStatus()
-      if (result.pulled > 0) {
+      if (result.pulled > 0 || result.sent > 0) {
         await loadData()
       }
       setSyncFeedback(result.message)
@@ -934,7 +1251,7 @@ function App() {
           <div className="auth-card-header">
             <p className="eyebrow">Acceso institucional</p>
             <h2>Iniciar sesion</h2>
-            <p>Entrá con tu usuario asignado para continuar con la operacion del plantel.</p>
+            <p>EntrÃ¡ con tu usuario asignado para continuar con la operacion del plantel.</p>
           </div>
           <label className="form-field">
             <span>Usuario</span>
@@ -1009,16 +1326,16 @@ function App() {
           </button> : null}
         </nav>
 
-        <section className="panel compact">
-          <h2>Resumen rapido</h2>
+        <details className="panel compact secondary-details">
+          <summary>Resumen rapido</summary>
           <p className="muted">Ficha entregada: {students.filter((item) => item.statusLabel === 'Ficha entregada').length}</p>
           <p className="muted">Sin grupo: {students.filter((item) => !item.groupLabel).length}</p>
           <p className="muted">No presentados: {students.filter((item) => item.statusLabel === 'No presentado').length}</p>
           <p className="muted">Pagos pendientes: {admissions.filter((item) => item.status === 'PAGADO_PENDIENTE_CAPTURA').length}</p>
-        </section>
+        </details>
 
-        <section className="panel compact">
-          <h2>Sincronizacion</h2>
+        <details className="panel compact secondary-details">
+          <summary>Sincronizacion</summary>
           <p className="muted">Estado: {isOnline ? 'Online' : 'Offline'}</p>
           <p className="muted">Pendientes locales: {syncStatus.pendingTotal}</p>
           <p className="muted">
@@ -1036,24 +1353,26 @@ function App() {
           <button className="secondary-button small-button" onClick={handleSimulateSync} type="button">
             Marcar pendientes como enviados
           </button>
-        </section>
+        </details>
       </aside>
 
       <main className="content">
-        <section className="panel compact">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">Panel operativo</p>
-              <h2>{screen === 'control-escolar' ? 'Control Escolar' : screen === 'ingresos-propios' ? 'Ingresos Propios' : 'Configuracion'}</h2>
+        {feedback ? <FloatingFeedbackToast message={feedback} onClose={() => setScopedFeedback(screen, null)} /> : null}
+        {screen !== 'ingresos-propios' ? (
+          <section className="panel compact">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Panel operativo</p>
+                <h2>{screen === 'control-escolar' ? 'Control Escolar' : 'Configuracion'}</h2>
+              </div>
+              <span className="status-tag">{isOnline ? 'Online' : 'Offline'}</span>
             </div>
-            <span className="status-tag">{isOnline ? 'Online' : 'Offline'}</span>
-          </div>
-          <div className="button-row">
-            <span className="chip">Alumnos validados: {validatedStudents.length}</span>
-            <span className="chip">Claves activas: {concepts.length}</span>
-            <span className="chip">Sync pendientes: {syncStatus.pendingTotal}</span>
-          </div>
-        </section>
+            <div className="button-row">
+              <span className="chip">Alumnos validados: {validatedStudents.length}</span>
+              <span className="chip">Sync pendientes: {syncStatus.pendingTotal}</span>
+            </div>
+          </section>
+        ) : null}
 
         {isBrowserMode ? (
           <p className="feedback-banner">
@@ -1088,39 +1407,49 @@ function App() {
         ) : screen === 'ingresos-propios' ? (
           <IngresosPropiosOverview
             concepts={concepts}
+            cashPayments={cashPayments}
             loading={loading}
             receipts={receipts}
             allReceipts={allReceipts}
-            rocNumber={rocNumber}
+            suggestedRocNumber={suggestedRocNumber}
             savingReceipt={savingReceipt}
             selectedConcepts={selectedConcepts}
-            admissions={admissions}
-            paymentForm={paymentForm}
             selectedStudent={selectedStudent}
             students={validatedStudents}
             total={total}
+            includeLifeInsurance={includeLifeInsurance}
+            lifeInsuranceAmount={insuranceConcept ? conceptAmounts[insuranceConcept.code] ?? insuranceConcept.amount : 0}
+            showLifeInsuranceOption={inscriptionSelected && Boolean(insuranceConcept)}
             conceptAmounts={conceptAmounts}
             conceptQuery={conceptQuery}
             feedback={feedbackByScope['ingresos-propios']}
-            onChangeRocNumber={setRocNumber}
-            onCreateReceipt={handleCreateReceipt}
+            isOnline={isOnline}
+            rocInitialNumber={rocInitialNumber}
+            rocBatchMonth={rocBatchMonth}
+            rocBatchYear={rocBatchYear}
+            onChangeRocBatchMonth={setRocBatchMonth}
+            onChangeRocBatchYear={setRocBatchYear}
+            onCreateCashPayment={handleCreateCashPayment}
             onChangeConceptQuery={setConceptQuery}
-            onPrintReceipt={handlePrintReceipt}
-            onPrintBatchReceipts={handlePrintBatchReceipts}
+            onGenerateBatchReceipts={handleGenerateBatchReceipts}
+            onPrintMonthlyReceipts={handlePrintMonthlyReceipts}
             onReprintReceipt={handleReprintReceipt}
-            onSelectStudent={setSelectedStudent}
+            onCancelReceipt={handleCancelReceipt}
+            onSelectStudent={handleSelectIngresosStudent}
+            onToggleLifeInsurance={handleToggleLifeInsurance}
             onToggleConcept={toggleConcept}
             onUpdateConceptAmount={updateConceptAmount}
-            onPrintAdmission={handlePrintAdmission}
-            onPrintPaymentReceipt={printPaymentReceipt}
-            onCreatePayment={handleCreatePayment}
-            onUpdatePaymentField={(field, value) => setPaymentForm((current) => ({ ...current, [field]: value }))}
           />
         ) : (
           <ConfiguracionTarifasOverview
             concepts={concepts}
+            rocInitialNumber={rocInitialNumber}
+            suggestedRocNumber={suggestedRocNumber}
             savingTariffCode={savingTariffCode}
+            savingRocConfig={savingRocConfig}
             onUpdateTariff={handleUpdateTariff}
+            onUpdateRocConfig={handleUpdateRocConfig}
+            onUpdateSuggested={handleUpdateConceptSuggested}
           />
         )}
 
@@ -1130,19 +1459,28 @@ function App() {
               <p className="eyebrow">Bitacora</p>
               <h2>Actividad reciente</h2>
             </div>
-            <span className="status-tag">12 eventos recientes</span>
+            <div className="button-row">
+              <span className="status-tag">{recentAuditLogs.length} eventos recientes</span>
+              <button
+                className="secondary-button small-button"
+                onClick={() => setIsRecentActivityCollapsed((current) => !current)}
+                type="button"
+              >
+                {isRecentActivityCollapsed ? 'Mostrar actividad' : 'Ocultar actividad'}
+              </button>
+            </div>
           </div>
 
-          <div className="receipt-history">
+          <div className={isRecentActivityCollapsed ? 'receipt-history collapsed' : 'receipt-history'}>
             {recentAuditLogs.length === 0 ? <p className="empty-state">Todavia no hay actividad registrada.</p> : null}
-            {recentAuditLogs.map((log) => (
+            {!isRecentActivityCollapsed ? recentAuditLogs.map((log) => (
               <article className="history-card" key={log.id}>
                 <strong>{log.action}</strong>
                 <span>{log.actorName}</span>
                 <span>{new Date(log.createdAt).toLocaleString('es-MX')}</span>
                 <em>{log.detail || `${log.entityType} ${log.entityId}`}</em>
               </article>
-            ))}
+            )) : null}
           </div>
         </section>
       </main>
@@ -1152,13 +1490,84 @@ function App() {
 
 type ConfiguracionTarifasProps = {
   concepts: ChargeConceptSummary[]
+  rocInitialNumber: string
+  suggestedRocNumber: string
   savingTariffCode: string | null
+  savingRocConfig: boolean
   onUpdateTariff: (code: string, amount: number, periodLabel: string) => Promise<void>
+  onUpdateRocConfig: (initialRocNumber: string) => Promise<void>
+  onUpdateSuggested: (code: string, isSuggested: boolean) => Promise<void>
 }
 
-function ConfiguracionTarifasOverview({ concepts, savingTariffCode, onUpdateTariff }: ConfiguracionTarifasProps) {
+function getOutputFileName(outputPath: string) {
+  const parts = outputPath.split(/[\\/]/)
+  return parts[parts.length - 1] || outputPath
+}
+
+function extractOutputFileNameFromFeedback(message: string) {
+  const match = message.match(/Archivo:\s*([^.\n]+\.xlsx)/i)
+  return match ? getOutputFileName(match[1].trim()) : null
+}
+
+function normalizeFeedbackMessage(message: string) {
+  return message.replace(/\s*Archivo:\s*([^.\n]+\.xlsx)\.?/i, '').trim()
+}
+
+type FloatingFeedbackToastProps = {
+  message: string
+  onClose: () => void
+}
+
+function FloatingFeedbackToast({ message, onClose }: FloatingFeedbackToastProps) {
+  const isError = /(no se pudo|error|fall[oÃ³])/i.test(message)
+  const fileName = extractOutputFileNameFromFeedback(message)
+  const title = isError
+    ? 'Hay que revisar esta operacion'
+    : fileName
+      ? 'ROC mensual generado correctamente'
+      : 'Operacion registrada'
+
+  return (
+    <article className={isError ? 'feedback-toast feedback-toast-error' : 'feedback-toast'} role="status">
+      <div className="feedback-card-header">
+        <strong>{title}</strong>
+        <div className="feedback-toast-actions">
+          <span className={isError ? 'status-tag status-tag-danger' : 'status-tag'}>
+            {isError ? 'Error' : 'Listo'}
+          </span>
+          <button aria-label="Cerrar notificacion" className="toast-close-button" onClick={onClose} type="button">
+            Ã—
+          </button>
+        </div>
+      </div>
+      <p>{normalizeFeedbackMessage(message)}</p>
+      {fileName ? (
+        <div className="feedback-file-chip">
+          <span>Archivo abierto:</span>
+          <strong>{fileName}</strong>
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function ConfiguracionTarifasOverview({
+  concepts,
+  rocInitialNumber,
+  suggestedRocNumber,
+  savingTariffCode,
+  savingRocConfig,
+  onUpdateTariff,
+  onUpdateRocConfig,
+  onUpdateSuggested,
+}: ConfiguracionTarifasProps) {
   const groupedConcepts = groupedSelectableConcepts(concepts)
   const [selectedGroupKey, setSelectedGroupKey] = useState(groupedConcepts[0]?.key ?? 'A000')
+  const [rocInitialDraft, setRocInitialDraft] = useState(rocInitialNumber)
+
+  useEffect(() => {
+    setRocInitialDraft(rocInitialNumber)
+  }, [rocInitialNumber])
 
   useEffect(() => {
     if (groupedConcepts.length === 0) {
@@ -1183,6 +1592,36 @@ function ConfiguracionTarifasOverview({ concepts, savingTariffCode, onUpdateTari
         <span className="status-tag">Edicion por Ingresos Propios</span>
       </div>
 
+      <article className="panel sub-panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">ROC</p>
+            <h3>Configuracion de consecutivo</h3>
+          </div>
+          <span className="status-tag">Se captura una vez</span>
+        </div>
+        <div className="button-row">
+          <Field label="ROC inicial base">
+            <input value={rocInitialDraft} onChange={(event) => setRocInitialDraft(event.target.value)} />
+          </Field>
+          <div className="selected-student-summary compact-summary">
+            <div>
+              <span className="detail-label">Configurado</span>
+              <strong>{rocInitialNumber}</strong>
+            </div>
+            <div>
+              <span className="detail-label">Siguiente sugerido</span>
+              <strong>{suggestedRocNumber}</strong>
+            </div>
+          </div>
+        </div>
+        <div className="button-row">
+          <button className="primary-button small-button" disabled={savingRocConfig} onClick={() => void onUpdateRocConfig(rocInitialDraft)} type="button">
+            Guardar ROC inicial
+          </button>
+        </div>
+      </article>
+
       <div className="tariff-groups">
         <div className="tariff-toolbar">
           <Field label="Grupo de claves">
@@ -1194,7 +1633,9 @@ function ConfiguracionTarifasOverview({ concepts, savingTariffCode, onUpdateTari
               ))}
             </select>
           </Field>
-          <p className="tariff-help-text">{concepts.filter(isSelectableConcept).length} claves configurables cargadas</p>
+          <p className="tariff-help-text">
+            {concepts.filter(isSelectableConcept).length} claves configurables cargadas. La tarifa del seguro de vida se cambia acÃ¡ y queda marcada como "Seguro de vida / No se imprime en ROC".
+          </p>
         </div>
 
         {!activeGroup ? <p className="empty-state">No hay claves configurables para este catalogo.</p> : null}
@@ -1228,6 +1669,7 @@ function ConfiguracionTarifasOverview({ concepts, savingTariffCode, onUpdateTari
                       isSaving={savingTariffCode === concept.code}
                       key={concept.code}
                       onSave={onUpdateTariff}
+                      onToggleSuggested={onUpdateSuggested}
                     />
                   ))}
                 </tbody>
@@ -1244,9 +1686,10 @@ type TariffEditorRowProps = {
   concept: ChargeConceptSummary
   isSaving: boolean
   onSave: (code: string, amount: number, periodLabel: string) => Promise<void>
+  onToggleSuggested: (code: string, isSuggested: boolean) => Promise<void>
 }
 
-function TariffEditorRow({ concept, isSaving, onSave }: TariffEditorRowProps) {
+function TariffEditorRow({ concept, isSaving, onSave, onToggleSuggested }: TariffEditorRowProps) {
   const [amount, setAmount] = useState(String(concept.amount))
   const [periodLabel, setPeriodLabel] = useState(concept.periodLabel)
 
@@ -1258,7 +1701,11 @@ function TariffEditorRow({ concept, isSaving, onSave }: TariffEditorRowProps) {
   return (
     <tr>
       <td>{concept.code}</td>
-      <td>{concept.name}</td>
+      <td>
+        {concept.name}
+        {concept.isLifeInsurance ? <div><small>Seguro de vida</small></div> : null}
+        {concept.excludeFromRoc ? <div><small>No se imprime en ROC</small></div> : null}
+      </td>
       <td>
         <input className="table-input" type="number" min="0" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} />
       </td>
@@ -1266,14 +1713,24 @@ function TariffEditorRow({ concept, isSaving, onSave }: TariffEditorRowProps) {
         <input className="table-input" value={periodLabel} onChange={(event) => setPeriodLabel(event.target.value)} />
       </td>
       <td>
-        <button
-          className="primary-button small-button"
-          disabled={isSaving}
-          onClick={() => void onSave(concept.code, Number(amount || 0), periodLabel)}
-          type="button"
-        >
-          {isSaving ? '...' : 'Guardar'}
-        </button>
+        <div className="button-row">
+          <button
+            className="primary-button small-button"
+            disabled={isSaving}
+            onClick={() => void onSave(concept.code, Number(amount || 0), periodLabel)}
+            type="button"
+          >
+            {isSaving ? '...' : 'Guardar'}
+          </button>
+          <button
+            className={concept.isSuggested ? 'secondary-button small-button' : 'tertiary-button small-button'}
+            disabled={isSaving}
+            onClick={() => void onToggleSuggested(concept.code, !concept.isSuggested)}
+            type="button"
+          >
+            {concept.isSuggested ? 'Quitar sugerida' : 'Marcar sugerida'}
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -1799,7 +2256,7 @@ function ControlEscolarOverview({
           </Field>
         </div>
         <div className="student-table-wrap">
-          <table className="student-table">
+          <table className="student-table table-inscripcion-ce">
             <thead>
               <tr>
                 <th>Folio interno</th>
@@ -2039,7 +2496,7 @@ function ControlEscolarOverview({
                 <p className="eyebrow">Checklist</p>
                 <h3>{requirementChecklist?.studentName ?? 'Selecciona un alumno'}</h3>
               </div>
-              <span className="status-tag">{requirementChecklist?.documentationStatus ?? 'Sin seleccionar'}</span>
+              <span className="status-tag">{requirementChecklist?.documentationStatus ?? 'Sin selecci?nar'}</span>
             </div>
             {requirementChecklist ? (
               <div className="checklist-modal">
@@ -2113,118 +2570,122 @@ function ControlEscolarOverview({
 
 type IngresosProps = {
   students: StudentSummary[]
-  admissions: AdmissionSummary[]
-  paymentForm: AdmissionCreatePaymentInput
+  cashPayments: CashPaymentSummary[]
   selectedStudent: StudentSummary | null
   concepts: ChargeConceptSummary[]
   selectedConcepts: ChargeConceptSummary[]
   receipts: RocReceiptSummary[]
   allReceipts: RocReceiptSummary[]
-  rocNumber: string
+  suggestedRocNumber: string
+  rocInitialNumber: string
   conceptQuery: string
   savingReceipt: boolean
   loading: boolean
   total: number
+  includeLifeInsurance: boolean
+  lifeInsuranceAmount: number
+  showLifeInsuranceOption: boolean
   conceptAmounts: Record<string, number>
   feedback: string | null
+  isOnline: boolean
+  rocBatchMonth: number
+  rocBatchYear: number
   onChangeConceptQuery: (value: string) => void
-  onChangeRocNumber: (value: string) => void
-  onCreateReceipt: () => Promise<void>
-  onPrintReceipt: () => Promise<void>
-  onPrintBatchReceipts: () => Promise<void>
+  onChangeRocBatchMonth: (value: number) => void
+  onChangeRocBatchYear: (value: number) => void
+  onCreateCashPayment: () => Promise<boolean>
+  onGenerateBatchReceipts: (paymentIds: string[]) => Promise<CashPaymentBatchCreateResult | null>
+  onPrintMonthlyReceipts: () => Promise<void>
   onReprintReceipt: (receiptId: string) => Promise<void>
-  onSelectStudent: (student: StudentSummary) => void
+  onCancelReceipt: (receiptId: string, reason: string) => Promise<void>
+  onSelectStudent: (student: StudentSummary | null) => void
+  onToggleLifeInsurance: (checked: boolean) => void
   onToggleConcept: (concept: ChargeConceptSummary) => void
   onUpdateConceptAmount: (code: string, amount: number) => void
-  onPrintAdmission: (admission: AdmissionSummary) => Promise<void>
-  onPrintPaymentReceipt: (admission: AdmissionSummary) => Promise<void>
-  onCreatePayment: (event: FormEvent<HTMLFormElement>) => Promise<void>
-  onUpdatePaymentField: <K extends keyof AdmissionCreatePaymentInput>(field: K, value: AdmissionCreatePaymentInput[K]) => void
 }
 
 function IngresosPropiosOverview({
   students,
-  admissions,
-  paymentForm,
+  cashPayments,
   selectedStudent,
   concepts,
   selectedConcepts,
   receipts,
   allReceipts,
-  rocNumber,
+  suggestedRocNumber,
+  rocInitialNumber,
   conceptQuery,
   savingReceipt,
   loading,
   total,
+  includeLifeInsurance,
+  lifeInsuranceAmount,
+  showLifeInsuranceOption,
   conceptAmounts,
   feedback,
+  isOnline,
+  rocBatchMonth,
+  rocBatchYear,
   onChangeConceptQuery,
-  onChangeRocNumber,
-  onCreateReceipt,
-  onPrintReceipt,
-  onPrintBatchReceipts,
+  onChangeRocBatchMonth,
+  onChangeRocBatchYear,
+  onCreateCashPayment,
+  onGenerateBatchReceipts,
+  onPrintMonthlyReceipts,
   onReprintReceipt,
+  onCancelReceipt,
   onSelectStudent,
+  onToggleLifeInsurance,
   onToggleConcept,
   onUpdateConceptAmount,
-  onPrintAdmission,
-  onPrintPaymentReceipt,
-  onCreatePayment,
-  onUpdatePaymentField,
 }: IngresosProps) {
-  const [operationsTab, setOperationsTab] = useState<'pagos' | 'inscripcion-roc' | 'fichas' | 'historial'>('pagos')
-  const printedAt = new Date()
-  const amountInWords = amountToWords(total)
-  const normalizedQuery = conceptQuery.trim().toLowerCase()
-  const paymentConcepts = concepts.filter(isSelectableConcept)
-  const filteredPaymentConcepts = normalizedQuery
-    ? paymentConcepts.filter((concept) => {
-        const haystack = [concept.code, concept.name, concept.description ?? ''].join(' ').toLowerCase()
-        return haystack.includes(normalizedQuery)
-      })
-    : paymentConcepts
-  const [paymentSearchQuery, setPaymentSearchQuery] = useState('')
-  const [selectedPaymentStudent, setSelectedPaymentStudent] = useState<StudentSummary | null>(null)
-  const [paymentAmount, setPaymentAmount] = useState('100')
-  const [insuranceAmount, setInsuranceAmount] = useState('80')
+  const [operationsTab, setOperationsTab] = useState<'caja' | 'pendientes-roc' | 'historial'>('caja')
   const [studentQuery, setStudentQuery] = useState('')
-  const [studentPage, setStudentPage] = useState(1)
   const [receiptPage, setReceiptPage] = useState(1)
-  const normalizedPaymentQuery = paymentSearchQuery.trim().toLowerCase()
-  const paymentCandidates = normalizedPaymentQuery
-    ? students.filter((student) => {
-        const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
-        return haystack.includes(normalizedPaymentQuery)
-      })
-    : []
-  const paymentCandidatesLimited = paymentCandidates.slice(0, 10)
+  const [cancelReceiptId, setCancelReceiptId] = useState<string | null>(null)
+  const [cancelReceiptReason, setCancelReceiptReason] = useState('')
+  const [submittingCancelReceipt, setSubmittingCancelReceipt] = useState(false)
+  const studentSearchRef = useRef<HTMLInputElement | null>(null)
+  const monthOptions = useMemo(
+    () =>
+      Array.from({ length: 12 }, (_item, index) => ({
+        value: index + 1,
+        label: new Date(2026, index, 1).toLocaleDateString('es-MX', { month: 'long' }),
+      })),
+    [],
+  )
+  const yearOptions = useMemo(() => {
+    const receiptYears = allReceipts.map((receipt) => new Date(receipt.issuedAt).getFullYear())
+    const baseYears = [rocBatchYear, new Date().getFullYear(), ...receiptYears]
+    return Array.from(new Set(baseYears)).sort((a, b) => b - a)
+  }, [allReceipts, rocBatchYear])
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
-  const filteredStudents = normalizedStudentQuery
-    ? students.filter((student) => {
-        const haystack = `${student.enrollmentNumber} ${student.fullName}`.toLowerCase()
-        return haystack.includes(normalizedStudentQuery)
-      })
-    : students
-
-  const totalStudentPages = Math.max(1, Math.ceil(filteredStudents.length / STUDENTS_PER_PAGE))
-  const paginatedStudents = filteredStudents.slice((studentPage - 1) * STUDENTS_PER_PAGE, studentPage * STUDENTS_PER_PAGE)
+  const normalizedConceptQuery = conceptQuery.trim().toLowerCase()
+  const paymentConcepts = concepts.filter(isSelectableConcept)
+  const filteredPaymentConcepts = normalizedConceptQuery
+    ? paymentConcepts.filter((concept) => [concept.code, concept.name, concept.description ?? ''].join(' ').toLowerCase().includes(normalizedConceptQuery))
+    : paymentConcepts
+  const visibleStudents = normalizedStudentQuery.length >= 2
+    ? students.filter((student) => `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase().includes(normalizedStudentQuery)).slice(0, 10)
+    : []
+  const belongsToSelectedMonth = (isoDate: string) => {
+    const value = new Date(isoDate)
+    return value.getFullYear() === rocBatchYear && value.getMonth() + 1 === rocBatchMonth
+  }
+  const pendingPayments = cashPayments.filter((payment) => payment.status === 'PENDIENTE_ROC')
+  const pendingPaymentsForSelectedMonth = pendingPayments.filter((payment) => belongsToSelectedMonth(payment.createdAt))
+  const monthlyPayments = cashPayments.filter((payment) => belongsToSelectedMonth(payment.createdAt))
+  const generatedPaymentsForSelectedMonth = monthlyPayments.filter((payment) => payment.status === 'ROC_GENERADO')
+  const monthlyReceipts = allReceipts.filter((receipt) => belongsToSelectedMonth(receipt.issuedAt))
+  const studentsWithoutPayments = students.filter((student) => !cashPayments.some((payment) => payment.studentId === student.id))
+  const suggestedConcepts = paymentConcepts.filter((concept) => concept.isSuggested)
   const totalReceiptPages = Math.max(1, Math.ceil(receipts.length / RECEIPTS_PER_PAGE))
   const paginatedReceipts = receipts.slice((receiptPage - 1) * RECEIPTS_PER_PAGE, receiptPage * RECEIPTS_PER_PAGE)
   const latestReceiptId = receipts[0]?.id ?? null
-  const recentReceipts = receipts.slice(0, 3)
   const recentAllReceipts = allReceipts.slice(0, 5)
-
-
-  useEffect(() => {
-    if (studentPage > totalStudentPages) {
-      setStudentPage(totalStudentPages)
-    }
-  }, [studentPage, totalStudentPages])
-
-  useEffect(() => {
-    setStudentPage(1)
-  }, [normalizedStudentQuery])
-
+  const receiptPendingCancellation = cancelReceiptId
+    ? allReceipts.find((receipt) => receipt.id === cancelReceiptId) ?? receipts.find((receipt) => receipt.id === cancelReceiptId) ?? null
+    : null
   useEffect(() => {
     if (receiptPage > totalReceiptPages) {
       setReceiptPage(totalReceiptPages)
@@ -2235,615 +2696,593 @@ function IngresosPropiosOverview({
     setReceiptPage(1)
   }, [selectedStudent?.id, latestReceiptId])
 
-  const rocSheet = (className: string) => (
-    <div className={className}>
-      <div className="roc-print-header">
-        <div>
-          <p className="roc-print-title">RECIBO OFICIAL DE COBRO</p>
-          <span>Subsecretaria de Educacion Media Superior</span>
-          <span>Direccion General de Educacion Tecnologica Agropecuaria y Ciencias del Mar</span>
-        </div>
-        <div className="roc-print-meta">
-          <div>
-            <label>RECIBO No.</label>
-            <strong>{rocNumber || 'PENDIENTE'}</strong>
-          </div>
-          <div>
-            <label>FECHA</label>
-            <strong>{formatPrintDate(printedAt)}</strong>
-          </div>
-        </div>
-      </div>
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (operationsTab !== 'caja') return
 
-      <div className="roc-print-grid three">
-        <div>
-          <label>APELLIDO PATERNO</label>
-          <p>{selectedStudent?.paternalLastName ?? ''}</p>
-        </div>
-        <div>
-          <label>APELLIDO MATERNO</label>
-          <p>{selectedStudent?.maternalLastName ?? ''}</p>
-        </div>
-        <div>
-          <label>NOMBRE(S)</label>
-          <p>{selectedStudent?.firstName ?? ''}</p>
-        </div>
-      </div>
+      if (event.ctrlKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        studentSearchRef.current?.focus()
+        return
+      }
 
-      <div className="roc-print-grid two">
-        <div>
-          <label>DOMICILIO</label>
-          <p>{selectedStudent?.address ?? ''}</p>
-        </div>
-        <div>
-            <label>R.F.C. y/o FOLIO INTERNO</label>
-          <p>{selectedStudent?.rfc || selectedStudent?.enrollmentNumber || ''}</p>
-        </div>
-      </div>
+      if (event.key === 'F2') {
+        event.preventDefault()
+        if (!savingReceipt && selectedStudent && selectedConcepts.length > 0) {
+          void handleCreatePaymentAndKeepCapturing()
+        }
+        return
+      }
+    }
 
-      <div className="roc-amount-row">
-        <div>
-          <label>LA CANTIDAD DE $</label>
-          <strong>{formatCurrency(total)}</strong>
-        </div>
-        <p>({amountInWords})</p>
-      </div>
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [handleCreatePaymentAndKeepCapturing, operationsTab, savingReceipt, selectedConcepts.length, selectedStudent])
 
-      <table className="roc-table">
-        <thead>
-          <tr>
-            <th>CANTIDAD</th>
-            <th>CLAVE</th>
-            <th>CONCEPTO</th>
-            <th>CUOTA</th>
-            <th>IMPORTE</th>
-          </tr>
-        </thead>
-        <tbody>
-          {selectedConcepts.map((concept) => (
-            <tr key={concept.code}>
-              <td>1</td>
-              <td>{concept.code}</td>
-              <td>{concept.name}</td>
-              <td>{formatCurrency(concept.amount)}</td>
-              <td>{formatCurrency(concept.amount)}</td>
-            </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr>
-            <td colSpan={4}>TOTAL</td>
-            <td>{formatCurrency(total)}</td>
-          </tr>
-        </tfoot>
-      </table>
+  function onStudentSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter' && visibleStudents.length > 0) {
+      event.preventDefault()
+      onSelectStudent(visibleStudents[0])
+    }
+  }
 
-      <div className="roc-print-footer">
-        <div>
-          <label>NOMBRE Y FIRMA DEL CAJERO</label>
-          <p>ENCARGADO DE INGRESOS PROPIOS</p>
-        </div>
-        <div>
-          <label>OBSERVACION</label>
-          <p>Plantilla oficial aproximada para pruebas del MVP.</p>
-        </div>
-      </div>
-    </div>
-  )
+  function handleAddSuggestedConcepts() {
+    for (const concept of suggestedConcepts) {
+      if (!selectedConcepts.some((selected) => selected.code === concept.code)) {
+        onToggleConcept(concept)
+      }
+    }
+  }
+
+  function handleClearConcepts() {
+    for (const concept of selectedConcepts) {
+      onToggleConcept(concept)
+    }
+  }
+
+  const selectedConceptLabels = selectedConcepts.map((concept) => ({
+    concept,
+    amount: conceptAmounts[concept.code] ?? concept.amount,
+  }))
+
+  function handleResetCashDesk() {
+    handleClearConcepts()
+    onToggleLifeInsurance(false)
+    onChangeConceptQuery('')
+    setStudentQuery('')
+    onSelectStudent(null)
+    window.setTimeout(() => {
+      studentSearchRef.current?.focus()
+    }, 60)
+  }
+
+  async function handleCreatePaymentAndKeepCapturing() {
+    const created = await onCreateCashPayment()
+    if (created) {
+      handleResetCashDesk()
+    }
+  }
+
+  async function handleGenerateSelectedMonth() {
+    if (pendingPaymentsForSelectedMonth.length === 0) {
+      return
+    }
+
+    const result = await onGenerateBatchReceipts(pendingPaymentsForSelectedMonth.map((payment) => payment.id))
+    if (result) {
+      setOperationsTab('historial')
+    }
+  }
+
+  async function handleConfirmCancelReceipt() {
+    if (!cancelReceiptId) return
+    if (cancelReceiptReason.trim().length < 3) return
+
+    setSubmittingCancelReceipt(true)
+    try {
+      await onCancelReceipt(cancelReceiptId, cancelReceiptReason.trim())
+      setCancelReceiptId(null)
+      setCancelReceiptReason('')
+    } finally {
+      setSubmittingCancelReceipt(false)
+    }
+  }
 
   return (
     <section className="roc-layout">
       <article className="panel compact" style={{ gridColumn: '1 / -1' }}>
         <div className="button-row">
-          <button
-            className={operationsTab === 'pagos' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('pagos')}
-            type="button"
-          >
-            Inscripcion
+          <button className={operationsTab === 'caja' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('caja')} type="button">
+            Caja / Cobros
           </button>
-          <button
-            className={operationsTab === 'inscripcion-roc' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('inscripcion-roc')}
-            type="button"
-          >
-            ROC inscripcion
+          <button className={operationsTab === 'pendientes-roc' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('pendientes-roc')} type="button">
+            Pendientes de ROC
           </button>
-          <button
-            className={operationsTab === 'fichas' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('fichas')}
-            type="button"
-          >
-            Fichas
-          </button>
-          <button
-            className={operationsTab === 'historial' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('historial')}
-            type="button"
-          >
-            Historial
+          <button className={operationsTab === 'historial' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('historial')} type="button">
+            ROC mensual
           </button>
         </div>
+        <p className="table-summary compact-operational-line">
+          {cashPayments.length} cobros registrados | {pendingPayments.length} pendientes ROC | {cashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length} ROC generados | {studentsWithoutPayments.length} alumnos sin cobro | {isOnline ? 'Online' : 'Offline'}
+        </p>
       </article>
 
-      {feedback ? <p className="feedback-banner">{feedback}</p> : null}
-
-      {operationsTab === 'pagos' ? (
-      <article className="panel wide">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Financieros</p>
-            <h2>Registro manual de pago de inscripcion</h2>
+      {operationsTab === 'caja' ? (
+        <article className="panel wide">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Caja</p>
+              <h2 className="compact-header">Cobros por clave unificados</h2>
+            </div>
+            <span className="status-tag">Ctrl+K buscar alumno | F2 registrar cobro</span>
           </div>
-            <span className="status-tag">B002 para ROC posterior</span>
-        </div>
-        <div className="payment-layout">
-          <div>
-            <div className="student-search-row">
-              <Field className="span-2" label="Buscar alumno">
+
+          <div className="cash-workspace">
+            <div className="cash-top-bar">
+              <Field className="cash-search-field" label="Buscar alumno">
                 <input
-                  placeholder="Buscar por folio interno, CURP o nombre"
-                  value={paymentSearchQuery}
-                  onChange={(event) => {
-                    setPaymentSearchQuery(event.target.value)
-                    if (selectedPaymentStudent) {
-                      setSelectedPaymentStudent(null)
-                    }
-                  }}
+                  ref={studentSearchRef}
+                  placeholder="Buscar por folio interno, nombre o CURP"
+                  value={studentQuery}
+                  onChange={(event) => setStudentQuery(event.target.value)}
+                  onKeyDown={onStudentSearchKeyDown}
                 />
               </Field>
-            </div>
-            {selectedPaymentStudent ? (
-              <div className="selected-student-card">
-                <div>
-                  <span className="eyebrow">Alumno seleccionado</span>
-                  <h3>{selectedPaymentStudent.fullName}</h3>
-                  <p>Folio interno: {selectedPaymentStudent.enrollmentNumber}</p>
-                  <p>CURP: {selectedPaymentStudent.curp}</p>
-                  <p>Grupo: {selectedPaymentStudent.groupLabel ?? 'Sin asignar'}</p>
+
+              {selectedStudent ? (
+                <div className="selected-student-summary compact-summary cash-student-summary">
+                  <div>
+                    <span className="detail-label">Alumno</span>
+                    <strong>{selectedStudent.fullName}</strong>
+                  </div>
+                  <div>
+                    <span className="detail-label">Folio</span>
+                    <strong>{selectedStudent.enrollmentNumber}</strong>
+                  </div>
+                  <div>
+                    <span className="detail-label">ROC historicos</span>
+                    <strong>{receipts.length}</strong>
+                  </div>
                 </div>
-                <button
-                  className="secondary-button small-button"
-                  onClick={() => setSelectedPaymentStudent(null)}
-                  type="button"
-                >
-                  Cambiar alumno
-                </button>
-              </div>
-            ) : normalizedPaymentQuery.length === 0 ? (
-              <p className="empty-state">Escribi para buscar y seleccionar un alumno.</p>
-            ) : paymentCandidates.length === 0 ? (
-              <p className="empty-state">No hay alumnos que coincidan con la busqueda.</p>
-            ) : (
-              <div className="student-table-wrap">
+              ) : (
+                <div className="cash-inline-empty">
+                  <p className="empty-state">Busca y selecciona un alumno validado para registrar el cobro.</p>
+                </div>
+              )}
+            </div>
+
+            {normalizedStudentQuery.length >= 2 ? (
+              <div className="student-table-wrap compact-search-results">
                 <table className="student-table">
                   <thead>
                     <tr>
-                      <th>Folio interno</th>
+                      <th>Folio</th>
                       <th>Alumno</th>
-                      <th>CURP</th>
                       <th>Grupo</th>
-                      <th></th>
+                      <th>Estatus cobro</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {paymentCandidatesLimited.map((student) => (
-                      <tr
-                        className="student-row"
-                        key={`payment-${student.id}`}
-                        onClick={() => {
-                          setSelectedPaymentStudent(student)
-                          onUpdatePaymentField('curp', student.curp)
-                          onUpdatePaymentField('fullName', student.fullName)
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault()
-                            setSelectedPaymentStudent(student)
-                            onUpdatePaymentField('curp', student.curp)
-                            onUpdatePaymentField('fullName', student.fullName)
-                          }
-                        }}
-                        role="button"
-                        tabIndex={0}
-                      >
-                        <td><strong>{highlightMatch(student.enrollmentNumber, paymentSearchQuery)}</strong></td>
-                        <td>{highlightMatch(student.fullName, paymentSearchQuery)}</td>
-                        <td>{highlightMatch(student.curp, paymentSearchQuery)}</td>
-                        <td>{student.groupLabel ?? 'Sin asignar'}</td>
-                        <td>
-                          <button
-                            className="secondary-button small-button"
-                            onClick={(event) => {
-                              event.preventDefault()
-                              event.stopPropagation()
-                              setSelectedPaymentStudent(student)
-                              onUpdatePaymentField('curp', student.curp)
-                              onUpdatePaymentField('fullName', student.fullName)
-                            }}
-                            type="button"
-                          >
-                            Usar
-                          </button>
+                    {visibleStudents.length === 0 ? (
+                      <tr>
+                        <td colSpan={4}>
+                          <p className="empty-state compact-empty-state">No hay alumnos que coincidan con la busqueda.</p>
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      visibleStudents.map((student) => (
+                        <tr className={selectedStudent?.id === student.id ? 'student-row active' : 'student-row'} key={student.id} onClick={() => onSelectStudent(student)} role="button" tabIndex={0}>
+                          <td><strong>{highlightMatch(student.enrollmentNumber, studentQuery)}</strong></td>
+                          <td>{highlightMatch(student.fullName, studentQuery)}</td>
+                          <td>{student.groupLabel ?? 'Sin asignar'}</td>
+                          <td>{cashPayments.some((payment) => payment.studentId === student.id) ? 'Con cobros' : 'Sin cobro'}</td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
-            )}
-          </div>
-          <form className="student-form" onSubmit={(event) => void onCreatePayment(event)}>
-            <p className="table-summary">Este registro marca el pago de inscripcion para Control Escolar. El seguro de vida queda fuera del ROC oficial.</p>
-            {selectedPaymentStudent ? (
-              <div className="selected-student-summary">
-                <div>
-                  <span className="detail-label">Alumno</span>
-                  <strong>{selectedPaymentStudent.fullName}</strong>
+            ) : null}
+
+            <div className="cash-toolbar">
+              <div className="button-row">
+                <button className="secondary-button small-button" disabled={suggestedConcepts.length === 0} onClick={handleAddSuggestedConcepts} type="button">
+                  Agregar sugeridas
+                </button>
+                <button className="tertiary-button small-button" disabled={selectedConcepts.length === 0} onClick={handleClearConcepts} type="button">
+                  Limpiar claves
+                </button>
+              </div>
+
+              <Field className="cash-concept-search" label="Buscar clave o concepto">
+                <input placeholder="Ej. B002, examenes, documentos..." value={conceptQuery} onChange={(event) => onChangeConceptQuery(event.target.value)} />
+              </Field>
+            </div>
+
+            <p className="table-summary compact-operational-line">
+              Elegis las claves manualmente y la seleccion se limpia al cambiar de alumno.
+            </p>
+
+            {showLifeInsuranceOption ? (
+              <label className="checkbox-field compact-insurance-row">
+                <input checked={includeLifeInsurance} onChange={(event) => onToggleLifeInsurance(event.target.checked)} type="checkbox" />
+                <span>Cobrar seguro de vida ({formatCurrency(lifeInsuranceAmount)}). Este cargo se cobra junto con inscripcion, pero no se imprime en el ROC.</span>
+              </label>
+            ) : null}
+
+            <div className="cash-operator-layout">
+              <div className="cash-action-sidebar">
+                <div className="cash-selection-panel compact-selection-panel">
+                  <div className="cash-selection-header">
+                    <div>
+                      <span className="detail-label">Resumen del cobro</span>
+                      <strong>{selectedStudent ? 'Operacion lista para registrar' : 'Selecciona un alumno para empezar'}</strong>
+                    </div>
+                    <span className="status-tag">{selectedConcepts.length} claves</span>
+                  </div>
+                  {selectedConceptLabels.length > 0 ? (
+                    <div className="selected-concept-chips">
+                      {selectedConceptLabels.map((concept) => (
+                        <button className="selected-concept-chip" key={concept.concept.code} onClick={() => onToggleConcept(concept.concept)} type="button">
+                          <span>{concept.concept.code}</span>
+                          <strong>{formatCurrency(concept.amount)}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-state compact-empty-state">Todavia no hay claves seleccionadas para este cobro.</p>
+                  )}
                 </div>
-                <div>
-                  <span className="detail-label">Folio interno</span>
-                  <strong>{selectedPaymentStudent.enrollmentNumber}</strong>
-                </div>
-                <div>
-                  <span className="detail-label">CURP</span>
-                  <strong>{selectedPaymentStudent.curp}</strong>
-                </div>
-                <div>
-                  <span className="detail-label">Grupo</span>
-                  <strong>{selectedPaymentStudent.groupLabel ?? 'Sin asignar'}</strong>
+
+                <div className="cash-sidebar-actions">
+                  <p className="total sticky-total">Total actual: {formatCurrency(total)}</p>
+                  <button className="primary-button" disabled={savingReceipt || !selectedStudent || selectedConcepts.length === 0} onClick={() => void handleCreatePaymentAndKeepCapturing()} type="button">
+                    Registrar cobro
+                  </button>
+                  <button className="secondary-button small-button" disabled={!selectedStudent && selectedConcepts.length === 0 && studentQuery.length === 0} onClick={handleResetCashDesk} type="button">
+                    Capturar otro alumno
+                  </button>
                 </div>
               </div>
-            ) : (
-              <p className="empty-state">Selecciona un alumno para registrar el pago.</p>
-            )}
-            <div className="form-grid">
-              <Field label="Monto inscripcion">
-                <input type="number" min="0" step="1" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} />
-              </Field>
-              <Field label="Monto seguro">
-                <input type="number" min="0" step="1" value={insuranceAmount} onChange={(event) => setInsuranceAmount(event.target.value)} />
-              </Field>
+
+              <div className="student-table-wrap compact-keys-wrap">
+                <table className="student-table compact-keys-table">
+                  <thead>
+                    <tr>
+                      <th>Clave</th>
+                      <th>Concepto</th>
+                      <th>Cuota</th>
+                      <th>Periodo</th>
+                      <th>Accion</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredPaymentConcepts.map((concept) => {
+                      const active = selectedConcepts.some((item) => item.code === concept.code)
+                      return (
+                        <tr className={active ? 'student-row active concept-added-row' : 'student-row'} key={concept.code}>
+                          <td>
+                            <strong>{concept.code}</strong>
+                            {concept.isSuggested ? <div><small>Sugerida</small></div> : null}
+                          </td>
+                          <td>{concept.name}</td>
+                          <td>
+                            <input
+                              className="table-input compact-amount-input"
+                              min="0"
+                              step="0.01"
+                              type="number"
+                              value={conceptAmounts[concept.code] ?? concept.amount}
+                              onChange={(event) => onUpdateConceptAmount(concept.code, Number(event.target.value || 0))}
+                            />
+                          </td>
+                          <td>{concept.periodLabel}</td>
+                          <td>
+                            <button className={active ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => onToggleConcept(concept)} type="button">
+                              {active ? 'Quitar' : 'Agregar'}
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <label className="checkbox-row">
-              <input checked={paymentForm.insurancePaid} type="checkbox" onChange={(event) => onUpdatePaymentField('insurancePaid', event.target.checked)} />
-              Pago de seguro de vida registrado (no se incluye en el ROC oficial)
-            </label>
-            <div className="form-actions control-actions">
-              <button className="primary-button" disabled={!selectedPaymentStudent} type="submit">Registrar pago</button>
-            </div>
-          </form>
-        </div>
-      </article>
+
+            {selectedStudent ? (
+              <details className="receipt-history receipt-history-panel">
+                <summary>Historial del alumno ({receipts.length})</summary>
+                {receipts.length === 0 ? <p className="empty-state">Este alumno aun no tiene ROC registrados.</p> : null}
+                {paginatedReceipts.map((receipt) => (
+                  <article className="history-card compact" key={receipt.id}>
+                    <strong>{receipt.rocNumber}</strong>
+                    <span>{new Date(receipt.issuedAt).toLocaleString('es-MX')}</span>
+                    <span>{receipt.conceptLabels.join(' | ')}</span>
+                    <div className="history-card-footer">
+                      <em>Total: {formatCurrency(receipt.totalAmount)} · {receipt.status}</em>
+                      <div className="button-row">
+                        {receipt.status !== 'ANULADO' ? (
+                          <button className="secondary-button small-button" onClick={() => void onReprintReceipt(receipt.id)} type="button">
+                            Reimprimir
+                          </button>
+                        ) : (
+                          <span className="status-tag status-tag-muted">Anulado</span>
+                        )}
+                        {receipt.status !== 'ANULADO' ? (
+                          <button className="tertiary-button small-button" onClick={() => {
+                            setCancelReceiptId(receipt.id)
+                            setCancelReceiptReason('')
+                          }} type="button">
+                            Anular
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </details>
+            ) : null}
+          </div>
+        </article>
       ) : null}
 
-      {operationsTab === 'inscripcion-roc' ? (
-      <article className="panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Ingresos Propios</p>
-            <h2>Seleccionar alumno para ROC de inscripcion</h2>
+      {operationsTab === 'pendientes-roc' ? (
+        <article className="panel wide">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Cola operativa</p>
+              <h2>Pendientes de ROC</h2>
+            </div>
+            <div className="button-row">
+              <button className="secondary-button small-button" onClick={() => setOperationsTab('historial')} type="button">
+                Ir a ROC mensual
+              </button>
+              <span className="status-tag">{pendingPayments.length} pendientes reales</span>
+            </div>
           </div>
-            <span className="status-tag">Solo pagos de inscripcion</span>
-        </div>
 
-        {loading ? <p>Cargando alumnos validados...</p> : null}
+          <p className="table-summary compact-operational-line">
+            Esta vista queda solo como cola operativa rapida, hermano. Lo mensual se consolida en ROC mensual.
+          </p>
 
-        <div className="student-search-row">
-          <Field className="span-2" label="Buscar alumno">
-            <input
-                placeholder="Buscar por folio interno o nombre"
-              value={studentQuery}
-              onChange={(event) => setStudentQuery(event.target.value)}
-            />
-          </Field>
-        </div>
-
-        <p className="table-summary">
-          {filteredStudents.length} alumnos encontrados. Mostrando hasta {STUDENTS_PER_PAGE} por pagina.
-        </p>
-
-        {paginatedStudents.length > 0 ? (
           <div className="student-table-wrap">
             <table className="student-table">
               <thead>
                 <tr>
-                  <th>Folio interno</th>
                   <th>Alumno</th>
-                  <th>CURP</th>
-                  <th>Grupo</th>
-                  </tr>
-                </thead>
+                  <th>Folio</th>
+                  <th>Fecha</th>
+                  <th>Claves</th>
+                  <th>Total</th>
+                  <th>Estatus</th>
+                </tr>
+              </thead>
               <tbody>
-                {paginatedStudents.map((student) => {
-                  const active = selectedStudent?.id === student.id
-
-                  return (
-                    <tr
-                      className={active ? 'student-row active' : 'student-row'}
-                      key={student.id}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          onSelectStudent(student)
-                        }
-                      }}
-                      onClick={() => onSelectStudent(student)}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <td>
-                        <strong>{student.enrollmentNumber}</strong>
-                      </td>
-                      <td>{student.fullName}</td>
-                      <td>{student.curp}</td>
-                      <td>{student.groupLabel ?? 'Sin asignar'}</td>
-                    </tr>
-                  )
-                })}
+                {pendingPayments.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      <p className="empty-state">No hay cobros pendientes para mandar al ROC mensual.</p>
+                    </td>
+                  </tr>
+                ) : null}
+                {pendingPayments.map((payment) => (
+                  <tr key={payment.id}>
+                    <td>{payment.studentName}</td>
+                    <td>{payment.enrollmentNumber}</td>
+                    <td>{new Date(payment.createdAt).toLocaleString('es-MX')}</td>
+                    <td>
+                      {payment.conceptLabels.join(' | ')}
+                      {payment.externalConceptLabels.length > 0 ? <div><small>Externos al ROC: {payment.externalConceptLabels.join(' | ')}</small></div> : null}
+                    </td>
+                    <td>{formatCurrency(payment.totalAmount)}{payment.externalTotalAmount > 0 ? <div><small>ROC: {formatCurrency(payment.rocTotalAmount)}</small></div> : null}</td>
+                    <td>{payment.status}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
-        ) : null}
-
-        {filteredStudents.length > STUDENTS_PER_PAGE ? (
-          <div className="pagination-row">
-            <button className="secondary-button small-button" disabled={studentPage === 1} onClick={() => setStudentPage((page) => Math.max(1, page - 1))} type="button">
-              Anterior
-            </button>
-            <span>
-              Pagina {studentPage} de {totalStudentPages}
-            </span>
-            <button
-              className="secondary-button small-button"
-              disabled={studentPage === totalStudentPages}
-              onClick={() => setStudentPage((page) => Math.min(totalStudentPages, page + 1))}
-              type="button"
-            >
-              Siguiente
-            </button>
-          </div>
-        ) : null}
-
-        {!loading && students.length === 0 ? (
-          <p className="empty-state">Todavia no hay alumnos validados. Capturalos primero en Control Escolar.</p>
-        ) : null}
-
-        {!loading && students.length > 0 && filteredStudents.length === 0 ? (
-          <p className="empty-state">No hay alumnos que coincidan con la busqueda actual.</p>
-        ) : null}
-
-      </article>
-      ) : null}
-
-      {operationsTab === 'inscripcion-roc' ? (
-      <article className="panel print-host">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">ROC</p>
-            <h2>Claves, guardar e imprimir ROC de inscripcion</h2>
-          </div>
-          <span className="status-tag">{paymentConcepts.length} claves activas</span>
-        </div>
-
-        {selectedStudent ? (
-          <div className="roc-panel-split">
-            <div className="roc-panel-main">
-              <div className="roc-preview">
-                <div>
-                  <label>Alumno</label>
-                  <p>{selectedStudent.fullName}</p>
-                </div>
-                <div>
-                  <label>Folio interno</label>
-                  <p>{selectedStudent.enrollmentNumber}</p>
-                </div>
-                <div>
-                  <label>Grupo</label>
-                  <p>{selectedStudent.groupLabel ?? 'Sin asignar'}</p>
-                </div>
-              </div>
-
-              <div className="concept-groups">
-                <div className="concept-search-row">
-                  <Field className="span-2" label="Buscar clave o concepto">
-                    <input
-                      placeholder="Ej. B002, examenes, documentos..."
-                      value={conceptQuery}
-                      onChange={(event) => onChangeConceptQuery(event.target.value)}
-                    />
-                  </Field>
-                </div>
-
-                {filteredPaymentConcepts.length === 0 ? (
-                  <p className="empty-state">No hay claves que coincidan con la busqueda.</p>
-                ) : null}
-
-                <p className="table-summary">Selecciona las claves a cobrar. Vista compacta para operar rapido en ventanilla.</p>
-
-                <div className="student-table-wrap">
-                  <table className="student-table">
-                    <thead>
-                      <tr>
-                        <th>Clave</th>
-                        <th>Concepto</th>
-                        <th>Cuota</th>
-                        <th>Periodo</th>
-                        <th>Accion</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredPaymentConcepts.map((concept) => {
-                        const active = selectedConcepts.some((item) => item.code === concept.code)
-                        return (
-                          <tr className={active ? 'student-row active' : 'student-row'} key={concept.code}>
-                            <td><strong>{concept.code}</strong></td>
-                            <td>{concept.name}</td>
-                            <td>
-                              <input
-                                className="table-input"
-                                min="0"
-                                step="0.01"
-                                type="number"
-                                value={conceptAmounts[concept.code] ?? concept.amount}
-                                onChange={(event) => onUpdateConceptAmount(concept.code, Number(event.target.value || 0))}
-                              />
-                            </td>
-                            <td>{concept.periodLabel}</td>
-                            <td>
-                              <button className={active ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => onToggleConcept(concept)} type="button">
-                                {active ? 'Quitar' : 'Agregar'}
-                              </button>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="roc-actions">
-                <Field label="Numero de ROC" required>
-                  <input value={rocNumber} onChange={(event) => onChangeRocNumber(event.target.value)} />
-                </Field>
-                <div className="button-row">
-                  <button className="secondary-button" disabled={savingReceipt} onClick={() => void onPrintReceipt()} type="button">
-                    Guardar e imprimir ROC
-                  </button>
-                  <button className="secondary-button" onClick={() => void onPrintBatchReceipts()} type="button">
-                    Generar lote final 2 por hoja
-                  </button>
-                  <button className="primary-button" disabled={savingReceipt} onClick={() => void onCreateReceipt()} type="button">
-                    {savingReceipt ? 'Guardando ROC...' : 'Guardar ROC'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="receipt-summary">
-                <h3>Resumen del ROC</h3>
-                <ul className="plain-list">
-                  {selectedConcepts.map((concept) => (
-                    <li key={concept.code}>
-                      {concept.code} - {concept.name} - ${(conceptAmounts[concept.code] ?? concept.amount).toFixed(2)}
-                    </li>
-                  ))}
-                </ul>
-                <p className="total">Total: ${total.toFixed(2)}</p>
-              </div>
-
-              <div className="receipt-history">
-                <h3>Historial del alumno</h3>
-                {receipts.length === 0 ? <p className="empty-state">Este alumno aun no tiene ROC registrados.</p> : null}
-                {paginatedReceipts.map((receipt) => (
-                  <article className="history-card" key={receipt.id}>
-                    <strong>{receipt.rocNumber}</strong>
-                    <span>{new Date(receipt.issuedAt).toLocaleString('es-MX')}</span>
-                    <span>Estatus: {receipt.status}</span>
-                    <span>{receipt.conceptLabels.join(' | ')}</span>
-                    <div className="history-card-footer">
-                      <em>Total: ${receipt.totalAmount.toFixed(2)}</em>
-                      <button className="secondary-button small-button" onClick={() => void onReprintReceipt(receipt.id)} type="button">
-                        Reimprimir
-                      </button>
-                    </div>
-                  </article>
-                ))}
-
-                {receipts.length > RECEIPTS_PER_PAGE ? (
-                  <div className="pagination-row">
-                    <button className="secondary-button small-button" disabled={receiptPage === 1} onClick={() => setReceiptPage((page) => Math.max(1, page - 1))} type="button">
-                      Anterior
-                    </button>
-                    <span>
-                      Pagina {receiptPage} de {totalReceiptPages}
-                    </span>
-                    <button
-                      className="secondary-button small-button"
-                      disabled={receiptPage === totalReceiptPages}
-                      onClick={() => setReceiptPage((page) => Math.min(totalReceiptPages, page + 1))}
-                      type="button"
-                    >
-                      Siguiente
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="roc-print-sheet print-only">{rocSheet('')}</div>
-          </div>
-        ) : null}
-
-        {!selectedStudent ? <p className="empty-state">Primero selecciona un alumno en el Paso 1 para continuar con ROC.</p> : null}
-      </article>
-      ) : null}
-
-      {operationsTab === 'fichas' ? (
-      <article className="panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Etapa 1</p>
-            <h2>Impresion ficha</h2>
-          </div>
-        </div>
-        <div className="student-table-wrap">
-          <table className="student-table">
-            <thead>
-              <tr>
-                <th>Folio</th>
-                <th>Alumno</th>
-                <th>Estatus</th>
-                <th>Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              {admissions.slice(0, 12).map((admission) => {
-                const canPrint = admission.status === 'CAPTURADO_CONTROL_ESCOLAR' || admission.status === 'FICHA_IMPRESA'
-                return (
-                  <tr key={admission.id}>
-                    <td>{admission.folio}</td>
-                    <td>{admission.fullName}</td>
-                    <td>{admission.status}</td>
-                    <td>
-                      <button className="secondary-button small-button" onClick={() => void onPrintPaymentReceipt(admission)} type="button">
-                        Reimprimir recibo
-                      </button>{' '}
-                      <button className="secondary-button small-button" disabled={!canPrint} onClick={() => void onPrintAdmission(admission)} type="button">
-                        Imprimir ficha
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      </article>
+        </article>
       ) : null}
 
       {operationsTab === 'historial' ? (
-      <article className="panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">ROC</p>
-            <h2>ROC generados (todos)</h2>
+        <article className="panel wide">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Historial mensual</p>
+              <h2>Cobros acumulados del mes</h2>
+            </div>
+            <span className="status-tag">{monthlyPayments.length} cobros del periodo</span>
           </div>
-          <span className="status-tag">{allReceipts.length} registros</span>
-        </div>
 
-        <div className="roc-history-cards">
-          {recentAllReceipts.length === 0 ? <p className="empty-state">Todavia no hay ROC generados.</p> : null}
-          {recentAllReceipts.map((receipt) => (
-            <article className="history-card compact" key={receipt.id}>
-              <strong>{receipt.rocNumber}</strong>
-              <span>{new Date(receipt.issuedAt).toLocaleString('es-MX')}</span>
-              <span>{receipt.studentName}</span>
-              <em>Total: ${receipt.totalAmount.toFixed(2)}</em>
+          <div className="button-row">
+            <Field label="Mes">
+              <select value={rocBatchMonth} onChange={(event) => onChangeRocBatchMonth(Number(event.target.value))}>
+                {monthOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Anio">
+              <select value={rocBatchYear} onChange={(event) => onChangeRocBatchYear(Number(event.target.value))}>
+                {yearOptions.map((year) => (
+                  <option key={year} value={year}>
+                    {year}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <button className="primary-button small-button" disabled={savingReceipt || pendingPaymentsForSelectedMonth.length === 0} onClick={() => void handleGenerateSelectedMonth()} type="button">
+              Generar / actualizar ROC mensual
+            </button>
+            <button className="secondary-button small-button" disabled={savingReceipt} onClick={() => void onPrintMonthlyReceipts()} type="button">
+              Reimprimir mes completo
+            </button>
+          </div>
+
+          <div className="roc-monthly-metrics">
+            <article className="metric-card compact-metric">
+              <span className="detail-label">Pendientes del mes</span>
+              <strong>{pendingPaymentsForSelectedMonth.length}</strong>
+              <p className="metric-label">Cobros ya registrados, pero aun no incluidos en el ROC mensual.</p>
             </article>
-          ))}
+            <article className="metric-card compact-metric">
+              <span className="detail-label">Ya incluidos</span>
+              <strong>{generatedPaymentsForSelectedMonth.length}</strong>
+              <p className="metric-label">Cobros que ya quedaron asentados dentro del acumulado oficial.</p>
+            </article>
+            <article className="metric-card compact-metric">
+              <span className="detail-label">Siguiente ROC</span>
+              <strong>{suggestedRocNumber}</strong>
+              <p className="metric-label">Se toma del consecutivo configurado y avanza solo, sin tocarlo en caja.</p>
+            </article>
+          </div>
+
+          <p className="table-summary compact-operational-line">
+            {pendingPaymentsForSelectedMonth.length} pendientes del mes | {generatedPaymentsForSelectedMonth.length} ya incluidos en ROC | ROC configurado: {rocInitialNumber} | Siguiente: {suggestedRocNumber}
+          </p>
+
+          <p className="monthly-help-text">
+            AcÃ¡ se trabaja el corte mensual, hermano. Caja solo cobra; desde esta vista se consolida el periodo y Excel se abre automaticamente al generar o reimprimir.
+          </p>
+
+          <div className="student-table-wrap">
+            <table className="student-table">
+              <thead>
+                <tr>
+                  <th>Alumno</th>
+                  <th>Folio</th>
+                  <th>Fecha de cobro</th>
+                  <th>Claves cobradas</th>
+                  <th>Total caja</th>
+                  <th>Total ROC</th>
+                  <th>Estatus mensual</th>
+                </tr>
+              </thead>
+              <tbody>
+                {monthlyPayments.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>
+                      <p className="empty-state">Todavia no hay cobros acumulados para este mes.</p>
+                    </td>
+                  </tr>
+                ) : null}
+                {monthlyPayments.map((payment) => (
+                  <tr key={payment.id}>
+                    <td>{payment.studentName}</td>
+                    <td>{payment.enrollmentNumber}</td>
+                    <td>{new Date(payment.createdAt).toLocaleString('es-MX')}</td>
+                    <td>
+                      {payment.conceptLabels.join(' | ')}
+                      {payment.externalConceptLabels.length > 0 ? <div><small>Externos al ROC: {payment.externalConceptLabels.join(' | ')}</small></div> : null}
+                    </td>
+                    <td>{formatCurrency(payment.totalAmount)}</td>
+                    <td>{formatCurrency(payment.rocTotalAmount)}</td>
+                    <td>{payment.status === 'ROC_GENERADO' ? 'Incluido en ROC mensual' : 'Pendiente de incluir'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="student-table-wrap">
+            <table className="student-table">
+              <thead>
+                <tr>
+                  <th>ROC emitido</th>
+                  <th>Alumno</th>
+                  <th>Fecha</th>
+                  <th>Total</th>
+                  <th>Estatus</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {monthlyReceipts.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      <p className="empty-state">Todavia no hay ROC emitidos para este mes.</p>
+                    </td>
+                  </tr>
+                ) : null}
+                {monthlyReceipts.map((receipt) => (
+                  <tr key={receipt.id}>
+                    <td><strong>{receipt.rocNumber}</strong></td>
+                    <td>{receipt.studentName}</td>
+                    <td>{new Date(receipt.issuedAt).toLocaleString('es-MX')}</td>
+                    <td>{formatCurrency(receipt.totalAmount)}</td>
+                    <td>{receipt.status}</td>
+                    <td>
+                      <div className="button-row">
+                        {receipt.status !== 'ANULADO' ? (
+                          <button className="secondary-button small-button" onClick={() => void onReprintReceipt(receipt.id)} type="button">
+                            Reimprimir
+                          </button>
+                        ) : (
+                          <span className="status-tag status-tag-muted">Anulado</span>
+                        )}
+                        {receipt.status !== 'ANULADO' ? (
+                          <button className="tertiary-button small-button" onClick={() => {
+                            setCancelReceiptId(receipt.id)
+                            setCancelReceiptReason('')
+                          }} type="button">
+                            Anular
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      ) : null}
+
+      {cancelReceiptId && receiptPendingCancellation ? (
+        <div className="modal-overlay" role="presentation">
+          <div className="modal-card checklist-modal">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Anulacion de ROC</p>
+                <h2 className="compact-header">{receiptPendingCancellation.rocNumber}</h2>
+              </div>
+              <button className="tertiary-button small-button" onClick={() => {
+                setCancelReceiptId(null)
+                setCancelReceiptReason('')
+              }} type="button">
+                Cerrar
+              </button>
+            </div>
+
+            <p className="table-summary">
+              Vas a anular el ROC de <strong>{receiptPendingCancellation.studentName}</strong>. Si el sistema encuentra el cobro asociado, lo va a devolver a pendientes de ROC.
+            </p>
+
+            <Field label="Motivo de anulacion" required>
+              <textarea
+                rows={4}
+                value={cancelReceiptReason}
+                onChange={(event) => setCancelReceiptReason(event.target.value)}
+                placeholder="Explica por que se anula este ROC..."
+              />
+            </Field>
+
+            <div className="button-row">
+              <button className="tertiary-button" onClick={() => {
+                setCancelReceiptId(null)
+                setCancelReceiptReason('')
+              }} type="button">
+                Cancelar
+              </button>
+              <button className="primary-button" disabled={submittingCancelReceipt || cancelReceiptReason.trim().length < 3} onClick={() => void handleConfirmCancelReceipt()} type="button">
+                {submittingCancelReceipt ? 'Anulando...' : 'Confirmar anulacion'}
+              </button>
+            </div>
+          </div>
         </div>
-      </article>
       ) : null}
     </section>
   )
@@ -2883,3 +3322,4 @@ function Field({ label, required, className, children }: FieldProps) {
 }
 
 export default App
+

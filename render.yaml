@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: cbta44-hybrid-backend
+    runtime: node
+    plan: free
+    rootDir: .
+    autoDeploy: false
+    healthCheckPath: /healthz
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm prisma:generate:backend && pnpm prisma:validate:backend
+    startCommand: pnpm start:sync-server
+    envVars:
+      - key: SYNC_SERVER_HOST
+        value: 0.0.0.0
+      - key: SYNC_SERVER_PORT
+        value: 8787
+      - key: SYNC_CORS_ORIGINS
+        value: "*"
+      - key: BACKEND_DATABASE_URL
+        sync: false
+      - key: BACKEND_DIRECT_URL
+        sync: false
+      - key: SYNC_API_KEY
+        sync: false

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { scryptSync, timingSafeEqual } from 'node:crypto'
@@ -6,7 +6,7 @@ import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import * as XLSX from 'xlsx'
 import { prisma } from './db'
-import { openOfficialRocTemplate } from './roc-template'
+import { exportOfficialRocTemplateBatch, openOfficialRocTemplate, type RocTemplatePayload } from './roc-template'
 
 type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
 
@@ -18,6 +18,7 @@ type SessionUser = {
 }
 
 let currentSession: SessionUser | null = null
+const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
 
 const authLoginSchema = z.object({
   username: z.string().trim().min(1),
@@ -110,6 +111,42 @@ const tariffUpdateSchema = z.object({
   code: z.string().min(1),
   amount: z.number().min(0),
   periodLabel: z.string().min(1),
+})
+
+const conceptSuggestionUpdateSchema = z.object({
+  code: z.string().min(1),
+  isSuggested: z.boolean(),
+})
+
+const cancelReceiptSchema = z.object({
+  receiptId: z.string().min(1),
+  reason: z.string().trim().min(3),
+})
+
+const cashPaymentCreateSchema = z.object({
+  studentId: z.string().min(1),
+  conceptItems: z.array(z.object({ code: z.string().min(1), amount: z.number().min(0) })).min(1),
+  notes: z.string().trim().optional(),
+})
+
+const cashPaymentListFiltersSchema = z
+  .object({
+    status: z.enum(['PENDIENTE_ROC', 'ROC_GENERADO']).optional(),
+  })
+  .optional()
+
+const cashPaymentBatchCreateSchema = z.object({
+  paymentIds: z.array(z.string().min(1)).min(1),
+  startingRocNumber: z.string().min(1),
+})
+
+const rocConfigSchema = z.object({
+  initialRocNumber: z.string().trim().min(1),
+})
+
+const monthlyReceiptExportSchema = z.object({
+  month: z.number().int().min(1).max(12),
+  year: z.number().int().min(2020).max(2100),
 })
 
 const preRegistrationCreateSchema = z.object({
@@ -408,6 +445,9 @@ function studentSummary(student: {
   admissionPayment?: {
     status: string
   } | null
+  cashPayments?: Array<{
+    status: string
+  }>
   guardian?: {
     fullName: string
     phone: string
@@ -419,6 +459,8 @@ function studentSummary(student: {
     }
   } | null
 }) {
+  const latestCashPayment = student.cashPayments?.[0] ?? null
+
   return {
     id: student.id,
     enrollmentNumber: student.enrollmentNumber,
@@ -429,8 +471,8 @@ function studentSummary(student: {
     email: student.email ?? null,
     guardianFullName: student.guardian?.fullName ?? null,
     guardianPhone: student.guardian?.phone ?? null,
-    admissionPaid: Boolean(student.admissionPayment),
-    admissionPaymentStatus: student.admissionPayment?.status ?? null,
+    admissionPaid: Boolean(student.admissionPayment) || Boolean(latestCashPayment),
+    admissionPaymentStatus: latestCashPayment?.status ?? student.admissionPayment?.status ?? null,
     documentationStatus: student.documentationStatus,
     firstName: student.firstName,
     paternalLastName: student.paternalLastName,
@@ -544,6 +586,9 @@ function conceptSummary(concept: {
   groupCode: string | null
   name: string
   description: string | null
+  isSuggested: boolean
+  excludeFromRoc: boolean
+  isLifeInsurance: boolean
   tariffs: Array<{ amount: unknown; periodLabel: string }>
 }) {
   return {
@@ -553,6 +598,101 @@ function conceptSummary(concept: {
     description: concept.description,
     amount: concept.tariffs[0] ? Number(concept.tariffs[0].amount) : 0,
     periodLabel: concept.tariffs[0]?.periodLabel ?? 'Sin tarifa',
+    isSuggested: concept.isSuggested,
+    excludeFromRoc: concept.excludeFromRoc,
+    isLifeInsurance: concept.isLifeInsurance,
+  }
+}
+
+function cashPaymentSummary(payment: {
+  id: string
+  status: string
+  notes: string | null
+  createdAt: Date
+  student: { id: string; enrollmentNumber: string; firstName: string; paternalLastName: string; maternalLastName: string }
+  lines: Array<{ total: unknown; concept: { code: string; name: string; excludeFromRoc: boolean } }>
+}) {
+  const rocLines = payment.lines.filter((line) => !line.concept.excludeFromRoc)
+  const externalLines = payment.lines.filter((line) => line.concept.excludeFromRoc)
+  return {
+    id: payment.id,
+    studentId: payment.student.id,
+    studentName: `${payment.student.firstName} ${payment.student.paternalLastName} ${payment.student.maternalLastName}`,
+    enrollmentNumber: payment.student.enrollmentNumber,
+    totalAmount: payment.lines.reduce((sum, line) => sum + Number(line.total), 0),
+    rocTotalAmount: rocLines.reduce((sum, line) => sum + Number(line.total), 0),
+    externalTotalAmount: externalLines.reduce((sum, line) => sum + Number(line.total), 0),
+    createdAt: payment.createdAt.toISOString(),
+    status: payment.status,
+    conceptLabels: payment.lines.map((line) => `${line.concept.code} - ${line.concept.name}`),
+    externalConceptLabels: externalLines.map((line) => `${line.concept.code} - ${line.concept.name}`),
+    notes: payment.notes ?? null,
+  }
+}
+
+function buildNextRocNumber(baseRocNumber: string, offset: number) {
+  const match = baseRocNumber.match(/^(.*?)(\d+)$/)
+  if (!match) {
+    if (offset === 0) {
+      return baseRocNumber
+    }
+
+    return `${baseRocNumber}-${offset + 1}`
+  }
+
+  const [, prefix, digits] = match
+  const next = String(Number(digits) + offset).padStart(digits.length, '0')
+  return `${prefix}${next}`
+}
+
+async function getNextRocNumberSuggestion() {
+  const baseSetting = await readRocInitialSetting()
+  const lastReceipt = await prisma.rocReceipt.findFirst({
+    orderBy: { rocNumber: 'desc' },
+    select: { rocNumber: true },
+  })
+
+  const lastRocNumber = lastReceipt?.rocNumber ?? null
+  const initialRocNumber = baseSetting?.value?.trim() || 'DGETAYCM-ROC-0001'
+  const suggestedRocNumber = lastRocNumber ? buildNextRocNumber(lastRocNumber, 1) : initialRocNumber
+  return { suggestedRocNumber, lastRocNumber }
+}
+
+async function getRocConfigSummary() {
+  const baseSetting = await readRocInitialSetting()
+  const next = await getNextRocNumberSuggestion()
+  const initialRocNumber = baseSetting?.value?.trim() || 'DGETAYCM-ROC-0001'
+  return {
+    initialRocNumber,
+    lastRocNumber: next.lastRocNumber,
+    nextSuggestedRocNumber: next.lastRocNumber ? next.suggestedRocNumber : initialRocNumber,
+  }
+}
+
+async function readRocInitialSetting() {
+  try {
+    return await prisma.appSetting.findUnique({
+      where: { key: ROC_INITIAL_SETTING_KEY },
+      select: { value: true },
+    })
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2021' || error.code === 'P2022')) {
+      return null
+    }
+
+    throw error
+  }
+}
+
+async function assertRocNumberAvailable(rocNumber: string) {
+  const normalized = rocNumber.trim()
+  const existing = await prisma.rocReceipt.findUnique({
+    where: { rocNumber: normalized },
+    select: { id: true },
+  })
+
+  if (existing) {
+    throw new Error(`El ROC ${normalized} ya existe. Usa el siguiente consecutivo disponible.`)
   }
 }
 
@@ -826,6 +966,118 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
   })
 
   return { receipt, outputPath }
+}
+
+type ReceiptForTemplate = Prisma.RocReceiptGetPayload<{
+  include: {
+    student: true
+    lines: {
+      include: {
+        concept: true
+      }
+    }
+  }
+}>
+
+function formatRocPrintDate(value: Date) {
+  return value.toLocaleDateString('es-MX', {
+    day: '2-digit',
+    month: 'short',
+    year: '2-digit',
+  })
+}
+
+function receiptToTemplatePayload(receipt: ReceiptForTemplate): RocTemplatePayload {
+  return {
+    rocNumber: receipt.rocNumber,
+    fullName: `${receipt.student.paternalLastName} ${receipt.student.maternalLastName} ${receipt.student.firstName}`.replace(/\s+/g, ' ').trim(),
+    identifier: receipt.student.rfc || receipt.student.enrollmentNumber,
+    address: [receipt.student.addressLine, receipt.student.neighborhood, receipt.student.locality, receipt.student.municipality, receipt.student.state]
+      .filter(Boolean)
+      .join(', '),
+    grade: '',
+    group: '',
+    shift: 'MATUTINO',
+    printDate: formatRocPrintDate(receipt.issuedAt),
+    totalAmount: Number(receipt.totalAmount),
+    amountInWords: amountToWords(Number(receipt.totalAmount)),
+    lines: receipt.lines.map((line) => ({
+      code: line.concept.code,
+      name: line.concept.name,
+      amount: Number(line.unitAmount),
+    })),
+  }
+}
+
+function sortableConceptKey(conceptLabels: string[]) {
+  return [...conceptLabels].sort((left, right) => left.localeCompare(right)).join('||')
+}
+
+async function restorePaymentAfterReceiptCancellation(tx: Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>, receipt: ReceiptForTemplate) {
+  const receiptConceptKey = sortableConceptKey(
+    receipt.lines.map((line) => `${line.concept.code} - ${line.concept.name}`),
+  )
+  const receiptTotal = Number(receipt.totalAmount)
+
+  const candidatePayments = await tx.cashPayment.findMany({
+    where: {
+      studentId: receipt.studentId,
+      status: 'ROC_GENERADO',
+    },
+    orderBy: { batchGeneratedAt: 'desc' },
+    include: {
+      lines: {
+        include: {
+          concept: true,
+        },
+      },
+    },
+  })
+
+  const matchingPayments = candidatePayments.filter((payment) => {
+    const printableLines = payment.lines.filter((line) => !line.concept.excludeFromRoc)
+    const paymentTotal = printableLines.reduce((sum, line) => sum + Number(line.total), 0)
+    if (paymentTotal !== receiptTotal) {
+      return false
+    }
+
+    const paymentConceptKey = sortableConceptKey(
+      printableLines.map((line) => `${line.concept.code} - ${line.concept.name}`),
+    )
+
+    return paymentConceptKey === receiptConceptKey
+  })
+
+  if (matchingPayments.length !== 1) {
+    return { restoredPaymentId: null as string | null, studentStatus: null as string | null }
+  }
+
+  const targetPayment = matchingPayments[0]
+
+  await tx.cashPayment.update({
+    where: { id: targetPayment.id },
+    data: {
+      status: 'PENDIENTE_ROC',
+      batchGeneratedAt: null,
+    },
+  })
+
+  await tx.student.update({
+    where: { id: receipt.studentId },
+    data: { status: 'LISTO_PARA_COBRO' },
+  })
+
+  return { restoredPaymentId: targetPayment.id, studentStatus: 'LISTO_PARA_COBRO' }
+}
+
+function buildMonthBounds(year: number, month: number) {
+  const from = new Date(year, month - 1, 1, 0, 0, 0, 0)
+  const to = new Date(year, month, 1, 0, 0, 0, 0)
+  return { from, to }
+}
+
+function formatPeriodLabel(year: number, month: number) {
+  return `${year}-${String(month).padStart(2, '0')}`
 }
 
 const ASSIGNMENT_GROUP_COUNT = 10
@@ -1570,7 +1822,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('students:list', async () => {
     requireAuth()
     const students = await prisma.student.findMany({
-      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } } },
+      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -1581,7 +1833,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const students = await prisma.student.findMany({
       where: { status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] } },
-      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } } },
+      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -1935,9 +2187,235 @@ export function registerIpcHandlers() {
     return conceptSummary(updated)
   })
 
+  ipcMain.handle('concepts:updateSuggested', async (_event, payload) => {
+    requireRole(['ADMIN'], 'actualizar clave sugerida')
+    const input = conceptSuggestionUpdateSchema.parse(payload)
+
+    const updated = await prisma.chargeConcept.update({
+      where: { code: input.code },
+      data: { isSuggested: input.isSuggested },
+      include: {
+        tariffs: {
+          where: { isActive: true },
+          orderBy: { id: 'desc' },
+          take: 1,
+        },
+      },
+    })
+
+    return conceptSummary(updated)
+  })
+
+  ipcMain.handle('payments:create', async (_event, payload) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'registrar cobros')
+    const input = cashPaymentCreateSchema.parse(payload)
+
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      select: { id: true },
+    })
+
+    if (!student) {
+      throw new Error('Alumno no encontrado para registrar el cobro.')
+    }
+
+    const concepts = await prisma.chargeConcept.findMany({
+      where: { code: { in: input.conceptItems.map((item) => item.code) }, isActive: true },
+    })
+
+    if (concepts.length !== input.conceptItems.length) {
+      throw new Error('Hay claves de cobro invalidas o inactivas.')
+    }
+
+    const conceptByCode = new Map(concepts.map((concept) => [concept.code, concept]))
+
+    const created = await prisma.cashPayment.create({
+      data: {
+        studentId: input.studentId,
+        createdById: actor.id,
+        notes: input.notes?.trim() || null,
+        lines: {
+          create: input.conceptItems.map((item) => {
+            const concept = conceptByCode.get(item.code)
+            if (!concept) {
+              throw new Error(`No se encontro la clave ${item.code}.`)
+            }
+
+            return {
+              conceptId: concept.id,
+              quantity: 1,
+              unitAmount: item.amount,
+              total: item.amount,
+            }
+          }),
+        },
+      },
+      include: {
+        student: true,
+        lines: {
+          include: {
+            concept: true,
+          },
+        },
+      },
+    })
+
+    return cashPaymentSummary(created)
+  })
+
+  ipcMain.handle('payments:list', async (_event, rawFilters) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'consultar cobros')
+    const filters = cashPaymentListFiltersSchema.parse(rawFilters)
+
+    const payments = await prisma.cashPayment.findMany({
+      where: filters?.status ? { status: filters.status } : undefined,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        student: true,
+        lines: {
+          include: {
+            concept: true,
+          },
+        },
+      },
+    })
+
+    return payments.map(cashPaymentSummary)
+  })
+
+  ipcMain.handle('payments:generateBatch', async (_event, payload) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'generar ROC masivo')
+    const input = cashPaymentBatchCreateSchema.parse(payload)
+
+    const payments = await prisma.cashPayment.findMany({
+      where: { id: { in: input.paymentIds }, status: 'PENDIENTE_ROC' },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        student: true,
+        lines: {
+          include: {
+            concept: true,
+          },
+        },
+      },
+    })
+
+    if (payments.length === 0) {
+      throw new Error('No hay cobros pendientes seleccionados para generar el ROC masivo.')
+    }
+
+    await Promise.all(
+      payments.map((payment, index) => assertRocNumberAvailable(buildNextRocNumber(input.startingRocNumber.trim(), index))),
+    )
+
+    const receiptEntries = await prisma.$transaction(async (tx) => {
+      const generated: Array<{
+        receipt: { rocNumber: string; totalAmount: unknown; lines: Array<{ concept: { code: string; name: string }; unitAmount: unknown }> }
+        student: { firstName: string; paternalLastName: string; maternalLastName: string; enrollmentNumber: string }
+      }> = []
+
+      for (const [index, payment] of payments.entries()) {
+        const rocNumber = buildNextRocNumber(input.startingRocNumber.trim(), index)
+        const printableLines = payment.lines.filter((line) => !line.concept.excludeFromRoc)
+        if (printableLines.length === 0) {
+          throw new Error(`El cobro de ${payment.student.firstName} ${payment.student.paternalLastName} no tiene conceptos imprimibles para ROC.`)
+        }
+
+        const totalAmount = printableLines.reduce((sum, line) => sum + Number(line.total), 0)
+        const receipt = await tx.rocReceipt.create({
+          data: {
+            rocNumber,
+            studentId: payment.studentId,
+            createdById: actor.id,
+            totalAmount,
+            amountInWords: amountToWords(totalAmount),
+            status: 'EMITIDO',
+            lines: {
+              create: printableLines.map((line) => ({
+                conceptId: line.conceptId,
+                quantity: line.quantity,
+                unitAmount: line.unitAmount,
+                total: line.total,
+              })),
+            },
+          },
+          include: {
+            student: true,
+            lines: {
+              include: {
+                concept: true,
+              },
+            },
+          },
+        })
+
+        await tx.cashPayment.update({
+          where: { id: payment.id },
+          data: { status: 'ROC_GENERADO', batchGeneratedAt: new Date() },
+        })
+
+        await tx.student.update({
+          where: { id: payment.studentId },
+          data: { status: 'COBRADO' },
+        })
+
+        await tx.auditLog.create({
+          data: {
+            userId: actor.id,
+            entityType: 'ROC_BATCH',
+            entityId: payment.id,
+            action: 'CREATE_BATCH_ROC',
+            afterJson: JSON.stringify({
+              summary: `${rocNumber} - ${payment.student.firstName} ${payment.student.paternalLastName}`,
+            }),
+          },
+        })
+
+        generated.push({ receipt, student: receipt.student })
+      }
+
+      return generated
+    })
+
+    const now = new Date()
+    const periodLabel = formatPeriodLabel(now.getFullYear(), now.getMonth() + 1)
+    const { from, to } = buildMonthBounds(now.getFullYear(), now.getMonth() + 1)
+    const monthlyReceipts = await prisma.rocReceipt.findMany({
+      where: {
+        status: { not: 'ANULADO' },
+        issuedAt: {
+          gte: from,
+          lt: to,
+        },
+      },
+      orderBy: { issuedAt: 'asc' },
+      include: {
+        student: true,
+        lines: { include: { concept: true } },
+      },
+    })
+    const outputPath = await exportOfficialRocTemplateBatch(
+      monthlyReceipts.map(receiptToTemplatePayload),
+      `roc-mensual-${periodLabel}`,
+    )
+    const openResult = await shell.openPath(outputPath)
+    if (openResult) {
+      throw new Error(openResult)
+    }
+
+    return {
+      ok: true,
+      outputPath,
+      createdCount: receiptEntries.length,
+      firstRocNumber: receiptEntries[0].receipt.rocNumber,
+      lastRocNumber: receiptEntries[receiptEntries.length - 1].receipt.rocNumber,
+    }
+  })
+
   ipcMain.handle('receipts:create', async (_event, payload) => {
     const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'emitir ROC')
     const input = receiptInputSchema.parse(payload)
+    await assertRocNumberAvailable(input.rocNumber)
 
     const concepts = await prisma.chargeConcept.findMany({
       where: { code: { in: input.conceptCodes }, isActive: true },
@@ -1955,7 +2433,12 @@ export function registerIpcHandlers() {
     }
 
     const amountByCode = new Map((input.conceptItems ?? []).map((item) => [item.code, item.amount]))
-    const totalAmount = concepts.reduce((sum, concept) => {
+    const printableConcepts = concepts.filter((concept) => !concept.excludeFromRoc)
+    if (printableConcepts.length === 0) {
+      throw new Error('Las claves seleccionadas no generan ROC oficial.')
+    }
+
+    const totalAmount = printableConcepts.reduce((sum, concept) => {
       const fallback = Number(concept.tariffs[0]?.amount ?? 0)
       const selected = amountByCode.get(concept.code)
       return sum + (selected ?? fallback)
@@ -1970,7 +2453,7 @@ export function registerIpcHandlers() {
           totalAmount,
           status: 'EMITIDO',
           lines: {
-            create: concepts.map((concept) => {
+            create: printableConcepts.map((concept) => {
               const fallback = Number(concept.tariffs[0]?.amount ?? 0)
               const amount = amountByCode.get(concept.code) ?? fallback
               return {
@@ -2051,6 +2534,27 @@ export function registerIpcHandlers() {
     return receipts.map(receiptSummary)
   })
 
+  ipcMain.handle('receipts:getNextRocNumber', async () => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'consultar siguiente ROC sugerido')
+    return getNextRocNumberSuggestion()
+  })
+
+  ipcMain.handle('receipts:getConfig', async () => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'consultar configuracion de ROC')
+    return getRocConfigSummary()
+  })
+
+  ipcMain.handle('receipts:updateConfig', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'actualizar configuracion de ROC')
+    const input = rocConfigSchema.parse(payload)
+    await prisma.appSetting.upsert({
+      where: { key: ROC_INITIAL_SETTING_KEY },
+      update: { value: input.initialRocNumber.trim() },
+      create: { key: ROC_INITIAL_SETTING_KEY, value: input.initialRocNumber.trim() },
+    })
+    return getRocConfigSummary()
+  })
+
   ipcMain.handle('receipts:openOfficialTemplate', async (_event, payload) => {
     requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'abrir plantilla oficial de ROC')
     const input = printReceiptSchema.parse(payload)
@@ -2074,7 +2578,12 @@ export function registerIpcHandlers() {
       },
     })
 
-    const totalAmount = concepts.reduce((sum, concept) => sum + Number(concept.tariffs[0]?.amount ?? 0), 0)
+    const printableConcepts = concepts.filter((concept) => !concept.excludeFromRoc)
+    if (printableConcepts.length === 0) {
+      throw new Error('Las claves seleccionadas no generan ROC oficial.')
+    }
+
+    const totalAmount = printableConcepts.reduce((sum, concept) => sum + Number(concept.tariffs[0]?.amount ?? 0), 0)
     const outputPath = await openOfficialRocTemplate({
       rocNumber: input.rocNumber,
       fullName: `${student.paternalLastName} ${student.maternalLastName} ${student.firstName}`,
@@ -2092,7 +2601,7 @@ export function registerIpcHandlers() {
       }),
       totalAmount,
       amountInWords: amountToWords(totalAmount),
-      lines: concepts.map((concept) => ({
+      lines: printableConcepts.map((concept) => ({
         code: concept.code,
         name: concept.name,
         amount: Number(concept.tariffs[0]?.amount ?? 0),
@@ -2107,6 +2616,10 @@ export function registerIpcHandlers() {
     const parsedReceiptId = z.string().min(1).parse(receiptId)
 
     const { receipt, outputPath } = await buildOfficialTemplateFromReceipt(parsedReceiptId)
+
+    if (receipt.status === 'ANULADO') {
+      throw new Error(`El ROC ${receipt.rocNumber} esta anulado y no se puede reimprimir. Si fue un error, genera uno nuevo desde pendientes.`)
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.rocReceipt.update({
@@ -2130,21 +2643,110 @@ export function registerIpcHandlers() {
     return { outputPath, mode: app.isPackaged ? 'electron-packaged' : 'electron-dev' }
   })
 
-  ipcMain.handle('receipts:printBatch', async () => {
-    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'imprimir lote de ROC')
+  ipcMain.handle('receipts:cancel', async (_event, payload) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'anular ROC')
+    const input = cancelReceiptSchema.parse(payload)
+
+    const receipt = await prisma.rocReceipt.findUnique({
+      where: { id: input.receiptId },
+      include: {
+        student: true,
+        lines: {
+          include: {
+            concept: true,
+          },
+        },
+      },
+    })
+
+    if (!receipt) {
+      throw new Error('No se encontro el ROC que queres anular.')
+    }
+
+    if (receipt.status === 'ANULADO') {
+      throw new Error(`El ROC ${receipt.rocNumber} ya estaba anulado.`)
+    }
+
+    const updatedReceipt = await prisma.$transaction(async (tx) => {
+      const restored = await restorePaymentAfterReceiptCancellation(tx, receipt)
+
+      const updated = await tx.rocReceipt.update({
+        where: { id: input.receiptId },
+        data: { status: 'ANULADO' },
+        include: {
+          student: true,
+          lines: {
+            include: {
+              concept: true,
+            },
+          },
+        },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'ROC_RECEIPT',
+          entityId: input.receiptId,
+          action: 'CANCEL_ROC',
+          beforeJson: JSON.stringify({
+            rocNumber: receipt.rocNumber,
+            status: receipt.status,
+          }),
+          afterJson: JSON.stringify({
+            rocNumber: updated.rocNumber,
+            status: 'ANULADO',
+            reason: input.reason.trim(),
+            restoredPaymentId: restored.restoredPaymentId,
+          }),
+        },
+      })
+
+      return updated
+    })
+
+    return receiptSummary(updatedReceipt)
+  })
+
+  ipcMain.handle('receipts:printBatch', async (_event, payload) => {
+    requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'imprimir lote mensual de ROC')
+    const input = monthlyReceiptExportSchema.parse(payload)
+    const { from, to } = buildMonthBounds(input.year, input.month)
     const receipts = await prisma.rocReceipt.findMany({
-      orderBy: { issuedAt: 'desc' },
-      take: 40,
+      where: {
+        status: { not: 'ANULADO' },
+        issuedAt: {
+          gte: from,
+          lt: to,
+        },
+      },
+      orderBy: { issuedAt: 'asc' },
       include: {
         student: true,
         lines: { include: { concept: true } },
       },
     })
-    const entries = receipts.map((receipt) => ({ receipt, student: receipt.student }))
-    const workbook = buildBatchRocWorkbook(entries)
-    const outputPath = join(app.getPath('documents'), `roc-lote-2xhoja-${Date.now()}.xlsx`)
-    XLSX.writeFile(workbook, outputPath)
-    return { ok: true, mode: app.isPackaged ? 'electron-packaged' : 'electron-dev', outputPath }
+
+    if (receipts.length === 0) {
+      throw new Error('No hay ROC generados en el mes seleccionado.')
+    }
+
+    const periodLabel = formatPeriodLabel(input.year, input.month)
+    const outputPath = await exportOfficialRocTemplateBatch(
+      receipts.map(receiptToTemplatePayload),
+      `roc-mensual-${periodLabel}`,
+    )
+    const openResult = await shell.openPath(outputPath)
+    if (openResult) {
+      throw new Error(openResult)
+    }
+    return {
+      ok: true,
+      mode: app.isPackaged ? 'electron-packaged' : 'electron-dev',
+      outputPath,
+      exportedCount: receipts.length,
+      periodLabel,
+    }
   })
 
   ipcMain.handle('groups:createForIntake', async (_event, payload) => {

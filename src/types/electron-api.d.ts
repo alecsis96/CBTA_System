@@ -4,13 +4,24 @@ import type {
   AuthSession,
   AdmissionSummary,
   AuditLogSummary,
+  CashPaymentBatchCreateInput,
+  CashPaymentBatchCreateResult,
+  CashPaymentCreateInput,
+  CashPaymentSummary,
   ChargeConceptSummary,
+  ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
   GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
   PreRegistrationSummary,
+  RocCancelInput,
   RocCreateInput,
+  RocConfigSummary,
+  RocConfigUpdateInput,
+  RocNextNumberResult,
+  RocMonthlyExportInput,
+  RocMonthlyExportResult,
   RocReceiptSummary,
   SaveStudentRequirementChecklistInput,
   SepExportResult,
@@ -49,15 +60,25 @@ type CbtaApi = {
   concepts: {
     listActive: () => Promise<ChargeConceptSummary[]>
     updateTariff: (input: TariffUpdateInput) => Promise<ChargeConceptSummary>
+    updateSuggested: (input: ConceptSuggestionUpdateInput) => Promise<ChargeConceptSummary>
   }
-  receipts: {
-    create: (input: RocCreateInput) => Promise<RocReceiptSummary>
-    listByStudent: (studentId: string) => Promise<RocReceiptSummary[]>
-    listAll: () => Promise<RocReceiptSummary[]>
-    openOfficialTemplate: (input: RocCreateInput) => Promise<{ outputPath: string; mode: string }>
-    reprint: (receiptId: string) => Promise<{ outputPath: string; mode: string }>
-    printBatch: () => Promise<{ ok: boolean; mode: string; outputPath?: string }>
+  payments: {
+    create: (input: CashPaymentCreateInput) => Promise<CashPaymentSummary>
+    list: (filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' }) => Promise<CashPaymentSummary[]>
+    generateBatch: (input: CashPaymentBatchCreateInput) => Promise<CashPaymentBatchCreateResult>
   }
+    receipts: {
+      create: (input: RocCreateInput) => Promise<RocReceiptSummary>
+      listByStudent: (studentId: string) => Promise<RocReceiptSummary[]>
+      listAll: () => Promise<RocReceiptSummary[]>
+      getNextRocNumber: () => Promise<RocNextNumberResult>
+      getConfig: () => Promise<RocConfigSummary>
+      updateConfig: (input: RocConfigUpdateInput) => Promise<RocConfigSummary>
+      openOfficialTemplate: (input: RocCreateInput) => Promise<{ outputPath: string; mode: string }>
+      reprint: (receiptId: string) => Promise<{ outputPath: string; mode: string }>
+      cancel: (input: RocCancelInput) => Promise<RocReceiptSummary>
+      printBatch: (input: RocMonthlyExportInput) => Promise<RocMonthlyExportResult & { mode: string }>
+    }
   groups: {
     createForIntake: (input: { schoolCycle: string; labels: string[] }) => Promise<Array<{ id: string; label: string }>>
     listForIntake: (input: { schoolCycle: string }) => Promise<{ groups: Array<{ id: string; label: string; shift: string; capacity: number }>; stats: GroupStat[] }>

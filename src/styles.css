@@ -21,6 +21,13 @@ button {
   font: inherit;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid #2f7d4d;
+  outline-offset: 1px;
+}
+
 #root {
   min-height: 100vh;
 }
@@ -140,7 +147,7 @@ button {
 
 .shell {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 238px 1fr;
   min-height: 100vh;
   transition: grid-template-columns 0.2s ease;
 }
@@ -152,8 +159,8 @@ button {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 28px;
+  gap: 12px;
+  padding: 16px;
   color: #f7fff8;
   background: linear-gradient(180deg, #1e4b31 0%, #0f2619 100%);
   position: sticky;
@@ -163,7 +170,7 @@ button {
 }
 
 .sidebar.collapsed {
-  padding: 24px 16px;
+  padding: 18px 12px;
 }
 
 .sidebar-brand {
@@ -195,8 +202,8 @@ button {
 .content {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 28px 16px 28px 24px;
+  gap: 16px;
+  padding: 16px 12px 16px 16px;
 }
 
 .eyebrow {
@@ -232,7 +239,7 @@ button {
 }
 
 .nav-item {
-  padding: 14px 16px;
+  padding: 11px 12px;
   border-radius: 14px;
   color: #eef8f0;
   background: rgba(255, 255, 255, 0.08);
@@ -263,11 +270,11 @@ button {
 }
 
 .panel {
-  padding: 24px;
-  border: 1px solid #d8e3d7;
+  padding: 16px;
+  border: 1px solid #deeadf;
   border-radius: 24px;
   background: #ffffff;
-  box-shadow: 0 10px 30px rgba(23, 40, 29, 0.06);
+  box-shadow: 0 4px 14px rgba(23, 40, 29, 0.04);
 }
 
 .panel.wide {
@@ -289,7 +296,7 @@ button {
 
 .student-form {
   display: grid;
-  gap: 20px;
+  gap: 12px;
 }
 
 .form-grid {
@@ -352,12 +359,28 @@ button {
   opacity: 0.7;
 }
 
+.secondary-button:disabled,
+.tertiary-button:disabled,
+input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .secondary-button {
   padding: 12px 18px;
   border: 1px solid #1f6a3a;
   border-radius: 14px;
   color: #1f6a3a;
   background: #ffffff;
+  cursor: pointer;
+}
+
+.tertiary-button {
+  padding: 12px 18px;
+  border: 1px dashed #7f9586;
+  border-radius: 14px;
+  color: #355143;
+  background: #f6faf7;
   cursor: pointer;
 }
 
@@ -382,6 +405,10 @@ button {
 .roc-actions,
 .receipt-history {
   margin-top: 20px;
+}
+
+.receipt-history.collapsed {
+  display: none;
 }
 
 .roc-actions {
@@ -512,6 +539,89 @@ button {
   color: #224a31;
 }
 
+.feedback-toast {
+  position: fixed;
+  top: 22px;
+  right: 24px;
+  z-index: 60;
+  width: min(460px, calc(100vw - 48px));
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid #d8e3d7;
+  background: linear-gradient(180deg, #f4fbf6 0%, #ffffff 100%);
+  color: #1f3f2a;
+  box-shadow: 0 20px 45px rgba(17, 40, 27, 0.16);
+}
+
+.feedback-toast p {
+  margin: 0;
+  color: #3f5c49;
+}
+
+.feedback-card-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.feedback-card-header strong {
+  font-size: 17px;
+}
+
+.feedback-toast-error {
+  border-color: #e4c1c1;
+  background: linear-gradient(180deg, #fff6f6 0%, #ffffff 100%);
+  color: #6b1f1f;
+}
+
+.feedback-toast-error p {
+  color: #7b3838;
+}
+
+.status-tag-danger {
+  color: #7b1d1d;
+  background: #fde0e0;
+}
+
+.status-tag-muted {
+  color: #55695a;
+  background: #edf3ef;
+}
+
+.feedback-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid #d5e5d8;
+  background: #ffffff;
+  color: #284533;
+  font-size: 13px;
+}
+
+.feedback-toast-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toast-close-button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #d8e3d7;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #35513f;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .search-highlight {
   background: #d9f5e2;
   color: #0f3b22;
@@ -538,15 +648,150 @@ button {
   align-items: start;
 }
 
+.ventanilla-layout {
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+}
+
+.ventanilla-column {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.compact-results-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.compact-results-grid .student-card.compact {
+  padding: 10px 12px;
+  border: 1px solid #dce9dd;
+  background: #fbfdfb;
+}
+
+.compact-results-grid .student-card.compact small {
+  color: #5d6f62;
+}
+
+.compact-header {
+  font-size: 21px;
+  margin: 0;
+}
+
+.compact-title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.compact-operational-line {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #4f6256;
+}
+
+.roc-monthly-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 18px 0 10px;
+}
+
+.compact-metric {
+  gap: 8px;
+}
+
+.compact-metric strong {
+  font-size: 22px;
+}
+
+.monthly-help-text {
+  margin: 0 0 14px;
+  color: #4f6256;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.checkbox-field input {
+  margin-top: 4px;
+}
+
+.payment-sections-split {
+  display: grid;
+  gap: 12px;
+}
+
+.payment-block {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid #d8e3d7;
+}
+
+.unified-capture-block {
+  display: grid;
+  gap: 10px;
+}
+
+.inscripcion-fixed-row {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px dashed #b9d1bf;
+  background: #f7fcf8;
+}
+
+.inscripcion-fixed-row strong {
+  font-size: 14px;
+}
+
+.inscripcion-fixed-row em {
+  color: #476552;
+  font-size: 12px;
+}
+
+.local-payment-block {
+  background: #f8fcf8;
+}
+
+.roc-official-block {
+  background: #f3f8ff;
+  border-color: #cddded;
+}
+
+.payment-sticky-total {
+  grid-template-columns: 1fr;
+}
+
+.large-action {
+  min-height: 54px;
+  width: 100%;
+  font-size: 18px;
+}
+
 .selected-student-card,
 .selected-student-summary {
   display: grid;
-  gap: 8px;
-  padding: 16px;
+  gap: 6px;
+  padding: 10px;
   border-radius: 16px;
   border: 1px solid #d3e4d7;
   background: #f8fbf8;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
+}
+
+.compact-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cash-student-summary {
+  margin-bottom: 14px;
 }
 
 .selected-student-card h3 {
@@ -718,6 +963,79 @@ button {
   gap: 18px;
 }
 
+.roc-pos-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.cash-workspace {
+  display: grid;
+  gap: 12px;
+}
+
+.cash-top-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.cash-search-field,
+.cash-concept-search {
+  margin: 0;
+}
+
+.cash-inline-empty .empty-state {
+  margin: 0;
+  min-height: 74px;
+  display: grid;
+  align-content: center;
+}
+
+.compact-search-results {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.cash-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(300px, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.compact-insurance-row {
+  margin: 4px 0 0;
+}
+
+.cash-operator-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.roc-pos-left,
+.roc-pos-right {
+  display: grid;
+  gap: 14px;
+}
+
+.roc-student-search-row {
+  margin-bottom: 0;
+}
+
+.exact-folio-match {
+  outline: 2px solid #2f7d4d;
+  outline-offset: -2px;
+}
+
+.concept-added-row td {
+  background: #eff9f2;
+}
+
 
 .student-list,
 .concept-grid,
@@ -735,7 +1053,7 @@ button {
 
 .concept-groups {
   display: grid;
-  gap: 18px;
+  gap: 12px;
 }
 
 .concept-search-row {
@@ -756,6 +1074,16 @@ button {
   background: #fff;
 }
 
+.compact-keys-table th,
+.compact-keys-table td {
+  padding: 6px 9px;
+}
+
+.compact-keys-table .table-input {
+  min-width: 82px;
+  padding: 7px 9px;
+}
+
 .student-table {
   width: 100%;
   border-collapse: collapse;
@@ -767,6 +1095,20 @@ button {
   border-bottom: 1px solid #d8e3d7;
   text-align: left;
   vertical-align: middle;
+}
+
+.table-inscripcion-ce th,
+.table-inscripcion-ce td,
+.table-inscripcion-ip th,
+.table-inscripcion-ip td {
+  white-space: nowrap;
+}
+
+.table-inscripcion-ce th:nth-child(2),
+.table-inscripcion-ce td:nth-child(2),
+.table-inscripcion-ip th:nth-child(2),
+.table-inscripcion-ip td:nth-child(2) {
+  white-space: normal;
 }
 
 .student-actions-cell {
@@ -1005,6 +1347,14 @@ button {
   margin-bottom: 20px;
 }
 
+.roc-preview.selected-state {
+  padding: 12px;
+  border: 1px solid #d3e4d7;
+  border-radius: 14px;
+  background: #f7fcf8;
+  margin-bottom: 0;
+}
+
 .roc-preview label {
   display: block;
   margin-bottom: 6px;
@@ -1032,6 +1382,155 @@ button {
   font-weight: 800;
 }
 
+.sticky-actions {
+  position: sticky;
+  bottom: 12px;
+  z-index: 2;
+  padding: 12px;
+  border: 1px solid #cfe0d1;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.98);
+}
+
+.cash-selection-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #d8e3d7;
+  border-radius: 18px;
+  background: #f8fbf8;
+}
+
+.compact-selection-panel {
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.cash-selection-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.selected-concept-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selected-concept-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #cfe0d1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #153021;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.selected-concept-chip span {
+  color: #476552;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.compact-empty-state {
+  margin: 0;
+}
+
+.compact-cash-actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: stretch;
+  margin-top: 4px;
+}
+
+.cash-action-sidebar {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+  position: sticky;
+  top: 88px;
+}
+
+.cash-action-sidebar .primary-button {
+  min-height: 48px;
+}
+
+.cash-sidebar-actions {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8e3d7;
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+.modal-card textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #cfe0d1;
+  border-radius: 14px;
+  background: #fbfdfb;
+  color: #102218;
+  resize: vertical;
+  font: inherit;
+}
+
+.receipt-history-panel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #d8e3d7;
+  border-radius: 18px;
+  background: #fbfdfb;
+}
+
+.receipt-history-panel summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #224a31;
+}
+
+.receipt-history-panel[open] summary {
+  margin-bottom: 12px;
+}
+
+.roc-pos-right .student-table-wrap {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.compact-keys-wrap {
+  max-height: 480px;
+  overflow: auto;
+}
+
+.sticky-total {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.secondary-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+
+.secondary-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.secondary-details[open] summary {
+  margin-bottom: 10px;
+}
+
 .plain-list {
   padding-left: 18px;
 }
@@ -1050,6 +1549,12 @@ button {
 }
 
 @media (max-width: 1180px) {
+  .feedback-toast {
+    top: 16px;
+    right: 16px;
+    width: min(420px, calc(100vw - 32px));
+  }
+
   .auth-shell {
     grid-template-columns: 1fr;
     padding: 20px;
@@ -1068,8 +1573,21 @@ button {
   .two-columns,
   .metrics-grid,
   .steps-grid,
-  .roc-preview {
+  .roc-preview,
+  .roc-pos-layout,
+  .roc-monthly-metrics,
+  .compact-cash-actions {
     grid-template-columns: 1fr;
+  }
+
+  .cash-top-bar,
+  .cash-toolbar,
+  .cash-operator-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .cash-action-sidebar {
+    position: static;
   }
 
   .shell.collapsed {
@@ -1133,10 +1651,28 @@ button {
     padding: 16px;
   }
 
+  .feedback-toast {
+    width: calc(100vw - 24px);
+    right: 12px;
+    top: 12px;
+  }
+
   .auth-hero,
   .auth-card {
     padding: 22px;
     border-radius: 22px;
+  }
+
+  .compact-search-results,
+  .compact-keys-wrap {
+    max-height: none;
+  }
+
+  .table-inscripcion-ce th:nth-child(3),
+  .table-inscripcion-ce td:nth-child(3),
+  .table-inscripcion-ip th:nth-child(4),
+  .table-inscripcion-ip td:nth-child(4) {
+    display: none;
   }
 }
 

@@ -35,15 +35,7 @@ jobs:
           DATABASE_URL: file:./prisma/dev.db
 
       - name: Sync Prisma runtime
-        run: |
-          mkdir -p node_modules/.prisma
-          SOURCE=$(ls -d node_modules/.pnpm/@prisma+client@*_prisma@*/node_modules/.prisma/client | head -n 1)
-          if [ -z "$SOURCE" ]; then
-            echo "Prisma generated client not found under pnpm store."
-            exit 1
-          fi
-          rm -rf node_modules/.prisma/client
-          cp -R "$SOURCE" node_modules/.prisma/client
+        run: pnpm prisma:sync-client
 
       - name: Build renderer and electron
         run: pnpm build:renderer && pnpm build:electron

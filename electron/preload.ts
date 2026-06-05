@@ -28,15 +28,25 @@ contextBridge.exposeInMainWorld('cbta', {
   concepts: {
     listActive: () => ipcRenderer.invoke('concepts:listActive'),
     updateTariff: (input: unknown) => ipcRenderer.invoke('concepts:updateTariff', input),
+    updateSuggested: (input: unknown) => ipcRenderer.invoke('concepts:updateSuggested', input),
   },
-  receipts: {
-    create: (input: unknown) => ipcRenderer.invoke('receipts:create', input),
-    listByStudent: (studentId: string) => ipcRenderer.invoke('receipts:listByStudent', studentId),
-    listAll: () => ipcRenderer.invoke('receipts:listAll'),
-    openOfficialTemplate: (input: unknown) => ipcRenderer.invoke('receipts:openOfficialTemplate', input),
-    reprint: (receiptId: string) => ipcRenderer.invoke('receipts:reprint', receiptId),
-    printBatch: () => ipcRenderer.invoke('receipts:printBatch'),
+  payments: {
+    create: (input: unknown) => ipcRenderer.invoke('payments:create', input),
+    list: (filters?: unknown) => ipcRenderer.invoke('payments:list', filters),
+    generateBatch: (input: unknown) => ipcRenderer.invoke('payments:generateBatch', input),
   },
+    receipts: {
+      create: (input: unknown) => ipcRenderer.invoke('receipts:create', input),
+      listByStudent: (studentId: string) => ipcRenderer.invoke('receipts:listByStudent', studentId),
+      listAll: () => ipcRenderer.invoke('receipts:listAll'),
+      getNextRocNumber: () => ipcRenderer.invoke('receipts:getNextRocNumber'),
+      getConfig: () => ipcRenderer.invoke('receipts:getConfig'),
+      updateConfig: (input: unknown) => ipcRenderer.invoke('receipts:updateConfig', input),
+      openOfficialTemplate: (input: unknown) => ipcRenderer.invoke('receipts:openOfficialTemplate', input),
+      reprint: (receiptId: string) => ipcRenderer.invoke('receipts:reprint', receiptId),
+      cancel: (input: unknown) => ipcRenderer.invoke('receipts:cancel', input),
+      printBatch: (input: unknown) => ipcRenderer.invoke('receipts:printBatch', input),
+    },
   groups: {
     createForIntake: (input: unknown) => ipcRenderer.invoke('groups:createForIntake', input),
     listForIntake: (input: unknown) => ipcRenderer.invoke('groups:listForIntake', input),

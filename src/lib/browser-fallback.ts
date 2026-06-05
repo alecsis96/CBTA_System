@@ -4,13 +4,22 @@ import type {
   AuthLoginInput,
   AuthSession,
   AuditLogSummary,
+  CashPaymentBatchCreateInput,
+  CashPaymentBatchCreateResult,
+  CashPaymentCreateInput,
+  CashPaymentSummary,
   ChargeConceptSummary,
+  ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
   GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
   PreRegistrationSummary,
+  RocCancelInput,
   RocCreateInput,
+  RocNextNumberResult,
+  RocMonthlyExportInput,
+  RocMonthlyExportResult,
   RocReceiptSummary,
   SaveStudentRequirementChecklistInput,
   SepExportResult,
@@ -21,13 +30,25 @@ import type {
   TariffUpdateInput,
 } from '@/types/domain'
 
+type RocConfigSummary = {
+  initialRocNumber: string
+  lastRocNumber: string | null
+  nextSuggestedRocNumber: string
+}
+
+type RocConfigUpdateInput = {
+  initialRocNumber: string
+}
+
 const STUDENTS_KEY = 'cbta-browser-students'
 const CONCEPTS_KEY = 'cbta-browser-concepts'
 const RECEIPTS_KEY = 'cbta-browser-receipts'
+const PAYMENTS_KEY = 'cbta-browser-payments'
 const AUDIT_KEY = 'cbta-browser-audit'
 const PRE_REGISTRATIONS_KEY = 'cbta-browser-pre-registrations'
 const ADMISSIONS_KEY = 'cbta-browser-admissions'
 const SESSION_KEY = 'cbta-browser-session'
+const ROC_CONFIG_KEY = 'cbta-browser-roc-config'
 
 const browserUsers: Array<AuthSession & { password: string }> = [
   { id: 'browser-control-1', username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
@@ -54,6 +75,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Agrupa los ingresos provenientes de la prestacion de servicios administrativos educativos que requieran los estudiantes y egresados del plantel.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'A000',
@@ -62,6 +84,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de la acreditacion, certificacion y convalidacion de estudios.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'A000',
@@ -70,6 +93,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de la expedicion y otorgamiento de documentos academicos y oficiales.',
     amount: 150,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'A000',
@@ -78,6 +102,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes del pago de derechos por examenes extraordinarios y otros tramites de evaluacion.',
     amount: 100,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'A000',
@@ -86,6 +111,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Conceptos de ingreso afines al grupo A que no se ubiquen especificamente en los anteriores.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'B000',
@@ -94,6 +120,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Agrupa los ingresos provenientes de estudiantes y particulares que apoyan la labor educativa.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'B000',
@@ -102,6 +129,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de cooperaciones voluntarias aportadas por los alumnos.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'B000',
@@ -110,6 +138,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes en efectivo y bienes que incrementen el patrimonio de la Secretaria.',
     amount: 372,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'B000',
@@ -118,6 +147,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de porcentajes de utilidad neta y beneficios obtenidos por actividades del plantel.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'B000',
@@ -126,6 +156,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Conceptos de ingreso no ubicados especificamente en los anteriores pero afines al grupo B.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'C000',
@@ -134,6 +165,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Agrupa los ingresos provenientes de la prestacion de servicios de caracter social.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'C000',
@@ -142,6 +174,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes del pago de derechos al servicio medico del plantel.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'C000',
@@ -150,6 +183,7 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de la prestacion de servicios de comedor, higiene, limpieza y otros.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
   {
     groupCode: 'C000',
@@ -158,8 +192,26 @@ const seededConcepts: ChargeConceptSummary[] = [
     description: 'Ingresos provenientes de la prestacion de servicios de asesoria y orientacion en distintas ramas.',
     amount: 0,
     periodLabel: '2026-A',
+    isSuggested: false,
   },
-]
+].map((concept) => ({
+  ...concept,
+  excludeFromRoc: false,
+  isLifeInsurance: false,
+}))
+
+const lifeInsuranceConcept = {
+  groupCode: 'C000',
+  code: 'SV001',
+  name: 'Seguro de vida',
+  description: 'Cargo administrativo externo que se cobra junto con la inscripcion pero no se imprime en el ROC.',
+  amount: 0,
+  periodLabel: '2026-A',
+  isSuggested: false,
+  excludeFromRoc: true,
+  isLifeInsurance: true,
+} satisfies ChargeConceptSummary
+seededConcepts.push(lifeInsuranceConcept)
 
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) {
@@ -183,8 +235,12 @@ function saveStudents(students: StudentDetail[]) {
 
 function getConcepts() {
   const saved = safeParse<ChargeConceptSummary[]>(window.localStorage.getItem(CONCEPTS_KEY), [])
-  if (saved.length > 0 && saved.every((concept) => 'groupCode' in concept && 'description' in concept)) {
-    return saved
+  if (saved.length > 0 && saved.every((concept) => 'groupCode' in concept && 'description' in concept && 'isSuggested' in concept)) {
+    return saved.map((concept) => ({
+      ...concept,
+      excludeFromRoc: concept.excludeFromRoc ?? false,
+      isLifeInsurance: concept.isLifeInsurance ?? false,
+    }))
   }
 
   window.localStorage.setItem(CONCEPTS_KEY, JSON.stringify(seededConcepts))
@@ -195,8 +251,51 @@ function getReceipts() {
   return safeParse<RocReceiptSummary[]>(window.localStorage.getItem(RECEIPTS_KEY), [])
 }
 
+function getPayments() {
+  return safeParse<CashPaymentSummary[]>(window.localStorage.getItem(PAYMENTS_KEY), [])
+}
+
+function savePayments(payments: CashPaymentSummary[]) {
+  window.localStorage.setItem(PAYMENTS_KEY, JSON.stringify(payments))
+}
+
 function saveReceipts(receipts: RocReceiptSummary[]) {
   window.localStorage.setItem(RECEIPTS_KEY, JSON.stringify(receipts))
+}
+
+function buildSuggestedRocNumber(receipts: RocReceiptSummary[]): RocNextNumberResult {
+  const sorted = [...receipts].sort((a, b) => a.rocNumber.localeCompare(b.rocNumber, undefined, { numeric: true, sensitivity: 'base' }))
+  const last = sorted.length > 0 ? sorted[sorted.length - 1].rocNumber : null
+  if (!last) {
+    return { suggestedRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null }
+  }
+
+  const match = last.match(/^(.*?)(\d+)$/)
+  if (!match) {
+    return { suggestedRocNumber: `${last}-1`, lastRocNumber: last }
+  }
+
+  const prefix = match[1]
+  const digits = match[2]
+  const next = String(Number(digits) + 1).padStart(digits.length, '0')
+  return { suggestedRocNumber: `${prefix}${next}`, lastRocNumber: last }
+}
+
+function getRocConfig(): RocConfigSummary {
+  const stored = safeParse<{ initialRocNumber?: string }>(window.localStorage.getItem(ROC_CONFIG_KEY), {})
+  const initialRocNumber = stored.initialRocNumber?.trim() || 'DGETAYCM-ROC-0001'
+  const next = buildSuggestedRocNumber(getReceipts())
+  return {
+    initialRocNumber,
+    lastRocNumber: next.lastRocNumber,
+    nextSuggestedRocNumber: next.lastRocNumber ? next.suggestedRocNumber : initialRocNumber,
+  }
+}
+
+function saveRocConfig(input: RocConfigUpdateInput): RocConfigSummary {
+  const payload = { initialRocNumber: input.initialRocNumber.trim() || 'DGETAYCM-ROC-0001' }
+  window.localStorage.setItem(ROC_CONFIG_KEY, JSON.stringify(payload))
+  return getRocConfig()
 }
 
 function getAuditLogs() {
@@ -521,6 +620,101 @@ export const browserFallbackApi = {
 
       return updated
     },
+    async updateSuggested(input: ConceptSuggestionUpdateInput) {
+      const concepts = getConcepts().map((concept) =>
+        concept.code === input.code ? { ...concept, isSuggested: input.isSuggested } : concept,
+      )
+
+      window.localStorage.setItem(CONCEPTS_KEY, JSON.stringify(concepts))
+
+      const updated = concepts.find((concept) => concept.code === input.code)
+      if (!updated) {
+        throw new Error('No se encontro la clave para actualizar su sugerencia.')
+      }
+
+      return updated
+    },
+  },
+  payments: {
+    async create(input: CashPaymentCreateInput) {
+      const students = getStudents()
+      const concepts = getConcepts()
+      const student = students.find((item) => item.id === input.studentId)
+      if (!student) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+
+      const selectedConcepts = input.conceptItems
+        .map((item) => {
+          const concept = concepts.find((entry) => entry.code === item.code)
+          return concept ? { concept, amount: item.amount } : null
+        })
+        .filter((item): item is { concept: ChargeConceptSummary; amount: number } => Boolean(item))
+
+      if (selectedConcepts.length === 0) {
+        throw new Error('Selecciona al menos una clave para registrar el cobro.')
+      }
+
+      const payment: CashPaymentSummary = {
+        id: crypto.randomUUID(),
+        studentId: student.id,
+        studentName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim(),
+        enrollmentNumber: student.enrollmentNumber,
+        totalAmount: selectedConcepts.reduce((sum, item) => sum + item.amount, 0),
+        rocTotalAmount: selectedConcepts.filter((item) => !item.concept.excludeFromRoc).reduce((sum, item) => sum + item.amount, 0),
+        externalTotalAmount: selectedConcepts.filter((item) => item.concept.excludeFromRoc).reduce((sum, item) => sum + item.amount, 0),
+        createdAt: new Date().toISOString(),
+        status: 'PENDIENTE_ROC',
+        conceptLabels: selectedConcepts.map((item) => `${item.concept.code} - ${item.concept.name}`),
+        externalConceptLabels: selectedConcepts.filter((item) => item.concept.excludeFromRoc).map((item) => `${item.concept.code} - ${item.concept.name}`),
+        notes: input.notes?.trim() || null,
+      }
+
+      const payments = getPayments()
+      payments.unshift(payment)
+      savePayments(payments)
+      return payment
+    },
+    async list(filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' }) {
+      const payments = getPayments()
+      return filters?.status ? payments.filter((item) => item.status === filters.status) : payments
+    },
+    async generateBatch(input: CashPaymentBatchCreateInput): Promise<CashPaymentBatchCreateResult> {
+      const receipts = getReceipts()
+      const payments = getPayments()
+      const selectedPayments = payments.filter((payment) => input.paymentIds.includes(payment.id) && payment.status === 'PENDIENTE_ROC')
+      if (selectedPayments.length === 0) {
+        throw new Error('No hay cobros pendientes seleccionados para generar el ROC masivo.')
+      }
+
+      selectedPayments.forEach((payment, index) => {
+        const printableLabels = payment.conceptLabels.filter((label) => !payment.externalConceptLabels.includes(label))
+        receipts.unshift({
+          id: crypto.randomUUID(),
+          rocNumber: `${input.startingRocNumber}-${index + 1}`,
+          studentId: payment.studentId,
+          studentName: payment.studentName,
+          totalAmount: payment.rocTotalAmount,
+          issuedAt: new Date().toISOString(),
+          status: 'EMITIDO',
+          conceptLabels: printableLabels,
+        })
+      })
+      saveReceipts(receipts)
+
+      const updated = payments.map((payment) =>
+        input.paymentIds.includes(payment.id) ? { ...payment, status: 'ROC_GENERADO' as const } : payment,
+      )
+      savePayments(updated)
+
+      return {
+        ok: true,
+        outputPath: 'browser-download',
+        createdCount: selectedPayments.length,
+        firstRocNumber: `${input.startingRocNumber}-1`,
+        lastRocNumber: `${input.startingRocNumber}-${selectedPayments.length}`,
+      }
+    },
   },
   receipts: {
     async create(input: RocCreateInput) {
@@ -534,15 +728,16 @@ export const browserFallbackApi = {
       const studentSummary = toStudentSummary(student)
 
       const selectedConcepts = concepts.filter((concept) => input.conceptCodes.includes(concept.code))
+      const printableConcepts = selectedConcepts.filter((concept) => !concept.excludeFromRoc)
       const receipt: RocReceiptSummary = {
         id: crypto.randomUUID(),
         rocNumber: input.rocNumber,
         studentId: input.studentId,
         studentName: studentSummary.fullName,
-        totalAmount: selectedConcepts.reduce((sum, concept) => sum + concept.amount, 0),
+        totalAmount: printableConcepts.reduce((sum, concept) => sum + concept.amount, 0),
         issuedAt: new Date().toISOString(),
         status: 'EMITIDO',
-        conceptLabels: selectedConcepts.map((concept) => `${concept.code} - ${concept.name}`),
+        conceptLabels: printableConcepts.map((concept) => `${concept.code} - ${concept.name}`),
       }
 
       const receipts = getReceipts()
@@ -565,6 +760,15 @@ export const browserFallbackApi = {
     async listAll() {
       return getReceipts()
     },
+    async getNextRocNumber() {
+      return buildSuggestedRocNumber(getReceipts())
+    },
+    async getConfig() {
+      return getRocConfig()
+    },
+    async updateConfig(input: RocConfigUpdateInput) {
+      return saveRocConfig(input)
+    },
     async openOfficialTemplate() {
       window.print()
       return { outputPath: 'browser-print', mode: 'browser-fallback' }
@@ -573,9 +777,48 @@ export const browserFallbackApi = {
       window.print()
       return { outputPath: 'browser-reprint', mode: 'browser-fallback' }
     },
-    async printBatch() {
+    async cancel(input: RocCancelInput) {
+      const receipts = getReceipts()
+      const target = receipts.find((receipt) => receipt.id === input.receiptId)
+      if (!target) {
+        throw new Error('No se encontro el ROC que queres anular en modo navegador.')
+      }
+
+      const updatedReceipts = receipts.map((receipt) =>
+        receipt.id === input.receiptId
+          ? { ...receipt, status: 'ANULADO' }
+          : receipt,
+      )
+      saveReceipts(updatedReceipts)
+      pushAuditLog({
+        id: crypto.randomUUID(),
+        action: 'CANCEL_ROC',
+        entityType: 'ROC_RECEIPT',
+        entityId: input.receiptId,
+        actorName: 'Administrador local',
+        createdAt: new Date().toISOString(),
+        detail: `${target.rocNumber} anulado. Motivo: ${input.reason}`,
+      })
+      return updatedReceipts.find((receipt) => receipt.id === input.receiptId) ?? target
+    },
+    async printBatch(input: RocMonthlyExportInput): Promise<RocMonthlyExportResult & { mode: string }> {
+      const receipts = getReceipts().filter((receipt) => {
+        const issuedAt = new Date(receipt.issuedAt)
+        return issuedAt.getFullYear() === input.year && issuedAt.getMonth() + 1 === input.month && receipt.status !== 'ANULADO'
+      })
+
+      if (receipts.length === 0) {
+        throw new Error('No hay ROC generados en el mes seleccionado.')
+      }
+
       window.print()
-      return { ok: true, mode: 'browser-fallback' }
+      return {
+        ok: true,
+        mode: 'browser-fallback',
+        outputPath: 'browser-monthly-print',
+        exportedCount: receipts.length,
+        periodLabel: `${String(input.month).padStart(2, '0')}/${input.year}`,
+      }
     },
   },
   groups: {

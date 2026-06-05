@@ -3,6 +3,7 @@ import { scryptSync, randomBytes } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import * as XLSX from 'xlsx'
+import { getPackagedAssetPath } from './runtime-paths'
 
 const AUTH_HASH_PREFIX = 'scrypt'
 
@@ -102,6 +103,14 @@ const baseConcepts = [
     name: 'Aportaciones, cooperaciones y donaciones al plantel',
     description: 'Ingresos provenientes en efectivo y bienes que incrementen el patrimonio de la Secretaria por parte de estudiantes, profesores, particulares o instituciones.',
     amount: 372,
+    periodLabel: '2026-A',
+  },
+  {
+    code: 'SV001',
+    groupCode: 'C000',
+    name: 'Seguro de vida',
+    description: 'Cargo externo que se cobra junto con la inscripcion pero no debe imprimirse en el ROC.',
+    amount: 0,
     periodLabel: '2026-A',
   },
   {
@@ -248,7 +257,7 @@ function parseLocationParts(localitySource: string) {
 }
 
 function loadStudentsFromExcel(): ExcelStudentRow[] {
-  const workbookPath = join(process.cwd(), 'FICHAS 2026.xlsx')
+  const workbookPath = getPackagedAssetPath('FICHAS 2026.xlsx')
   if (!existsSync(workbookPath)) {
     return []
   }
@@ -352,6 +361,8 @@ export async function ensureBaseData() {
           groupCode: concept.groupCode,
           name: concept.name,
           description: concept.description,
+          excludeFromRoc: concept.code === 'SV001',
+          isLifeInsurance: concept.code === 'SV001',
           tariffs: {
             create: {
               amount: concept.amount,
@@ -370,6 +381,8 @@ export async function ensureBaseData() {
         groupCode: concept.groupCode,
         name: concept.name,
         description: concept.description,
+        excludeFromRoc: concept.code === 'SV001',
+        isLifeInsurance: concept.code === 'SV001',
       },
     })
 
@@ -429,77 +442,5 @@ export async function ensureBaseData() {
     })
   }
 
-  const excelStudents = loadStudentsFromExcel()
-  if (excelStudents.length === 0) {
-    return
-  }
-
-  await prisma.$transaction(async (tx) => {
-    await tx.groupAssignmentAudit.deleteMany({})
-    await tx.studentGroupAssignment.deleteMany({})
-    await tx.intakeGroup.deleteMany({})
-    await tx.rocReceiptLine.deleteMany({})
-    await tx.rocReceipt.deleteMany({})
-    await tx.studentRequirementStatus.deleteMany({})
-    await tx.preRegistrationAudit.deleteMany({})
-    await tx.preRegistration.deleteMany({})
-    await tx.admissionPayment.deleteMany({})
-    await tx.guardian.deleteMany({})
-    await tx.student.deleteMany({})
-    await tx.sequenceCounter.upsert({ where: { scope: 'STUDENT_INTERNAL_FOLIO' }, update: { lastValue: 0 }, create: { scope: 'STUDENT_INTERNAL_FOLIO', lastValue: 0 } })
-  })
-
-  const requirementCatalog = await prisma.enrollmentRequirement.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } })
-
-  for (const [index, student] of excelStudents.entries()) {
-    const location = parseLocationParts(student.locality)
-    const createdStudent = await prisma.student.create({
-      data: {
-        enrollmentNumber: `${INTERNAL_FOLIO_PREFIX}${String(index + 1).padStart(4, '0')}`,
-        curp: student.curp,
-        firstName: student.firstName,
-        paternalLastName: student.paternalLastName,
-        maternalLastName: student.maternalLastName,
-        age: student.age,
-        sex: student.sex,
-        phone: student.phone || null,
-        email: student.email || null,
-        motherTongue: student.motherTongue || null,
-        addressLine: '',
-        locality: location.locality || null,
-        municipality: location.municipality,
-        state: location.state,
-        previousSchool: student.previousSchool || null,
-        secondaryAverage: student.secondaryAverage,
-        schoolCycle: '2026-2027',
-        academicStatus: 'REGULAR',
-        documentationStatus: 'PENDIENTE',
-        enrollmentStatus: 'FICHA_ENTREGADA',
-        status: 'LISTO_PARA_COBRO',
-        validatedAt: new Date(),
-        validatedBy: 'CONTROL_ESCOLAR',
-        guardian: {
-          create: {
-            fullName: student.guardianFullName || 'SIN TUTOR CAPTURADO',
-            phone: student.guardianPhone || 'SIN TELEFONO',
-          },
-        },
-      },
-    })
-
-    if (requirementCatalog.length > 0) {
-      await prisma.studentRequirementStatus.createMany({
-        data: requirementCatalog.map((requirement) => ({
-          studentId: createdStudent.id,
-          requirementId: requirement.id,
-        })),
-      })
-    }
-  }
-
-  await prisma.sequenceCounter.upsert({
-    where: { scope: 'STUDENT_INTERNAL_FOLIO' },
-    update: { lastValue: excelStudents.length },
-    create: { scope: 'STUDENT_INTERNAL_FOLIO', lastValue: excelStudents.length },
-  })
+  console.log('[seed] Se omitio la carga de alumnos desde Excel. La fuente de verdad ahora es la base central y el importador backend dedicado.')
 }

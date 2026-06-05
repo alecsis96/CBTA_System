@@ -39,12 +39,20 @@ export type ChargeConceptSummary = {
   description: string | null
   amount: number
   periodLabel: string
+  isSuggested: boolean
+  excludeFromRoc: boolean
+  isLifeInsurance: boolean
 }
 
 export type TariffUpdateInput = {
   code: string
   amount: number
   periodLabel: string
+}
+
+export type ConceptSuggestionUpdateInput = {
+  code: string
+  isSuggested: boolean
 }
 
 export type StudentFormInput = {
@@ -96,6 +104,72 @@ export type RocReceiptSummary = {
   issuedAt: string
   status: string
   conceptLabels: string[]
+}
+
+export type CashPaymentCreateInput = {
+  studentId: string
+  conceptItems: Array<{ code: string; amount: number }>
+  notes?: string
+}
+
+export type CashPaymentSummary = {
+  id: string
+  studentId: string
+  studentName: string
+  enrollmentNumber: string
+  totalAmount: number
+  rocTotalAmount: number
+  externalTotalAmount: number
+  createdAt: string
+  status: 'PENDIENTE_ROC' | 'ROC_GENERADO'
+  conceptLabels: string[]
+  externalConceptLabels: string[]
+  notes: string | null
+}
+
+export type CashPaymentBatchCreateInput = {
+  paymentIds: string[]
+  startingRocNumber: string
+}
+
+export type CashPaymentBatchCreateResult = {
+  ok: boolean
+  outputPath: string
+  createdCount: number
+  firstRocNumber: string
+  lastRocNumber: string
+}
+
+export type RocMonthlyExportInput = {
+  month: number
+  year: number
+}
+
+export type RocMonthlyExportResult = {
+  ok: boolean
+  outputPath: string
+  exportedCount: number
+  periodLabel: string
+}
+
+export type RocNextNumberResult = {
+  suggestedRocNumber: string
+  lastRocNumber: string | null
+}
+
+export type RocConfigSummary = {
+  initialRocNumber: string
+  lastRocNumber: string | null
+  nextSuggestedRocNumber: string
+}
+
+export type RocConfigUpdateInput = {
+  initialRocNumber: string
+}
+
+export type RocCancelInput = {
+  receiptId: string
+  reason: string
 }
 
 export type AuditLogSummary = {

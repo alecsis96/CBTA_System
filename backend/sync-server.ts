@@ -2,11 +2,34 @@ import 'dotenv/config'
 import express = require('express')
 import type { Request, Response } from 'express'
 import { z } from 'zod'
-import { Prisma } from '@prisma/client'
+import { Prisma } from '../prisma/generated/backend-client'
 import { prisma } from './prisma'
+import {
+  cancelReceipt,
+  createPayment,
+  createStudent,
+  exportMonthlyReceipts,
+  generateBatch,
+  getRocConfig,
+  getNextRocNumberSuggestion,
+  getNextInternalFolioPreview,
+  getStudent,
+  listConcepts,
+  listPayments,
+  listReceipts,
+  listReceiptsByStudent,
+  listRecentAuditLogs,
+  listStudents,
+  updateRocConfig,
+  updateConceptSuggested,
+  updateConceptTariff,
+  updateStudent,
+} from './hybrid-store'
+import { ensureBackendBaseData } from './seed-backend'
 
 const app = express()
 const port = Number(process.env.PORT ?? process.env.SYNC_SERVER_PORT ?? '8787')
+const host = process.env.SYNC_SERVER_HOST?.trim() || '0.0.0.0'
 const syncApiKey = process.env.SYNC_API_KEY
 const corsAllowedOrigins = (process.env.SYNC_CORS_ORIGINS ?? '*')
   .split(',')
@@ -18,6 +41,9 @@ const allowedTypes = [
   'STUDENT_UPDATE',
   'RECEIPT_CREATE',
   'RECEIPT_REPRINT',
+  'CASH_PAYMENT_CREATE',
+  'CONCEPT_TARIFF_UPDATE',
+  'CONCEPT_SUGGESTED_UPDATE',
 ] as const
 
 const syncOperationSchema = z.object({
@@ -32,6 +58,81 @@ const syncOperationSchema = z.object({
 const pullQuerySchema = z.object({
   since: z.string().datetime(),
   deviceId: z.string().min(1),
+})
+
+const remoteActorSchema = z.object({
+  username: z.string().trim().min(1),
+  displayName: z.string().trim().min(1),
+  role: z.string().trim().min(1),
+})
+
+const remoteStudentInputSchema = z.object({
+  enrollmentNumber: z.string().trim().optional().default(''),
+  curp: z.string().trim().min(1),
+  rfc: z.string().trim().optional().default(''),
+  firstName: z.string().trim().min(1),
+  paternalLastName: z.string().trim().min(1),
+  maternalLastName: z.string().trim().min(1),
+  birthDate: z.string().optional().default(''),
+  age: z.number().int().nullable().optional().default(null),
+  sex: z.string().optional().default(''),
+  phone: z.string().optional().default(''),
+  studentPhoneSecondary: z.string().optional().default(''),
+  email: z.string().optional().default(''),
+  motherTongue: z.string().optional().default(''),
+  addressLine: z.string().trim().min(1),
+  neighborhood: z.string().optional().default(''),
+  locality: z.string().optional().default(''),
+  municipality: z.string().optional().default(''),
+  state: z.string().optional().default(''),
+  postalCode: z.string().optional().default(''),
+  previousSchool: z.string().optional().default(''),
+  secondaryAverage: z.number().nullable().optional().default(null),
+  examRoom: z.string().optional().default(''),
+  schoolCycle: z.string().trim().min(1),
+  academicStatus: z.string().optional().default(''),
+  guardianFullName: z.string().trim().min(1),
+  guardianRelationship: z.string().optional().default(''),
+  guardianPhone: z.string().trim().min(1),
+  guardianPhoneSecondary: z.string().optional().default(''),
+  guardianEmail: z.string().optional().default(''),
+  validateNow: z.boolean().default(true),
+})
+
+const remoteTariffInputSchema = z.object({
+  code: z.string().trim().min(1),
+  amount: z.number().nonnegative(),
+  periodLabel: z.string().trim().min(1),
+})
+
+const remoteSuggestedInputSchema = z.object({
+  code: z.string().trim().min(1),
+  isSuggested: z.boolean(),
+})
+
+const remotePaymentCreateSchema = z.object({
+  studentId: z.string().trim().min(1),
+  conceptItems: z.array(z.object({ code: z.string().trim().min(1), amount: z.number().nonnegative() })).min(1),
+  notes: z.string().optional(),
+})
+
+const remotePaymentBatchSchema = z.object({
+  paymentIds: z.array(z.string().trim().min(1)).min(1),
+  startingRocNumber: z.string().trim().min(1),
+})
+
+const remoteMonthlyReceiptSchema = z.object({
+  month: z.number().int().min(1).max(12),
+  year: z.number().int().min(2020).max(2100),
+})
+
+const remoteRocConfigSchema = z.object({
+  initialRocNumber: z.string().trim().min(1),
+})
+
+const remoteCancelReceiptSchema = z.object({
+  receiptId: z.string().min(1),
+  reason: z.string().trim().min(3),
 })
 
 type StoredOperation = z.infer<typeof syncOperationSchema> & { receivedAt: string }
@@ -63,6 +164,7 @@ let publicPreRegistrationSequence = 0
 const publicPreRegistrationSchoolCycle =
   process.env.PUBLIC_PRE_REGISTRATION_SCHOOL_CYCLE?.trim() || '2026-2027'
 
+app.set('trust proxy', true)
 app.use(express.json())
 
 app.use((req: Request, res: Response, next) => {
@@ -77,7 +179,7 @@ app.use((req: Request, res: Response, next) => {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-api-key')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-api-key,x-device-id,x-actor-username,x-actor-name,x-actor-role')
 
   if (req.method === 'OPTIONS') {
     return res.status(204).send()
@@ -90,12 +192,30 @@ app.get('/', (_req: Request, res: Response) => {
   return res.status(200).json({
     ok: true,
     service: 'cbta-sync-server',
+    mode: 'shared-cloud-ready',
     endpoint: '/api/sync/op',
+    health: '/healthz',
   })
 })
 
-app.get('/health', (_req: Request, res: Response) => {
-  return res.status(200).json({ ok: true })
+app.get('/healthz', async (_req: Request, res: Response) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`
+    return res.status(200).json({
+      ok: true,
+      status: 'healthy',
+      database: 'reachable',
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    return res.status(503).json({
+      ok: false,
+      status: 'degraded',
+      database: 'unreachable',
+      error: error instanceof Error ? error.message : 'db_unreachable',
+      timestamp: new Date().toISOString(),
+    })
+  }
 })
 
 function maskCurp(curp: string) {
@@ -348,9 +468,273 @@ app.get('/api/public/pre-registrations/:folio/voucher', async (req: Request, res
   })
 })
 
+app.get('/api/hybrid/health', (_req: Request, res: Response) => {
+  return res.status(200).json({ ok: true, mode: 'hybrid-online' })
+})
+
+app.get('/api/hybrid/students', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const validatedOnly = req.query.validatedOnly === 'true'
+  const items = await listStudents(validatedOnly)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.get('/api/hybrid/students/next-folio-preview', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const nextFolio = await getNextInternalFolioPreview()
+  return res.status(200).json({ ok: true, nextFolio })
+})
+
+app.get('/api/hybrid/students/:id', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  const student = await getStudent(studentId)
+  if (!student) return res.status(404).json({ ok: false, error: 'not_found' })
+  return res.status(200).json({ ok: true, student })
+})
+
+app.post('/api/hybrid/students', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentInputSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const student = await createStudent(parsed.data, actor)
+    recordOperation(buildServerOperation('STUDENT_CREATE', student.id, req.header('x-device-id') ?? 'remote-api', { studentId: student.id }))
+    return res.status(201).json({ ok: true, student })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'create_failed' })
+  }
+})
+
+app.put('/api/hybrid/students/:id', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentInputSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+    const student = await updateStudent(studentId, parsed.data, actor)
+    recordOperation(buildServerOperation('STUDENT_UPDATE', student.id, req.header('x-device-id') ?? 'remote-api', { studentId: student.id }))
+    return res.status(200).json({ ok: true, student })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'update_failed' })
+  }
+})
+
+app.get('/api/hybrid/concepts', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const items = await listConcepts()
+  return res.status(200).json({ ok: true, items })
+})
+
+app.patch('/api/hybrid/concepts/:code/tariff', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteTariffInputSchema.safeParse({ ...req.body, code: req.params.code })
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const concept = await updateConceptTariff(parsed.data, actor)
+    recordOperation(buildServerOperation('CONCEPT_TARIFF_UPDATE', concept.code, req.header('x-device-id') ?? 'remote-api', parsed.data as unknown as Record<string, unknown>))
+    return res.status(200).json({ ok: true, concept })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'tariff_failed' })
+  }
+})
+
+app.patch('/api/hybrid/concepts/:code/suggested', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteSuggestedInputSchema.safeParse({ ...req.body, code: req.params.code })
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const concept = await updateConceptSuggested(parsed.data, actor)
+    recordOperation(buildServerOperation('CONCEPT_SUGGESTED_UPDATE', concept.code, req.header('x-device-id') ?? 'remote-api', parsed.data as unknown as Record<string, unknown>))
+    return res.status(200).json({ ok: true, concept })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'suggested_failed' })
+  }
+})
+
+app.get('/api/hybrid/payments', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined
+  const items = await listPayments(status as 'PENDIENTE_ROC' | 'ROC_GENERADO' | undefined)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/payments', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remotePaymentCreateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const payment = await createPayment(parsed.data, actor)
+    recordOperation(buildServerOperation('CASH_PAYMENT_CREATE', payment.id, req.header('x-device-id') ?? 'remote-api', parsed.data as unknown as Record<string, unknown>))
+    return res.status(201).json({ ok: true, payment })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'payment_failed' })
+  }
+})
+
+app.post('/api/hybrid/payments/batch', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remotePaymentBatchSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const result = await generateBatch(parsed.data, actor)
+    recordOperation(buildServerOperation('RECEIPT_CREATE', parsed.data.paymentIds.join(','), req.header('x-device-id') ?? 'remote-api', { count: result.createdCount }))
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'batch_failed' })
+  }
+})
+
+app.get('/api/hybrid/receipts', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const studentId = typeof req.query.studentId === 'string' ? req.query.studentId : ''
+  const items = studentId ? await listReceiptsByStudent(studentId) : await listReceipts()
+  return res.status(200).json({ ok: true, items })
+})
+
+app.get('/api/hybrid/receipts/next-roc', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  try {
+    const result = await getNextRocNumberSuggestion()
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'next_roc_failed' })
+  }
+})
+
+app.get('/api/hybrid/receipts/config', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  try {
+    const result = await getRocConfig()
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'roc_config_failed' })
+  }
+})
+
+app.post('/api/hybrid/receipts/config', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteRocConfigSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await updateRocConfig(parsed.data)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'roc_config_update_failed' })
+  }
+})
+
+app.post('/api/hybrid/receipts/cancel', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteCancelReceiptSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const result = await cancelReceipt(parsed.data, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'receipt_cancel_failed' })
+  }
+})
+
+app.post('/api/hybrid/receipts/monthly', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteMonthlyReceiptSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await exportMonthlyReceipts(parsed.data)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'monthly_export_failed' })
+  }
+})
+
+app.get('/api/hybrid/audit', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const items = await listRecentAuditLogs()
+  return res.status(200).json({ ok: true, items })
+})
+
+
 function isAuthorized(req: Request) {
   const requestKey = req.header('x-api-key')
   return Boolean(syncApiKey && requestKey && requestKey === syncApiKey)
+}
+
+async function resolveRemoteActor(req: Request) {
+  const parsed = remoteActorSchema.safeParse({
+    username: req.header('x-actor-username') ?? 'remote.sync',
+    displayName: req.header('x-actor-name') ?? 'Sincronizacion remota',
+    role: req.header('x-actor-role') ?? 'ADMIN',
+  })
+
+  const actor = parsed.success ? parsed.data : { username: 'remote.sync', displayName: 'Sincronizacion remota', role: 'ADMIN' }
+
+  return prisma.user.upsert({
+    where: { username: actor.username },
+    update: { displayName: actor.displayName, role: actor.role, isActive: true },
+    create: { username: actor.username, displayName: actor.displayName, role: actor.role, passwordHash: '' },
+    select: { id: true, username: true, displayName: true, role: true },
+  })
+}
+
+function recordOperation(operation: z.infer<typeof syncOperationSchema>) {
+  if (!receivedOperationIds.has(operation.id)) {
+    receivedOperationIds.add(operation.id)
+    operationLog.push({ ...operation, receivedAt: new Date().toISOString() })
+  }
+}
+
+function buildServerOperation(type: (typeof allowedTypes)[number], entityId: string, deviceId: string, payload: Record<string, unknown>) {
+  return {
+    id: crypto.randomUUID(),
+    type,
+    entityId,
+    deviceId,
+    payload,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+async function applySyncOperation(operation: z.infer<typeof syncOperationSchema>) {
+  const actor = await prisma.user.upsert({
+    where: { username: `sync.${operation.deviceId}` },
+    update: { displayName: `Sync ${operation.deviceId}`, role: 'ADMIN', isActive: true },
+    create: { username: `sync.${operation.deviceId}`, displayName: `Sync ${operation.deviceId}`, role: 'ADMIN', passwordHash: '' },
+    select: { id: true, username: true, displayName: true, role: true },
+  })
+
+  if (operation.type === 'STUDENT_CREATE') {
+    const payload = operation.payload as { student?: unknown }
+    await createStudent(remoteStudentInputSchema.parse(payload.student), actor)
+    return
+  }
+
+  if (operation.type === 'STUDENT_UPDATE') {
+    const payload = operation.payload as { studentId?: unknown; student?: unknown }
+    await updateStudent(z.string().min(1).parse(payload.studentId), remoteStudentInputSchema.parse(payload.student), actor)
+    return
+  }
+
+  if (operation.type === 'CASH_PAYMENT_CREATE') {
+    await createPayment(remotePaymentCreateSchema.parse(operation.payload), actor)
+    return
+  }
+
+  if (operation.type === 'CONCEPT_TARIFF_UPDATE') {
+    await updateConceptTariff(remoteTariffInputSchema.parse(operation.payload), actor)
+    return
+  }
+
+  if (operation.type === 'CONCEPT_SUGGESTED_UPDATE') {
+    await updateConceptSuggested(remoteSuggestedInputSchema.parse(operation.payload), actor)
+  }
 }
 
 app.get('/api/sync/ops', (req: Request, res: Response) => {
@@ -375,7 +759,7 @@ app.get('/api/sync/ops', (req: Request, res: Response) => {
   })
 })
 
-app.post('/api/sync/op', (req: Request, res: Response) => {
+app.post('/api/sync/op', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) {
     return res.status(401).json({ ok: false, error: 'unauthorized' })
   }
@@ -386,18 +770,35 @@ app.post('/api/sync/op', (req: Request, res: Response) => {
   }
 
   const operationId = parsed.data.id
-  if (!receivedOperationIds.has(operationId)) {
-    receivedOperationIds.add(operationId)
-    operationLog.push({ ...parsed.data, receivedAt: new Date().toISOString() })
-  }
 
-  return res.status(200).json({
-    ok: true,
-    operationId,
-    receivedAt: new Date().toISOString(),
-  })
+  try {
+    if (!receivedOperationIds.has(operationId)) {
+      await applySyncOperation(parsed.data)
+      recordOperation(parsed.data)
+    }
+
+    return res.status(200).json({
+      ok: true,
+      operationId,
+      receivedAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : 'sync_apply_failed',
+    })
+  }
 })
 
-app.listen(port, () => {
-  console.log(`[sync-server] listening on port ${port}`)
+async function startServer() {
+  await ensureBackendBaseData()
+
+  app.listen(port, host, () => {
+    console.log(`[sync-server] listening on http://${host}:${port}`)
+  })
+}
+
+void startServer().catch((error) => {
+  console.error('[sync-server] Startup failed before listen.', error)
+  process.exit(1)
 })
