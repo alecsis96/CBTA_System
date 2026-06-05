@@ -6,7 +6,7 @@ services:
     rootDir: .
     autoDeploy: false
     healthCheckPath: /healthz
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm prisma:generate:backend && pnpm prisma:validate:backend
+    buildCommand: pnpm install --frozen-lockfile && pnpm prisma:generate:backend && pnpm prisma:validate:backend
     startCommand: pnpm start:sync-server
     envVars:
       - key: SYNC_SERVER_HOST
