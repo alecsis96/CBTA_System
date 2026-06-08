@@ -1006,33 +1006,33 @@ export async function importAssignedRosterRows(schoolCycle: string, rows: GroupR
   let importedCount = 0
   let unmatchedCount = 0
 
-  await prisma.$transaction(async (tx) => {
-    for (const row of uniqueRows) {
-      const enrollmentSequenceKey = extractEnrollmentSequenceKey(row.enrollmentNumber)
-      const student =
-        (row.enrollmentNumber ? studentByEnrollment.get(row.enrollmentNumber) : undefined) ??
-        (row.curp ? studentByCurp.get(row.curp) : undefined) ??
-        (enrollmentSequenceKey ? studentBySequence.get(enrollmentSequenceKey) : undefined)
-      if (!student) {
-        unmatchedCount += 1
-        issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: no se encontro alumno para ${row.curp ?? row.enrollmentNumber} en el ciclo ${normalizedCycle}.`)
-        continue
-      }
-      const targetGroup = groupByLabel.get(row.groupLabel)
-      if (!targetGroup) {
-        unmatchedCount += 1
-        issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: el grupo ${row.groupLabel} no pudo prepararse para importar.`)
-        continue
-      }
-      const existingAssignment = student.groupAssignment
+  for (const row of uniqueRows) {
+    const enrollmentSequenceKey = extractEnrollmentSequenceKey(row.enrollmentNumber)
+    const student =
+      (row.enrollmentNumber ? studentByEnrollment.get(row.enrollmentNumber) : undefined) ??
+      (row.curp ? studentByCurp.get(row.curp) : undefined) ??
+      (enrollmentSequenceKey ? studentBySequence.get(enrollmentSequenceKey) : undefined)
+    if (!student) {
+      unmatchedCount += 1
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: no se encontro alumno para ${row.curp ?? row.enrollmentNumber} en el ciclo ${normalizedCycle}.`)
+      continue
+    }
+    const targetGroup = groupByLabel.get(row.groupLabel)
+    if (!targetGroup) {
+      unmatchedCount += 1
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: el grupo ${row.groupLabel} no pudo prepararse para importar.`)
+      continue
+    }
+    const existingAssignment = student.groupAssignment
+    await prisma.$transaction(async (tx) => {
       const assignment = existingAssignment
         ? await tx.studentGroupAssignment.update({ where: { id: existingAssignment.id }, data: { groupId: targetGroup.id, status: 'ASIGNADO', updatedById: actor.id, reason: 'REMOTE_IMPORTACION_EXCEL' } })
         : await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: targetGroup.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: 'REMOTE_IMPORTACION_EXCEL' } })
       await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'ASIGNADO' } })
       await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: student.id, beforeGroupId: existingAssignment?.groupId ?? null, beforeGroupLabel: existingAssignment?.group.label ?? null, afterGroupId: targetGroup.id, afterGroupLabel: targetGroup.label, actorId: actor.id, actorRole: actor.role, reason: 'REMOTE_IMPORTACION_EXCEL' } })
-      importedCount += 1
-    }
-  })
+    })
+    importedCount += 1
+  }
 
   return {
     ok: true,
