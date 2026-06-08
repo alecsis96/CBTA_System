@@ -3356,15 +3356,9 @@ export function registerIpcHandlers() {
       select: { id: true, label: true },
     })
     const groupByLabel = new Map(groups.map((group) => [group.label, group]))
-    const enrollmentNumbers = rows.map((row) => row.enrollmentNumber).filter((value): value is string => Boolean(value))
-    const curps = rows.map((row) => row.curp).filter((value): value is string => Boolean(value))
     const students = await prisma.student.findMany({
       where: {
         schoolCycle,
-        OR: [
-          { enrollmentNumber: { in: enrollmentNumbers.length > 0 ? enrollmentNumbers : ['__never__'] } },
-          { curp: { in: curps.length > 0 ? curps : ['__never__'] } },
-        ],
       },
       include: {
         groupAssignment: {

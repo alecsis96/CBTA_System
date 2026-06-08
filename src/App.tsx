@@ -1649,7 +1649,31 @@ async function parseRosterWorkbook(file: File) {
     const sheet = workbook.Sheets[sheetName]
     if (!sheet) continue
 
-    const sheetRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' })
+    const populatedCells = Object.keys(sheet)
+      .filter((key) => !key.startsWith('!'))
+      .map((key) => XLSX.utils.decode_cell(key))
+    if (populatedCells.length === 0) {
+      continue
+    }
+
+    const range = populatedCells.reduce(
+      (acc, cell) => ({
+        s: {
+          r: Math.min(acc.s.r, cell.r),
+          c: Math.min(acc.s.c, cell.c),
+        },
+        e: {
+          r: Math.max(acc.e.r, cell.r),
+          c: Math.max(acc.e.c, cell.c),
+        },
+      }),
+      {
+        s: { r: populatedCells[0].r, c: populatedCells[0].c },
+        e: { r: populatedCells[0].r, c: populatedCells[0].c },
+      },
+    )
+
+    const sheetRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', range })
     const wideHeaderIndex = sheetRows.findIndex((row) => {
       if (!Array.isArray(row)) return false
       const normalized = row.map((cell) => normalizeSheetHeader(cell))
@@ -2489,31 +2513,35 @@ function ControlEscolarOverview({
 
   async function handleImportAssignedRoster() {
     if (!groupsApi?.importAssignedRoster) return
-    const file = await pickRosterWorkbookFile()
-    if (!file) {
-      setChecklistFeedback('Importacion cancelada.')
-      return
-    }
+    try {
+      const file = await pickRosterWorkbookFile()
+      if (!file) {
+        setChecklistFeedback('Importacion cancelada.')
+        return
+      }
 
-    const parsed = await parseRosterWorkbook(file)
-    if (parsed.rows.length === 0) {
-      setChecklistFeedback('El archivo no contiene filas validas para importar grupos.')
-      return
-    }
+      const parsed = await parseRosterWorkbook(file)
+      if (parsed.rows.length === 0) {
+        setChecklistFeedback('El archivo no contiene filas validas para importar grupos.')
+        return
+      }
 
-    const result = await groupsApi.importAssignedRoster({
-      schoolCycle: form.schoolCycle,
-      sourcePath: file.name,
-      rows: parsed.rows,
-    })
-    const allIssues = [...parsed.issues, ...result.issues].slice(0, 12)
-    const issuesSuffix = allIssues.length > 0 ? ` Avisos: ${allIssues.join(' | ')}` : ''
-    const sourceFile = result.sourcePath ? getOutputFileName(result.sourcePath) : file.name
-    setChecklistFeedback(
-      `Importacion completada desde ${sourceFile}: ${result.importedCount} asignaciones, ${result.createdGroupCount} grupos nuevos, ${result.unmatchedCount} sin match, ${result.skippedCount + parsed.skippedCount} filas omitidas.${issuesSuffix}`,
-    )
-    await refreshGroupStats()
-    await onReloadData()
+      const result = await groupsApi.importAssignedRoster({
+        schoolCycle: form.schoolCycle,
+        sourcePath: file.name,
+        rows: parsed.rows,
+      })
+      const allIssues = [...parsed.issues, ...result.issues].slice(0, 12)
+      const issuesSuffix = allIssues.length > 0 ? ` Avisos: ${allIssues.join(' | ')}` : ''
+      const sourceFile = result.sourcePath ? getOutputFileName(result.sourcePath) : file.name
+      setChecklistFeedback(
+        `Importacion completada desde ${sourceFile}: ${result.importedCount} asignaciones, ${result.createdGroupCount} grupos nuevos, ${result.unmatchedCount} sin match, ${result.skippedCount + parsed.skippedCount} filas omitidas.${issuesSuffix}`,
+      )
+      await refreshGroupStats()
+      await onReloadData()
+    } catch (error) {
+      setChecklistFeedback(error instanceof Error ? `No se pudo importar el Excel: ${error.message}` : 'No se pudo importar el Excel.')
+    }
   }
 
   async function handleExportAssignedRoster() {

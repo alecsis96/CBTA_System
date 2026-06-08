@@ -994,15 +994,9 @@ export async function importAssignedRosterRows(schoolCycle: string, rows: GroupR
 
   const groups = await prisma.intakeGroup.findMany({ where: { schoolCycle: normalizedCycle, shift: MATUTINO_SHIFT, label: { in: groupLabels } }, select: { id: true, label: true } })
   const groupByLabel = new Map(groups.map((group) => [group.label, group]))
-  const enrollmentNumbers = uniqueRows.map((row) => row.enrollmentNumber).filter((value): value is string => Boolean(value))
-  const curps = uniqueRows.map((row) => row.curp).filter((value): value is string => Boolean(value))
   const students = await prisma.student.findMany({
     where: {
       schoolCycle: normalizedCycle,
-      OR: [
-        { enrollmentNumber: { in: enrollmentNumbers.length > 0 ? enrollmentNumbers : ['__never__'] } },
-        { curp: { in: curps.length > 0 ? curps : ['__never__'] } },
-      ],
     },
     include: { groupAssignment: { include: { group: true } } },
   })
