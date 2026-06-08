@@ -10,5 +10,5 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["electron/**/*.ts", "backend/**/*.ts", "src/lib/formatters.ts", "src/types/domain.ts", "vite.config.ts"]
+  "include": ["electron/**/*.ts", "backend/**/*.ts", "shared/**/*.ts", "src/lib/formatters.ts", "src/types/domain.ts", "vite.config.ts"]
 }

@@ -8,22 +8,37 @@ import {
   cancelReceipt,
   createPayment,
   createStudent,
+  createUser,
+  autoAssignGroups,
+  confirmGroupAssignments,
   exportMonthlyReceipts,
+  exportAssignedRoster,
   generateBatch,
   getRocConfig,
   getNextRocNumberSuggestion,
   getNextInternalFolioPreview,
   getStudent,
+  importAssignedRosterRows,
+  listDepartments,
   listConcepts,
   listPayments,
   listReceipts,
   listReceiptsByStudent,
   listRecentAuditLogs,
+  listAssignedRoster,
+  listGroupStats,
   listStudents,
+  listUsers,
+  manualReassignGroup,
+  markGroupNoShow,
+  previewGroupRoster,
+  previewGroupStats,
+  resetUserPassword,
   updateRocConfig,
   updateConceptSuggested,
   updateConceptTariff,
   updateStudent,
+  updateUser,
 } from './hybrid-store'
 import { ensureBackendBaseData } from './seed-backend'
 
@@ -64,6 +79,55 @@ const remoteActorSchema = z.object({
   username: z.string().trim().min(1),
   displayName: z.string().trim().min(1),
   role: z.string().trim().min(1),
+})
+
+const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'])
+
+const remoteUserCreateSchema = z.object({
+  username: z.string().trim().min(1),
+  displayName: z.string().trim().min(1),
+  role: remoteAppRoleSchema,
+  departmentId: z.string().trim().min(1).nullable().optional(),
+  isActive: z.boolean().default(true),
+  password: z.string().min(8),
+})
+
+const remoteUserUpdateSchema = z.object({
+  displayName: z.string().trim().min(1),
+  role: remoteAppRoleSchema,
+  departmentId: z.string().trim().min(1).nullable().optional(),
+  isActive: z.boolean(),
+})
+
+const remoteUserResetPasswordSchema = z.object({
+  password: z.string().min(8),
+})
+
+const remoteGroupCycleSchema = z.object({
+  schoolCycle: z.string().trim().min(1),
+})
+
+const remoteGroupManualMoveSchema = z.object({
+  studentId: z.string().trim().min(1),
+  toGroupId: z.string().trim().min(1),
+  reason: z.string().trim().min(5),
+})
+
+const remoteGroupNoShowSchema = z.object({
+  studentId: z.string().trim().min(1),
+  reason: z.string().trim().min(5),
+})
+
+const remoteGroupImportSchema = z.object({
+  schoolCycle: z.string().trim().min(1),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(z.object({
+    sheetName: z.string().trim().min(1),
+    rowNumber: z.number().int().min(1),
+    groupLabel: z.string().trim().min(1),
+    enrollmentNumber: z.string().trim().nullable(),
+    curp: z.string().trim().nullable(),
+  })).min(1),
 })
 
 const remoteStudentInputSchema = z.object({
@@ -178,7 +242,7 @@ app.use((req: Request, res: Response, next) => {
     res.setHeader('Vary', 'Origin')
   }
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-api-key,x-device-id,x-actor-username,x-actor-name,x-actor-role')
 
   if (req.method === 'OPTIONS') {
@@ -472,6 +536,66 @@ app.get('/api/hybrid/health', (_req: Request, res: Response) => {
   return res.status(200).json({ ok: true, mode: 'hybrid-online' })
 })
 
+app.get('/api/hybrid/admin/departments', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (actor.role !== 'ADMIN') return res.status(403).json({ ok: false, error: 'forbidden' })
+  const items = await listDepartments()
+  return res.status(200).json({ ok: true, items })
+})
+
+app.get('/api/hybrid/admin/users', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (actor.role !== 'ADMIN') return res.status(403).json({ ok: false, error: 'forbidden' })
+  const items = await listUsers()
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/admin/users', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (actor.role !== 'ADMIN') return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteUserCreateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const user = await createUser(parsed.data, actor)
+    return res.status(201).json({ ok: true, user })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'user_create_failed' })
+  }
+})
+
+app.put('/api/hybrid/admin/users/:id', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (actor.role !== 'ADMIN') return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteUserUpdateSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+    const user = await updateUser(userId, parsed.data, actor)
+    return res.status(200).json({ ok: true, user })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'user_update_failed' })
+  }
+})
+
+app.post('/api/hybrid/admin/users/:id/reset-password', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (actor.role !== 'ADMIN') return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteUserResetPasswordSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+    const user = await resetUserPassword(userId, parsed.data, actor)
+    return res.status(200).json({ ok: true, user })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'user_reset_failed' })
+  }
+})
+
 app.get('/api/hybrid/students', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const validatedOnly = req.query.validatedOnly === 'true'
@@ -519,6 +643,124 @@ app.put('/api/hybrid/students/:id', async (req: Request, res: Response) => {
     return res.status(200).json({ ok: true, student })
   } catch (error) {
     return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'update_failed' })
+  }
+})
+
+app.post('/api/hybrid/groups/stats', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const items = await listGroupStats(parsed.data.schoolCycle)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/groups/preview', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const items = await previewGroupStats(parsed.data.schoolCycle)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/groups/preview-roster', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const items = await previewGroupRoster(parsed.data.schoolCycle)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/groups/auto-assign', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await autoAssignGroups(parsed.data.schoolCycle, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_auto_assign_failed' })
+  }
+})
+
+app.post('/api/hybrid/groups/confirm', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const result = await confirmGroupAssignments(parsed.data.schoolCycle)
+  return res.status(200).json({ ok: true, result })
+})
+
+app.post('/api/hybrid/groups/list-assigned-roster', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const items = await listAssignedRoster(parsed.data.schoolCycle)
+  return res.status(200).json({ ok: true, items })
+})
+
+app.post('/api/hybrid/groups/export-assigned-roster', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupCycleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await exportAssignedRoster(parsed.data.schoolCycle)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_export_failed' })
+  }
+})
+
+app.post('/api/hybrid/groups/manual-reassign', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupManualMoveSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await manualReassignGroup(parsed.data.studentId, parsed.data.toGroupId, parsed.data.reason, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_manual_reassign_failed' })
+  }
+})
+
+app.post('/api/hybrid/groups/no-show', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupNoShowSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await markGroupNoShow(parsed.data.studentId, parsed.data.reason, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_no_show_failed' })
+  }
+})
+
+app.post('/api/hybrid/groups/import-assigned-roster', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteGroupImportSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const result = await importAssignedRosterRows(parsed.data.schoolCycle, parsed.data.rows, parsed.data.sourcePath, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_import_failed' })
   }
 })
 

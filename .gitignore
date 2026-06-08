@@ -1,4 +1,5 @@
 node_modules/
+.codex-tools/
 dist/
 dist-electron/
 .vite/

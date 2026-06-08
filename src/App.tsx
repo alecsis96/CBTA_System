@@ -1,4 +1,5 @@
 ﻿import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import * as XLSX from 'xlsx'
 import { browserFallbackApi } from '@/lib/browser-fallback'
 import { createHybridApi } from '@/lib/hybrid-api'
 import {
@@ -21,6 +22,7 @@ import type {
   CashPaymentSummary,
   ChargeConceptSummary,
   GroupAssignedRosterRow,
+  GroupRosterImportRow,
   PreRegistrationSummary,
   RocReceiptSummary,
   SaveStudentRequirementChecklistInput,
@@ -30,9 +32,14 @@ import type {
   StudentRequirementChecklist,
   StudentSummary,
 } from '@/types/domain'
+import type { DepartmentSummary, UserCreateInput, UserSummary, UserUpdateInput } from '@/types/admin'
 
 type Screen = 'control-escolar' | 'ingresos-propios' | 'configuracion'
 type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'configuracion' | 'sync'
+
+const GROUP_COLUMN_ALIASES = ['grupo', 'group', 'grupo asignado', 'grupo destino', 'group label']
+const ENROLLMENT_COLUMN_ALIASES = ['folio interno', 'matricula', 'matricula interna', 'enrollment number', 'enrollmentnumber', 'numero de control']
+const CURP_COLUMN_ALIASES = ['curp']
 
 const relationshipOptions = ['Padre', 'Madre', 'Tutor', 'Abuelo', 'Abuela', 'Otro']
 
@@ -263,6 +270,8 @@ function App() {
   const [allReceipts, setAllReceipts] = useState<RocReceiptSummary[]>([])
   const [cashPayments, setCashPayments] = useState<CashPaymentSummary[]>([])
   const [recentAuditLogs, setRecentAuditLogs] = useState<AuditLogSummary[]>([])
+  const [adminUsers, setAdminUsers] = useState<UserSummary[]>([])
+  const [departments, setDepartments] = useState<DepartmentSummary[]>([])
   const [includeLifeInsurance, setIncludeLifeInsurance] = useState(false)
   const [rocNumber, setRocNumber] = useState('DGETAYCM-ROC-0001')
   const [suggestedRocNumber, setSuggestedRocNumber] = useState('DGETAYCM-ROC-0001')
@@ -276,6 +285,7 @@ function App() {
   const [savingReceipt, setSavingReceipt] = useState(false)
   const [savingRocConfig, setSavingRocConfig] = useState(false)
   const [savingTariffCode, setSavingTariffCode] = useState<string | null>(null)
+  const [savingUserId, setSavingUserId] = useState<string | null>(null)
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
   const [feedbackByScope, setFeedbackByScope] = useState<Record<FeedbackScope, string | null>>({
     'control-escolar': null,
@@ -397,7 +407,7 @@ function App() {
       setAuthSession(session)
       if (session) {
         setScreen(defaultScreenByRole(session.role))
-        await loadData()
+        await loadData(session)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo validar la sesion actual.'
@@ -478,7 +488,7 @@ function App() {
     })
   }, [inscriptionSelected, insuranceConcept])
 
-  async function loadData() {
+  async function loadData(sessionForAdmin: AuthSession | null = authSession) {
     setLoading(true)
     try {
       const receiptsAllPromise =
@@ -492,8 +502,16 @@ function App() {
           ? appApi.receipts.getConfig()
               .catch(() => ({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' }))
           : Promise.resolve({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' })
+      const adminUsersPromise =
+        sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listUsers === 'function'
+          ? appApi.admin.listUsers()
+          : Promise.resolve([])
+      const departmentsPromise =
+        sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listDepartments === 'function'
+          ? appApi.admin.listDepartments()
+          : Promise.resolve([])
 
-      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments] = await Promise.all([
         appApi.students.list(),
         appApi.preRegistrations.list(),
         appApi.students.listValidated(),
@@ -503,6 +521,8 @@ function App() {
         cashPaymentsPromise,
         admissionsPromise,
         rocConfigPromise,
+        adminUsersPromise,
+        departmentsPromise,
       ])
 
       setStudents(allStudents)
@@ -513,6 +533,8 @@ function App() {
       setAllReceipts(receiptsAll)
       setCashPayments(cashPayments)
       setAdmissions(admissions)
+      setAdminUsers(adminUsers)
+      setDepartments(departments)
       setRocInitialNumber(rocConfig.initialRocNumber)
       applySuggestedRocNumber(rocConfig.nextSuggestedRocNumber)
       setSelectedStudent((current) => {
@@ -565,7 +587,7 @@ function App() {
       const session = await appApi.auth.login(authForm)
       setAuthSession(session)
       setScreen(defaultScreenByRole(session.role))
-      await loadData()
+      await loadData(session)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo iniciar sesion.'
       setAuthError(message)
@@ -993,6 +1015,54 @@ function App() {
     }
   }
 
+  async function handleCreateAdminUser(input: UserCreateInput) {
+    setSavingUserId('new')
+    setConfigFeedback(null)
+
+    try {
+      await appApi.admin.createUser(input)
+      await loadData(authSession)
+      setConfigFeedback(`Usuario ${input.username.trim().toLowerCase()} creado correctamente.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo crear el usuario.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingUserId(null)
+    }
+  }
+
+  async function handleUpdateAdminUser(userId: string, input: UserUpdateInput) {
+    setSavingUserId(userId)
+    setConfigFeedback(null)
+
+    try {
+      await appApi.admin.updateUser(userId, input)
+      await loadData(authSession)
+      setConfigFeedback('Usuario actualizado correctamente.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo actualizar el usuario.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingUserId(null)
+    }
+  }
+
+  async function handleResetAdminUserPassword(userId: string, password: string) {
+    setSavingUserId(userId)
+    setConfigFeedback(null)
+
+    try {
+      await appApi.admin.resetUserPassword(userId, { password })
+      await loadData(authSession)
+      setConfigFeedback('Contrasena restablecida correctamente.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo restablecer la contrasena.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingUserId(null)
+    }
+  }
+
   async function handleUpdatePreRegistrationStatus(
     preRegistrationId: string,
     status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
@@ -1403,6 +1473,7 @@ function App() {
             onUpdateCaptureQuery={setCaptureQuery}
             onExportSep={handleExportSep}
             onReloadData={loadData}
+            groupsApi={appApi.groups}
           />
         ) : screen === 'ingresos-propios' ? (
           <IngresosPropiosOverview
@@ -1447,9 +1518,16 @@ function App() {
             suggestedRocNumber={suggestedRocNumber}
             savingTariffCode={savingTariffCode}
             savingRocConfig={savingRocConfig}
+            savingUserId={savingUserId}
+            users={adminUsers}
+            departments={departments}
+            currentUserId={authSession.id}
             onUpdateTariff={handleUpdateTariff}
             onUpdateRocConfig={handleUpdateRocConfig}
             onUpdateSuggested={handleUpdateConceptSuggested}
+            onCreateUser={handleCreateAdminUser}
+            onUpdateUser={handleUpdateAdminUser}
+            onResetUserPassword={handleResetAdminUserPassword}
           />
         )}
 
@@ -1494,14 +1572,167 @@ type ConfiguracionTarifasProps = {
   suggestedRocNumber: string
   savingTariffCode: string | null
   savingRocConfig: boolean
+  savingUserId: string | null
+  users: UserSummary[]
+  departments: DepartmentSummary[]
+  currentUserId: string
   onUpdateTariff: (code: string, amount: number, periodLabel: string) => Promise<void>
   onUpdateRocConfig: (initialRocNumber: string) => Promise<void>
   onUpdateSuggested: (code: string, isSuggested: boolean) => Promise<void>
+  onCreateUser: (input: UserCreateInput) => Promise<void>
+  onUpdateUser: (userId: string, input: UserUpdateInput) => Promise<void>
+  onResetUserPassword: (userId: string, password: string) => Promise<void>
 }
 
 function getOutputFileName(outputPath: string) {
   const parts = outputPath.split(/[\\/]/)
   return parts[parts.length - 1] || outputPath
+}
+
+function normalizeSheetCell(value: unknown) {
+  return String(value ?? '').trim()
+}
+
+function normalizeSheetUpper(value: unknown) {
+  return normalizeSheetCell(value).toUpperCase()
+}
+
+function normalizeSheetHeader(value: unknown) {
+  return normalizeSheetCell(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function pickSheetValue(row: Record<string, unknown>, aliases: string[]) {
+  for (const [rawKey, rawValue] of Object.entries(row)) {
+    if (aliases.includes(normalizeSheetHeader(rawKey))) {
+      return rawValue
+    }
+  }
+
+  return ''
+}
+
+function normalizeImportedGroupLabel(value: unknown) {
+  const normalized = normalizeSheetUpper(value)
+  if (/^[A-Z]$/.test(normalized)) {
+    return `1${normalized}`
+  }
+  if (/^1[A-Z]$/.test(normalized)) {
+    return normalized
+  }
+  return normalized
+}
+
+async function pickRosterWorkbookFile() {
+  return new Promise<File | null>((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.xlsx,.xls'
+    input.onchange = () => resolve(input.files?.[0] ?? null)
+    input.oncancel = () => resolve(null)
+    input.click()
+  })
+}
+
+async function parseRosterWorkbook(file: File) {
+  const buffer = await file.arrayBuffer()
+  const workbook = XLSX.read(buffer, { type: 'array' })
+  const rows: GroupRosterImportRow[] = []
+  const issues: string[] = []
+  let skippedCount = 0
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) continue
+
+    const sheetRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' })
+    const wideHeaderIndex = sheetRows.findIndex((row) => {
+      if (!Array.isArray(row)) return false
+      const normalized = row.map((cell) => normalizeSheetHeader(cell))
+      const folioCount = normalized.filter((cell) => cell === 'folio').length
+      const groupCount = normalized.filter((cell) => cell === 'grupo').length
+      return folioCount >= 2 && groupCount >= 2
+    })
+
+    if (wideHeaderIndex >= 0) {
+      for (let rowIndex = wideHeaderIndex + 1; rowIndex < sheetRows.length; rowIndex += 1) {
+        const row = Array.isArray(sheetRows[rowIndex]) ? sheetRows[rowIndex] : []
+        let hasAnyValue = false
+        for (let columnIndex = 0; columnIndex < row.length; columnIndex += 2) {
+          const enrollmentNumber = normalizeSheetCell(row[columnIndex]) || null
+          const groupLabel = normalizeImportedGroupLabel(row[columnIndex + 1])
+          if (!enrollmentNumber && !groupLabel) {
+            continue
+          }
+          hasAnyValue = true
+          if (!groupLabel || !enrollmentNumber) {
+            skippedCount += 1
+            issues.push(`Fila ${rowIndex + 1} en ${sheetName}: falta folio o grupo en uno de los pares de columnas.`)
+            continue
+          }
+          rows.push({
+            sheetName,
+            rowNumber: rowIndex + 1,
+            groupLabel,
+            enrollmentNumber,
+            curp: null,
+          })
+        }
+        if (!hasAnyValue) {
+          continue
+        }
+      }
+      continue
+    }
+
+    const headerRowIndex = sheetRows.findIndex((row) => Array.isArray(row) && row.some((cell) => {
+      const header = normalizeSheetHeader(cell)
+      return GROUP_COLUMN_ALIASES.includes(header) || header === 'columna1' || ENROLLMENT_COLUMN_ALIASES.includes(header) || CURP_COLUMN_ALIASES.includes(header)
+    }))
+    if (headerRowIndex < 0) {
+      continue
+    }
+
+    const headers = (Array.isArray(sheetRows[headerRowIndex]) ? sheetRows[headerRowIndex] : []).map((cell) => normalizeSheetCell(cell))
+    for (let rowIndex = headerRowIndex + 1; rowIndex < sheetRows.length; rowIndex += 1) {
+      const rawRow = Array.isArray(sheetRows[rowIndex]) ? sheetRows[rowIndex] : []
+      const row = Object.fromEntries(headers.map((header, index) => [header, rawRow[index] ?? '']))
+      const rowNumber = rowIndex + 1
+      const groupLabel = normalizeImportedGroupLabel(pickSheetValue(row, [...GROUP_COLUMN_ALIASES, 'columna1'])) || normalizeImportedGroupLabel(sheetName)
+      const enrollmentNumber = normalizeSheetCell(pickSheetValue(row, ENROLLMENT_COLUMN_ALIASES)) || null
+      const curp = normalizeSheetUpper(pickSheetValue(row, CURP_COLUMN_ALIASES)) || null
+
+      if (!groupLabel && !enrollmentNumber && !curp) {
+        continue
+      }
+
+      if (!groupLabel) {
+        skippedCount += 1
+        issues.push(`Fila ${rowNumber} en ${sheetName}: falta Grupo.`)
+        continue
+      }
+
+      if (!enrollmentNumber && !curp) {
+        skippedCount += 1
+        issues.push(`Fila ${rowNumber} en ${sheetName}: agrega CURP o Folio interno.`)
+        continue
+      }
+
+      rows.push({
+        sheetName,
+        rowNumber,
+        groupLabel,
+        enrollmentNumber,
+        curp,
+      })
+    }
+  }
+
+  return { rows, skippedCount, issues }
 }
 
 function extractOutputFileNameFromFeedback(message: string) {
@@ -1557,13 +1788,21 @@ function ConfiguracionTarifasOverview({
   suggestedRocNumber,
   savingTariffCode,
   savingRocConfig,
+  savingUserId,
+  users,
+  departments,
+  currentUserId,
   onUpdateTariff,
   onUpdateRocConfig,
   onUpdateSuggested,
+  onCreateUser,
+  onUpdateUser,
+  onResetUserPassword,
 }: ConfiguracionTarifasProps) {
   const groupedConcepts = groupedSelectableConcepts(concepts)
   const [selectedGroupKey, setSelectedGroupKey] = useState(groupedConcepts[0]?.key ?? 'A000')
   const [rocInitialDraft, setRocInitialDraft] = useState(rocInitialNumber)
+  const [configTab, setConfigTab] = useState<'tarifas' | 'usuarios'>('tarifas')
 
   useEffect(() => {
     setRocInitialDraft(rocInitialNumber)
@@ -1587,11 +1826,32 @@ function ConfiguracionTarifasOverview({
       <div className="section-header">
         <div>
           <p className="eyebrow">Configuracion</p>
-          <h2>Tarifas por clave</h2>
+          <h2>{configTab === 'tarifas' ? 'Tarifas y ROC' : 'Usuarios y departamentos'}</h2>
         </div>
-        <span className="status-tag">Edicion por Ingresos Propios</span>
+        <span className="status-tag">Solo ADMIN</span>
       </div>
 
+      <div className="config-tabs" role="tablist" aria-label="Configuracion">
+        <button className={configTab === 'tarifas' ? 'config-tab active' : 'config-tab'} onClick={() => setConfigTab('tarifas')} type="button">
+          Tarifas y ROC
+        </button>
+        <button className={configTab === 'usuarios' ? 'config-tab active' : 'config-tab'} onClick={() => setConfigTab('usuarios')} type="button">
+          Usuarios y departamentos
+        </button>
+      </div>
+
+      {configTab === 'usuarios' ? (
+        <AdminUsersOverview
+          currentUserId={currentUserId}
+          departments={departments}
+          savingUserId={savingUserId}
+          users={users}
+          onCreateUser={onCreateUser}
+          onResetUserPassword={onResetUserPassword}
+          onUpdateUser={onUpdateUser}
+        />
+      ) : (
+        <>
       <article className="panel sub-panel">
         <div className="section-header">
           <div>
@@ -1678,7 +1938,277 @@ function ConfiguracionTarifasOverview({
           </section>
         ) : null}
       </div>
+        </>
+      )}
     </section>
+  )
+}
+
+type AdminUsersOverviewProps = {
+  users: UserSummary[]
+  departments: DepartmentSummary[]
+  currentUserId: string
+  savingUserId: string | null
+  onCreateUser: (input: UserCreateInput) => Promise<void>
+  onUpdateUser: (userId: string, input: UserUpdateInput) => Promise<void>
+  onResetUserPassword: (userId: string, password: string) => Promise<void>
+}
+
+const roleOptions: Array<{ value: AppRole; label: string }> = [
+  { value: 'ADMIN', label: 'Administrador' },
+  { value: 'CONTROL_ESCOLAR', label: 'Control Escolar' },
+  { value: 'INGRESOS_PROPIOS', label: 'Ingresos Propios' },
+]
+
+function AdminUsersOverview({
+  users,
+  departments,
+  currentUserId,
+  savingUserId,
+  onCreateUser,
+  onUpdateUser,
+  onResetUserPassword,
+}: AdminUsersOverviewProps) {
+  const activeDepartments = departments.filter((department) => department.isActive)
+  const defaultDepartmentId = activeDepartments[0]?.id ?? ''
+  const [draft, setDraft] = useState<UserCreateInput>({
+    username: '',
+    displayName: '',
+    role: 'CONTROL_ESCOLAR',
+    departmentId: defaultDepartmentId || null,
+    isActive: true,
+    password: '',
+  })
+  const [editingUserId, setEditingUserId] = useState<string | null>(null)
+  const [resetPasswordUserId, setResetPasswordUserId] = useState<string | null>(null)
+  const [resetPassword, setResetPassword] = useState('')
+
+  useEffect(() => {
+    setDraft((current) => current.departmentId ? current : { ...current, departmentId: defaultDepartmentId || null })
+  }, [defaultDepartmentId])
+
+  const editingUser = users.find((user) => user.id === editingUserId) ?? null
+
+  async function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    await onCreateUser({
+      ...draft,
+      username: draft.username.trim().toLowerCase(),
+      displayName: draft.displayName.trim(),
+      departmentId: draft.departmentId || null,
+    })
+    setDraft({
+      username: '',
+      displayName: '',
+      role: 'CONTROL_ESCOLAR',
+      departmentId: defaultDepartmentId || null,
+      isActive: true,
+      password: '',
+    })
+  }
+
+  async function handleResetPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!resetPasswordUserId) return
+    await onResetUserPassword(resetPasswordUserId, resetPassword)
+    setResetPasswordUserId(null)
+    setResetPassword('')
+  }
+
+  return (
+    <div className="admin-users-layout">
+      <form className="panel sub-panel admin-user-form" onSubmit={handleCreate}>
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Nuevo usuario</p>
+            <h3>Alta de acceso</h3>
+          </div>
+          <span className="status-tag">Clave temporal</span>
+        </div>
+        <div className="form-grid compact-form-grid">
+          <Field label="Usuario">
+            <input value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} placeholder="ej. direccion.1" required />
+          </Field>
+          <Field label="Nombre visible">
+            <input value={draft.displayName} onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))} required />
+          </Field>
+          <Field label="Rol">
+            <select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as AppRole }))}>
+              {roleOptions.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Departamento">
+            <select value={draft.departmentId ?? ''} onChange={(event) => setDraft((current) => ({ ...current, departmentId: event.target.value || null }))}>
+              <option value="">Sin departamento</option>
+              {activeDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Contrasena temporal">
+            <input minLength={8} type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} required />
+          </Field>
+          <label className="checkbox-row admin-active-toggle">
+            <input checked={draft.isActive} onChange={(event) => setDraft((current) => ({ ...current, isActive: event.target.checked }))} type="checkbox" />
+            Activo
+          </label>
+        </div>
+        <div className="form-actions">
+          <button className="primary-button" disabled={savingUserId === 'new'} type="submit">
+            {savingUserId === 'new' ? 'Creando...' : 'Crear usuario'}
+          </button>
+        </div>
+      </form>
+
+      <section className="panel sub-panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Usuarios</p>
+            <h3>Accesos existentes</h3>
+          </div>
+          <span className="status-tag">{users.length} usuarios</span>
+        </div>
+        <div className="student-table-wrap">
+          <table className="student-table">
+            <thead>
+              <tr>
+                <th>Usuario</th>
+                <th>Nombre</th>
+                <th>Rol</th>
+                <th>Departamento</th>
+                <th>Estado</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((user) => (
+                <tr key={user.id}>
+                  <td>{user.username}</td>
+                  <td>{user.displayName}</td>
+                  <td>{roleOptions.find((role) => role.value === user.role)?.label ?? user.role}</td>
+                  <td>{user.departmentName ?? 'Sin departamento'}</td>
+                  <td><span className={user.isActive ? 'status-tag' : 'status-tag status-tag-muted'}>{user.isActive ? 'Activo' : 'Inactivo'}</span></td>
+                  <td>
+                    <div className="button-row">
+                      <button className="secondary-button small-button" onClick={() => setEditingUserId(user.id)} type="button">Editar</button>
+                      <button className="tertiary-button small-button" onClick={() => setResetPasswordUserId(user.id)} type="button">Restablecer</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {users.length === 0 ? (
+                <tr><td colSpan={6}>No hay usuarios registrados.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {editingUser ? (
+        <EditUserModal
+          currentUserId={currentUserId}
+          departments={activeDepartments}
+          isSaving={savingUserId === editingUser.id}
+          user={editingUser}
+          onClose={() => setEditingUserId(null)}
+          onSubmit={onUpdateUser}
+        />
+      ) : null}
+
+      {resetPasswordUserId ? (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <form className="modal-card checklist-modal" onSubmit={handleResetPassword}>
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Contrasena</p>
+                <h2>Restablecer acceso</h2>
+              </div>
+              <button className="secondary-button small-button" onClick={() => setResetPasswordUserId(null)} type="button">Cerrar</button>
+            </div>
+            <Field label="Nueva contrasena temporal">
+              <input minLength={8} type="password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} required />
+            </Field>
+            <div className="form-actions">
+              <button className="primary-button" disabled={savingUserId === resetPasswordUserId} type="submit">
+                {savingUserId === resetPasswordUserId ? 'Guardando...' : 'Restablecer contrasena'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+type EditUserModalProps = {
+  user: UserSummary
+  departments: DepartmentSummary[]
+  currentUserId: string
+  isSaving: boolean
+  onClose: () => void
+  onSubmit: (userId: string, input: UserUpdateInput) => Promise<void>
+}
+
+function EditUserModal({ user, departments, currentUserId, isSaving, onClose, onSubmit }: EditUserModalProps) {
+  const [draft, setDraft] = useState<UserUpdateInput>({
+    displayName: user.displayName,
+    role: user.role,
+    departmentId: user.departmentId,
+    isActive: user.isActive,
+  })
+  const isSelf = user.id === currentUserId
+
+  useEffect(() => {
+    setDraft({
+      displayName: user.displayName,
+      role: user.role,
+      departmentId: user.departmentId,
+      isActive: user.isActive,
+    })
+  }, [user])
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    await onSubmit(user.id, { ...draft, displayName: draft.displayName.trim(), departmentId: draft.departmentId || null })
+    onClose()
+  }
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true">
+      <form className="modal-card checklist-modal" onSubmit={handleSubmit}>
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Editar usuario</p>
+            <h2>{user.username}</h2>
+          </div>
+          <button className="secondary-button small-button" onClick={onClose} type="button">Cerrar</button>
+        </div>
+        <div className="form-grid compact-form-grid">
+          <Field label="Nombre visible">
+            <input value={draft.displayName} onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))} required />
+          </Field>
+          <Field label="Rol">
+            <select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as AppRole }))}>
+              {roleOptions.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Departamento">
+            <select value={draft.departmentId ?? ''} onChange={(event) => setDraft((current) => ({ ...current, departmentId: event.target.value || null }))}>
+              <option value="">Sin departamento</option>
+              {departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+            </select>
+          </Field>
+          <label className="checkbox-row admin-active-toggle">
+            <input checked={draft.isActive} disabled={isSelf && user.role === 'ADMIN'} onChange={(event) => setDraft((current) => ({ ...current, isActive: event.target.checked }))} type="checkbox" />
+            Activo
+          </label>
+        </div>
+        {isSelf ? <p className="feedback-banner">Estas editando tu propio usuario. El sistema protege que quede al menos un admin activo.</p> : null}
+        <div className="form-actions">
+          <button className="primary-button" disabled={isSaving} type="submit">
+            {isSaving ? 'Guardando...' : 'Guardar cambios'}
+          </button>
+        </div>
+      </form>
+    </div>
   )
 }
 
@@ -1760,6 +2290,7 @@ type ControlEscolarProps = {
   onUpdateCaptureQuery: (value: string) => void
   onExportSep: () => Promise<void>
   onReloadData: () => Promise<void>
+  groupsApi: Window['cbta']['groups']
 }
 
 function ControlEscolarOverview({
@@ -1783,6 +2314,7 @@ function ControlEscolarOverview({
   onUpdateCaptureQuery,
   onExportSep,
   onReloadData,
+  groupsApi,
 }: ControlEscolarProps) {
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas')
   const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'inscripcion' | 'alumnos'>('alumnos')
@@ -1907,59 +2439,92 @@ function ControlEscolarOverview({
   }
 
   async function refreshGroupStats() {
-    if (!window.cbta?.groups?.stats) return
-    const stats = await window.cbta.groups.stats({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.stats) return
+    const stats = await groupsApi.stats({ schoolCycle: form.schoolCycle })
     setGroupStats(stats)
   }
 
   async function handleAutoAssign() {
-    if (!window.cbta?.groups?.autoAssign) return
-    await window.cbta.groups.autoAssign({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.autoAssign) return
+    await groupsApi.autoAssign({ schoolCycle: form.schoolCycle })
     setIsPreviewStats(false)
     setGroupPreviewRows([])
     setPreviewGroupFilter('all')
     setPreviewSexFilter('all')
     await refreshGroupStats()
+    await onReloadData()
   }
 
   async function handlePreviewAssign() {
-    if (!window.cbta?.groups?.preview) return
-    const stats = await window.cbta.groups.preview({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.preview) return
+    const stats = await groupsApi.preview({ schoolCycle: form.schoolCycle })
     setGroupStats(stats)
-    if (window.cbta?.groups?.previewRoster) {
-      const rows = await window.cbta.groups.previewRoster({ schoolCycle: form.schoolCycle })
+    if (groupsApi?.previewRoster) {
+      const rows = await groupsApi.previewRoster({ schoolCycle: form.schoolCycle })
       setGroupPreviewRows(rows)
     }
     setIsPreviewStats(true)
   }
 
   async function handleConfirmGroups() {
-    if (!window.cbta?.groups?.confirmAssignment) return
-    await window.cbta.groups.confirmAssignment({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.confirmAssignment) return
+    await groupsApi.confirmAssignment({ schoolCycle: form.schoolCycle })
     await refreshGroupStats()
+    await onReloadData()
   }
 
   async function handleManualMove() {
-    if (!window.cbta?.groups?.manualReassign || !moveStudentId || !moveGroupId) return
-    await window.cbta.groups.manualReassign({ studentId: moveStudentId, toGroupId: moveGroupId, reason: moveReason || 'Ajuste operativo' })
+    if (!groupsApi?.manualReassign || !moveStudentId || !moveGroupId) return
+    await groupsApi.manualReassign({ studentId: moveStudentId, toGroupId: moveGroupId, reason: moveReason || 'Ajuste operativo' })
     await refreshGroupStats()
+    await onReloadData()
   }
 
   async function handleNoShow() {
-    if (!window.cbta?.groups?.markNoShow || !noShowStudentId) return
-    await window.cbta.groups.markNoShow({ studentId: noShowStudentId, reason: noShowReason || 'No se presento a inscripcion' })
+    if (!groupsApi?.markNoShow || !noShowStudentId) return
+    await groupsApi.markNoShow({ studentId: noShowStudentId, reason: noShowReason || 'No se presento a inscripcion' })
     await refreshGroupStats()
+    await onReloadData()
+  }
+
+  async function handleImportAssignedRoster() {
+    if (!groupsApi?.importAssignedRoster) return
+    const file = await pickRosterWorkbookFile()
+    if (!file) {
+      setChecklistFeedback('Importacion cancelada.')
+      return
+    }
+
+    const parsed = await parseRosterWorkbook(file)
+    if (parsed.rows.length === 0) {
+      setChecklistFeedback('El archivo no contiene filas validas para importar grupos.')
+      return
+    }
+
+    const result = await groupsApi.importAssignedRoster({
+      schoolCycle: form.schoolCycle,
+      sourcePath: file.name,
+      rows: parsed.rows,
+    })
+    const allIssues = [...parsed.issues, ...result.issues].slice(0, 12)
+    const issuesSuffix = allIssues.length > 0 ? ` Avisos: ${allIssues.join(' | ')}` : ''
+    const sourceFile = result.sourcePath ? getOutputFileName(result.sourcePath) : file.name
+    setChecklistFeedback(
+      `Importacion completada desde ${sourceFile}: ${result.importedCount} asignaciones, ${result.createdGroupCount} grupos nuevos, ${result.unmatchedCount} sin match, ${result.skippedCount + parsed.skippedCount} filas omitidas.${issuesSuffix}`,
+    )
+    await refreshGroupStats()
+    await onReloadData()
   }
 
   async function handleExportAssignedRoster() {
-    if (!window.cbta?.groups?.exportAssignedRoster) return
-    const result = await window.cbta.groups.exportAssignedRoster({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.exportAssignedRoster) return
+    const result = await groupsApi.exportAssignedRoster({ schoolCycle: form.schoolCycle })
     setChecklistFeedback(`Listado exportado (${result.exportedCount} alumnos): ${result.outputPath}`)
   }
 
   async function handlePrintAssignedRoster() {
-    if (!window.cbta?.groups?.printAssignedRoster) return
-    await window.cbta.groups.printAssignedRoster({ schoolCycle: form.schoolCycle })
+    if (!groupsApi?.printAssignedRoster) return
+    await groupsApi.printAssignedRoster({ schoolCycle: form.schoolCycle })
     setChecklistFeedback('Listado de grupos enviado a impresion.')
   }
 
@@ -2116,14 +2681,16 @@ function ControlEscolarOverview({
           <div><p className="eyebrow">Control Escolar</p><h2>Asignacion de grupos</h2></div>
           <span className="status-tag">{isPreviewStats ? 'Vista previa' : 'Nuevo ingreso MATUTINO'}</span>
         </div>
-        <div className="button-row">
-          <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
-          <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
-          <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
-          <button className="secondary-button small-button" onClick={() => void handleExportAssignedRoster()} type="button">Exportar Excel</button>
-          <button className="secondary-button small-button" onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
-        </div>
-        {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
+          <div className="button-row">
+            <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
+            <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
+            <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
+            <button className="secondary-button small-button" onClick={() => void handleImportAssignedRoster()} type="button">Importar Excel</button>
+            <button className="secondary-button small-button" onClick={() => void handleExportAssignedRoster()} type="button">Exportar Excel</button>
+            <button className="secondary-button small-button" onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
+          </div>
+          <p className="table-summary">La importacion acepta el Excel exportado por este listado o cualquier archivo con columnas Grupo y CURP o Folio interno.</p>
+          {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
         {isPreviewStats ? <p className="table-summary">Previsualizacion calculada sin guardar cambios.</p> : null}
         <div className="student-table-wrap">
           <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>

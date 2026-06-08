@@ -315,7 +315,66 @@ export type GroupRosterExportResult = {
   exportedCount: number
 }
 
+export type GroupRosterImportResult = {
+  ok: boolean
+  canceled: boolean
+  sourcePath: string | null
+  importedCount: number
+  createdGroupCount: number
+  skippedCount: number
+  unmatchedCount: number
+  issues: string[]
+}
+
+export type GroupRosterImportRow = {
+  sheetName: string
+  rowNumber: number
+  groupLabel: string
+  enrollmentNumber: string | null
+  curp: string | null
+}
+
 export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
+
+export type DepartmentSummary = {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  isActive: boolean
+}
+
+export type UserSummary = {
+  id: string
+  username: string
+  displayName: string
+  role: AppRole
+  departmentId: string | null
+  departmentName: string | null
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type UserCreateInput = {
+  username: string
+  displayName: string
+  role: AppRole
+  departmentId?: string | null
+  isActive: boolean
+  password: string
+}
+
+export type UserUpdateInput = {
+  displayName: string
+  role: AppRole
+  departmentId?: string | null
+  isActive: boolean
+}
+
+export type UserResetPasswordInput = {
+  password: string
+}
 
 export type AuthSession = {
   id: string

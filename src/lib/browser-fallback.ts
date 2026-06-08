@@ -11,6 +11,8 @@ import type {
   ChargeConceptSummary,
   ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
+  GroupRosterImportRow,
+  GroupRosterImportResult,
   GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
@@ -29,6 +31,7 @@ import type {
   StudentSummary,
   TariffUpdateInput,
 } from '@/types/domain'
+import type { DepartmentSummary, UserCreateInput, UserResetPasswordInput, UserSummary, UserUpdateInput } from '@/types/admin'
 
 type RocConfigSummary = {
   initialRocNumber: string
@@ -49,11 +52,22 @@ const PRE_REGISTRATIONS_KEY = 'cbta-browser-pre-registrations'
 const ADMISSIONS_KEY = 'cbta-browser-admissions'
 const SESSION_KEY = 'cbta-browser-session'
 const ROC_CONFIG_KEY = 'cbta-browser-roc-config'
+const USERS_KEY = 'cbta-browser-users'
+const DEPARTMENTS_KEY = 'cbta-browser-departments'
 
-const browserUsers: Array<AuthSession & { password: string }> = [
-  { id: 'browser-control-1', username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
-  { id: 'browser-ingresos-1', username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
-  { id: 'browser-admin-1', username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!' },
+type BrowserUser = UserSummary & { password: string }
+
+const seededDepartments: DepartmentSummary[] = [
+  { id: 'browser-dept-control', code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.', isActive: true },
+  { id: 'browser-dept-ingresos', code: 'INGRESOS_PROPIOS', name: 'Ingresos Propios', description: 'Cobros, tarifas, consecutivos y emision de ROC.', isActive: true },
+  { id: 'browser-dept-admin', code: 'ADMINISTRACION', name: 'Administracion General', description: 'Administracion de usuarios, catalogos y configuracion institucional.', isActive: true },
+  { id: 'browser-dept-direccion', code: 'DIRECCION', name: 'Direccion', description: 'Departamento directivo preparado para crecimiento modular.', isActive: true },
+]
+
+const browserUsers: BrowserUser[] = [
+  { id: 'browser-control-1', username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', departmentId: 'browser-dept-control', departmentName: 'Control Escolar', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Control123!' },
+  { id: 'browser-ingresos-1', username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', departmentId: 'browser-dept-ingresos', departmentName: 'Ingresos Propios', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Ingresos123!' },
+  { id: 'browser-admin-1', username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', departmentId: 'browser-dept-admin', departmentName: 'Administracion General', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Admin123!' },
 ]
 
 type BrowserAdmissionRecord = AdmissionSummary
@@ -222,6 +236,56 @@ function safeParse<T>(raw: string | null, fallback: T): T {
     return JSON.parse(raw) as T
   } catch {
     return fallback
+  }
+}
+
+function getDepartments() {
+  const saved = safeParse<DepartmentSummary[]>(window.localStorage.getItem(DEPARTMENTS_KEY), [])
+  if (saved.length > 0) {
+    return saved
+  }
+
+  window.localStorage.setItem(DEPARTMENTS_KEY, JSON.stringify(seededDepartments))
+  return seededDepartments
+}
+
+function getUsers() {
+  const saved = safeParse<BrowserUser[]>(window.localStorage.getItem(USERS_KEY), [])
+  if (saved.length > 0) {
+    return saved
+  }
+
+  window.localStorage.setItem(USERS_KEY, JSON.stringify(browserUsers))
+  return browserUsers
+}
+
+function saveUsers(users: BrowserUser[]) {
+  window.localStorage.setItem(USERS_KEY, JSON.stringify(users))
+}
+
+function toPublicUser(user: BrowserUser): UserSummary {
+  const { password: _password, ...publicUser } = user
+  return publicUser
+}
+
+function resolveDepartment(departmentId: string | null | undefined) {
+  if (!departmentId) return null
+  const department = getDepartments().find((item) => item.id === departmentId && item.isActive)
+  if (!department) {
+    throw new Error('Selecciona un departamento activo.')
+  }
+  return department
+}
+
+function assertCanChangeBrowserAdmin(userId: string, role: UserSummary['role'], isActive: boolean) {
+  const users = getUsers()
+  const current = users.find((item) => item.id === userId)
+  if (!current) throw new Error('Usuario no encontrado.')
+  const removesActiveAdmin = current.role === 'ADMIN' && current.isActive && (role !== 'ADMIN' || !isActive)
+  if (!removesActiveAdmin) return
+  const activeAdminCount = users.filter((item) => item.role === 'ADMIN' && item.isActive).length
+  if (activeAdminCount <= 1) {
+    throw new Error('Debe quedar al menos un administrador activo.')
   }
 }
 
@@ -427,7 +491,7 @@ export const browserFallbackApi = {
   auth: {
     async login(input: AuthLoginInput) {
       const username = input.username.trim().toLowerCase()
-      const user = browserUsers.find((item) => item.username === username && item.password === input.password)
+      const user = getUsers().find((item) => item.username === username && item.password === input.password && item.isActive)
       if (!user) {
         throw new Error('Credenciales invalidas.')
       }
@@ -447,6 +511,68 @@ export const browserFallbackApi = {
     },
     async session() {
       return getSession()
+    },
+  },
+  admin: {
+    async listDepartments() {
+      return getDepartments()
+    },
+    async listUsers() {
+      return getUsers().map(toPublicUser)
+    },
+    async createUser(input: UserCreateInput) {
+      const users = getUsers()
+      const username = input.username.trim().toLowerCase()
+      if (users.some((item) => item.username === username)) {
+        throw new Error('El nombre de usuario ya existe.')
+      }
+
+      const department = resolveDepartment(input.departmentId ?? null)
+      const now = new Date().toISOString()
+      const user: BrowserUser = {
+        id: crypto.randomUUID(),
+        username,
+        displayName: input.displayName.trim(),
+        role: input.role,
+        departmentId: department?.id ?? null,
+        departmentName: department?.name ?? null,
+        isActive: input.isActive,
+        createdAt: now,
+        updatedAt: now,
+        password: input.password,
+      }
+      saveUsers([user, ...users])
+      return toPublicUser(user)
+    },
+    async updateUser(userId: string, input: UserUpdateInput) {
+      assertCanChangeBrowserAdmin(userId, input.role, input.isActive)
+      const department = resolveDepartment(input.departmentId ?? null)
+      const users = getUsers()
+      const updatedUsers = users.map((item) => item.id === userId
+        ? {
+            ...item,
+            displayName: input.displayName.trim(),
+            role: input.role,
+            departmentId: department?.id ?? null,
+            departmentName: department?.name ?? null,
+            isActive: input.isActive,
+            updatedAt: new Date().toISOString(),
+          }
+        : item)
+      saveUsers(updatedUsers)
+      const updated = updatedUsers.find((item) => item.id === userId)
+      if (!updated) throw new Error('Usuario no encontrado.')
+      return toPublicUser(updated)
+    },
+    async resetUserPassword(userId: string, input: UserResetPasswordInput) {
+      const users = getUsers()
+      const updatedUsers = users.map((item) => item.id === userId
+        ? { ...item, password: input.password, updatedAt: new Date().toISOString() }
+        : item)
+      saveUsers(updatedUsers)
+      const updated = updatedUsers.find((item) => item.id === userId)
+      if (!updated) throw new Error('Usuario no encontrado.')
+      return toPublicUser(updated)
     },
   },
   students: {
@@ -846,12 +972,15 @@ export const browserFallbackApi = {
     async previewRoster() {
       return []
     },
-    async listAssignedRoster(): Promise<GroupAssignedRosterRow[]> {
-      return []
-    },
-    async exportAssignedRoster(): Promise<GroupRosterExportResult> {
-      return { outputPath: 'browser-download', exportedCount: 0 }
-    },
+      async listAssignedRoster(): Promise<GroupAssignedRosterRow[]> {
+        return []
+      },
+      async importAssignedRoster(_input: { schoolCycle: string; sourcePath?: string | null; rows: GroupRosterImportRow[] }): Promise<GroupRosterImportResult> {
+        throw new Error('La importacion de grupos desde Excel solo esta disponible en la app de escritorio.')
+      },
+      async exportAssignedRoster(): Promise<GroupRosterExportResult> {
+        return { outputPath: 'browser-download', exportedCount: 0 }
+      },
     async printAssignedRoster() {
       window.print()
       return { ok: true, mode: 'browser-fallback' }

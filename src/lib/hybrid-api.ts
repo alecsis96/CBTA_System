@@ -5,6 +5,7 @@ import type {
   CashPaymentBatchCreateResult,
   CashPaymentCreateInput,
   ConceptSuggestionUpdateInput,
+  GroupRosterImportRow,
   RocCancelInput,
   RocNextNumberResult,
   RocMonthlyExportInput,
@@ -13,6 +14,7 @@ import type {
   StudentFormInput,
   TariffUpdateInput,
 } from '@/types/domain'
+import type { UserCreateInput, UserResetPasswordInput, UserUpdateInput } from '@/types/admin'
 
 type AppApi = Window['cbta']
 
@@ -35,9 +37,10 @@ const configuredBaseUrl = import.meta.env.VITE_HYBRID_API_URL?.trim()
 const configuredApiKey = import.meta.env.VITE_HYBRID_API_KEY?.trim() ?? import.meta.env.VITE_SYNC_API_KEY?.trim() ?? ''
 const derivedBaseUrl = import.meta.env.VITE_SYNC_API_URL?.trim()?.replace(/\/api\/sync\/op\/?$/, '') ?? ''
 const remoteBaseUrl = configuredBaseUrl || derivedBaseUrl
+const useRemoteHybrid = import.meta.env.VITE_USE_REMOTE_HYBRID?.trim() !== 'false'
 
 function isRemoteConfigured() {
-  return remoteBaseUrl.length > 0 && configuredApiKey.length > 0
+  return useRemoteHybrid && remoteBaseUrl.length > 0 && configuredApiKey.length > 0
 }
 
 function buildHeaders(getActor: ActorGetter) {
@@ -87,6 +90,27 @@ function saveBase64Workbook(base64: string, fileName: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+function printRemoteAssignedRoster(rows: Array<{ groupLabel: string; enrollmentNumber: string; fullName: string; curp: string; sex: string; secondaryAverage: number | null; averageBand: string; status: string }>) {
+  const groups = Array.from(new Set(rows.map((row) => row.groupLabel))).sort((a, b) => a.localeCompare(b))
+  const sections = groups.map((group) => {
+    const items = rows
+      .filter((row) => row.groupLabel === group)
+      .map((row) => `<tr><td>${row.enrollmentNumber}</td><td>${row.fullName}</td><td>${row.curp}</td><td>${row.sex}</td><td>${row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1)}</td><td>${row.averageBand.toUpperCase()}</td><td>${row.status}</td></tr>`)
+      .join('')
+    return `<section><h2>Grupo ${group}</h2><table><thead><tr><th>Folio interno</th><th>Alumno</th><th>CURP</th><th>Sexo</th><th>Promedio</th><th>Banda</th><th>Estatus</th></tr></thead><tbody>${items}</tbody></table></section>`
+  }).join('')
+
+  const popup = window.open('', '_blank', 'noopener,noreferrer,width=1200,height=900')
+  if (!popup) {
+    throw new Error('No se pudo abrir la ventana de impresion del listado de grupos.')
+  }
+
+  popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Listado de grupos asignados</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{margin:0 0 18px}h2{margin:22px 0 10px}table{width:100%;border-collapse:collapse;margin-bottom:12px}th,td{border:1px solid #c9d6c9;padding:8px;text-align:left;font-size:12px}th{background:#eef5ee}</style></head><body><h1>Listado de grupos asignados</h1>${sections}</body></html>`)
+  popup.document.close()
+  popup.focus()
+  popup.print()
+}
+
 function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail {
   const guardian = (student.guardian as Record<string, unknown> | null) ?? null
   return {
@@ -128,6 +152,64 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
 export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi {
   return {
     ...localApi,
+    admin: {
+      ...localApi.admin,
+      listDepartments: async () => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['admin']['listDepartments']>> }>('/api/hybrid/admin/departments', { method: 'GET' }, getActor)
+            return data.items
+          } catch {
+            return localApi.admin.listDepartments()
+          }
+        }
+        return localApi.admin.listDepartments()
+      },
+      listUsers: async () => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['admin']['listUsers']>> }>('/api/hybrid/admin/users', { method: 'GET' }, getActor)
+            return data.items
+          } catch {
+            return localApi.admin.listUsers()
+          }
+        }
+        return localApi.admin.listUsers()
+      },
+      createUser: async (input: UserCreateInput) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ user: Awaited<ReturnType<AppApi['admin']['createUser']>> }>('/api/hybrid/admin/users', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.user
+          } catch {
+            return localApi.admin.createUser(input)
+          }
+        }
+        return localApi.admin.createUser(input)
+      },
+      updateUser: async (userId: string, input: UserUpdateInput) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ user: Awaited<ReturnType<AppApi['admin']['updateUser']>> }>(`/api/hybrid/admin/users/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(input) }, getActor)
+            return data.user
+          } catch {
+            return localApi.admin.updateUser(userId, input)
+          }
+        }
+        return localApi.admin.updateUser(userId, input)
+      },
+      resetUserPassword: async (userId: string, input: UserResetPasswordInput) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ user: Awaited<ReturnType<AppApi['admin']['resetUserPassword']>> }>(`/api/hybrid/admin/users/${encodeURIComponent(userId)}/reset-password`, { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.user
+          } catch {
+            return localApi.admin.resetUserPassword(userId, input)
+          }
+        }
+        return localApi.admin.resetUserPassword(userId, input)
+      },
+    },
     students: {
       ...localApi.students,
       list: async () => {
@@ -299,6 +381,90 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           return data.result
         }
         return localApi.receipts.cancel(input)
+      },
+    },
+    groups: {
+      ...localApi.groups,
+      stats: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['stats']>> }>('/api/hybrid/groups/stats', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.items
+        }
+        return localApi.groups.stats(input)
+      },
+      preview: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['preview']>> }>('/api/hybrid/groups/preview', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.items
+        }
+        return localApi.groups.preview(input)
+      },
+      previewRoster: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['previewRoster']>> }>('/api/hybrid/groups/preview-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.items
+        }
+        return localApi.groups.previewRoster(input)
+      },
+      autoAssign: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['autoAssign']>> }>('/api/hybrid/groups/auto-assign', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.groups.autoAssign(input)
+      },
+      confirmAssignment: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['confirmAssignment']>> }>('/api/hybrid/groups/confirm', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.groups.confirmAssignment(input)
+      },
+      manualReassign: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['manualReassign']>> }>('/api/hybrid/groups/manual-reassign', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.groups.manualReassign(input)
+      },
+      markNoShow: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['markNoShow']>> }>('/api/hybrid/groups/no-show', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.groups.markNoShow(input)
+      },
+      listAssignedRoster: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['listAssignedRoster']>> }>('/api/hybrid/groups/list-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.items
+        }
+        return localApi.groups.listAssignedRoster(input)
+      },
+      importAssignedRoster: async (input: { schoolCycle: string; sourcePath?: string | null; rows: GroupRosterImportRow[] }) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['importAssignedRoster']>> }>('/api/hybrid/groups/import-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.groups.importAssignedRoster(input)
+      },
+      exportAssignedRoster: async (input) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['exportAssignedRoster']>> & { workbookBase64?: string; fileName?: string } }>('/api/hybrid/groups/export-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          if (data.result.workbookBase64) {
+            saveBase64Workbook(data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
+          }
+          return data.result
+        }
+        return localApi.groups.exportAssignedRoster(input)
+      },
+      printAssignedRoster: async (input) => {
+        if (canUseRemoteNow()) {
+          const rows = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['listAssignedRoster']>> }>('/api/hybrid/groups/list-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          printRemoteAssignedRoster(rows.items)
+          return { ok: true, mode: 'remote-hybrid' }
+        }
+        return localApi.groups.printAssignedRoster(input)
       },
     },
     audit: {

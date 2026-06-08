@@ -8,6 +8,13 @@ contextBridge.exposeInMainWorld('cbta', {
     logout: () => ipcRenderer.invoke('auth:logout'),
     session: () => ipcRenderer.invoke('auth:session'),
   },
+  admin: {
+    listDepartments: () => ipcRenderer.invoke('admin:departments:list'),
+    listUsers: () => ipcRenderer.invoke('admin:users:list'),
+    createUser: (input: unknown) => ipcRenderer.invoke('admin:users:create', input),
+    updateUser: (userId: string, input: unknown) => ipcRenderer.invoke('admin:users:update', userId, input),
+    resetUserPassword: (userId: string, input: unknown) => ipcRenderer.invoke('admin:users:resetPassword', userId, input),
+  },
   students: {
     list: () => ipcRenderer.invoke('students:list'),
     listValidated: () => ipcRenderer.invoke('students:listValidated'),
@@ -58,6 +65,7 @@ contextBridge.exposeInMainWorld('cbta', {
     preview: (input: unknown) => ipcRenderer.invoke('groups:preview', input),
     previewRoster: (input: unknown) => ipcRenderer.invoke('groups:previewRoster', input),
     listAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:listAssignedRoster', input),
+    importAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:importAssignedRoster', input),
     exportAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:exportAssignedRoster', input),
     printAssignedRoster: (input: unknown) => ipcRenderer.invoke('groups:printAssignedRoster', input),
   },

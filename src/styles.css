@@ -1187,6 +1187,50 @@ input:disabled {
   gap: 18px;
 }
 
+.config-tabs {
+  display: inline-flex;
+  gap: 8px;
+  padding: 6px;
+  margin-bottom: 18px;
+  border: 1px solid #d8e3d7;
+  border-radius: 14px;
+  background: #f8fbf8;
+}
+
+.config-tab {
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 10px;
+  color: #355143;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.config-tab.active {
+  color: #f8fff9;
+  background: #1f6a3a;
+}
+
+.admin-users-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-user-form {
+  display: grid;
+  gap: 14px;
+}
+
+.compact-form-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.admin-active-toggle {
+  align-self: end;
+  min-height: 44px;
+}
+
 .tariff-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 360px) 1fr;
@@ -1605,6 +1649,10 @@ input:disabled {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .compact-form-grid {
     grid-template-columns: 1fr;
   }
 

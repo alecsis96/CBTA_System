@@ -11,6 +11,8 @@ import type {
   ChargeConceptSummary,
   ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
+  GroupRosterImportRow,
+  GroupRosterImportResult,
   GroupRosterExportResult,
   PreRegistrationCreateInput,
   PreRegistrationStatusUpdateInput,
@@ -33,6 +35,7 @@ import type {
   StudentSummary,
   TariffUpdateInput,
 } from '@/types/domain'
+import type { DepartmentSummary, UserCreateInput, UserResetPasswordInput, UserSummary, UserUpdateInput } from '@/types/admin'
 
 type CbtaApi = {
   appName: string
@@ -40,6 +43,13 @@ type CbtaApi = {
     login: (input: AuthLoginInput) => Promise<AuthSession>
     logout: () => Promise<{ ok: boolean }>
     session: () => Promise<AuthSession | null>
+  }
+  admin: {
+    listDepartments: () => Promise<DepartmentSummary[]>
+    listUsers: () => Promise<UserSummary[]>
+    createUser: (input: UserCreateInput) => Promise<UserSummary>
+    updateUser: (userId: string, input: UserUpdateInput) => Promise<UserSummary>
+    resetUserPassword: (userId: string, input: UserResetPasswordInput) => Promise<UserSummary>
   }
   students: {
     list: () => Promise<StudentSummary[]>
@@ -90,6 +100,7 @@ type CbtaApi = {
     preview: (input: { schoolCycle: string }) => Promise<GroupStat[]>
     previewRoster: (input: { schoolCycle: string }) => Promise<GroupPreviewRow[]>
     listAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupAssignedRosterRow[]>
+    importAssignedRoster: (input: { schoolCycle: string; sourcePath?: string | null; rows: GroupRosterImportRow[] }) => Promise<GroupRosterImportResult>
     exportAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupRosterExportResult>
     printAssignedRoster: (input: { schoolCycle: string }) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
   }

@@ -1,12 +1,12 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { scryptSync, timingSafeEqual } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import * as XLSX from 'xlsx'
 import { prisma } from './db'
 import { exportOfficialRocTemplateBatch, openOfficialRocTemplate, type RocTemplatePayload } from './roc-template'
+import { buildPasswordHash, verifyPassword } from '../shared/auth-password'
 
 type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
 
@@ -19,26 +19,32 @@ type SessionUser = {
 
 let currentSession: SessionUser | null = null
 const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
+const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'])
 
 const authLoginSchema = z.object({
   username: z.string().trim().min(1),
   password: z.string().min(1),
 })
 
-function verifyPassword(password: string, passwordHash: string) {
-  const [prefix, salt, digest] = passwordHash.split('$')
-  if (prefix !== 'scrypt' || !salt || !digest) {
-    return false
-  }
+const adminUserCreateSchema = z.object({
+  username: z.string().trim().min(1),
+  displayName: z.string().trim().min(1),
+  role: appRoleSchema,
+  departmentId: z.string().trim().min(1).nullable().optional(),
+  isActive: z.boolean().default(true),
+  password: z.string().min(8),
+})
 
-  const expected = Buffer.from(digest, 'hex')
-  const current = scryptSync(password, salt, expected.length)
-  if (expected.length !== current.length) {
-    return false
-  }
+const adminUserUpdateSchema = z.object({
+  displayName: z.string().trim().min(1),
+  role: appRoleSchema,
+  departmentId: z.string().trim().min(1).nullable().optional(),
+  isActive: z.boolean(),
+})
 
-  return timingSafeEqual(expected, current)
-}
+const adminUserResetPasswordSchema = z.object({
+  password: z.string().min(8),
+})
 
 function authSessionSummary() {
   return currentSession
@@ -59,6 +65,80 @@ function requireRole(allowedRoles: AppRole[], actionLabel: string) {
   }
 
   return session
+}
+
+type DepartmentRecord = {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  isActive: boolean
+}
+
+type UserRecord = {
+  id: string
+  username: string
+  displayName: string
+  role: string
+  departmentId: string | null
+  isActive: boolean
+  createdAt: Date
+  updatedAt: Date
+  department: DepartmentRecord | null
+}
+
+function departmentSummary(department: DepartmentRecord) {
+  return {
+    id: department.id,
+    code: department.code,
+    name: department.name,
+    description: department.description,
+    isActive: department.isActive,
+  }
+}
+
+function userSummary(user: UserRecord) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role as AppRole,
+    departmentId: user.departmentId,
+    departmentName: user.department?.name ?? null,
+    isActive: user.isActive,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
+  }
+}
+
+async function assertActiveDepartment(departmentId: string | null | undefined) {
+  if (!departmentId) {
+    return null
+  }
+
+  const department = await prisma.department.findUnique({ where: { id: departmentId } })
+  if (!department || !department.isActive) {
+    throw new Error('Selecciona un departamento activo.')
+  }
+
+  return department
+}
+
+async function assertCanChangeAdminStatus(userId: string, nextRole: AppRole, nextIsActive: boolean) {
+  const current = await prisma.user.findUnique({ where: { id: userId }, select: { role: true, isActive: true } })
+  if (!current) {
+    throw new Error('No se encontro el usuario.')
+  }
+
+  const removesActiveAdmin = current.role === 'ADMIN' && current.isActive && (nextRole !== 'ADMIN' || !nextIsActive)
+  if (!removesActiveAdmin) {
+    return
+  }
+
+  const activeAdminCount = await prisma.user.count({ where: { role: 'ADMIN', isActive: true } })
+  if (activeAdminCount <= 1) {
+    throw new Error('Debe quedar al menos un administrador activo.')
+  }
 }
 
 const studentInputSchema = z.object({
@@ -255,6 +335,18 @@ const saveRequirementChecklistSchema = z.object({
 
 const groupAssignedRosterSchema = z.object({
   schoolCycle: z.string().min(1),
+})
+
+const importAssignedRosterSchema = z.object({
+  schoolCycle: z.string().min(1),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(z.object({
+    sheetName: z.string().trim().min(1),
+    rowNumber: z.number().int().min(1),
+    groupLabel: z.string().trim().min(1),
+    enrollmentNumber: z.string().trim().nullable(),
+    curp: z.string().trim().nullable(),
+  })).min(1),
 })
 
 function escapeHtml(value: string) {
@@ -1102,6 +1194,112 @@ function sexBucket(value: string | null) {
 type AssignmentSex = 'MUJER' | 'HOMBRE' | 'NO_ESPECIFICADO'
 type AssignmentBand = 'alto' | 'medio' | 'bajo'
 
+type ImportedGroupRow = {
+  sheetName: string
+  rowNumber: number
+  groupLabel: string
+  enrollmentNumber: string | null
+  curp: string | null
+}
+
+const GROUP_COLUMN_ALIASES = ['grupo', 'group', 'grupo asignado', 'grupo destino', 'group label']
+const ENROLLMENT_COLUMN_ALIASES = ['folio interno', 'matricula', 'matricula interna', 'enrollment number', 'enrollmentnumber', 'numero de control']
+const CURP_COLUMN_ALIASES = ['curp']
+
+function normalizeSheetCell(value: unknown) {
+  return String(value ?? '').trim()
+}
+
+function normalizeSheetUpper(value: unknown) {
+  return normalizeSheetCell(value).toUpperCase()
+}
+
+function normalizeSheetHeader(value: unknown) {
+  return normalizeSheetCell(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function pickSheetValue(row: Record<string, unknown>, aliases: string[]) {
+  for (const [rawKey, rawValue] of Object.entries(row)) {
+    const normalizedKey = normalizeSheetHeader(rawKey)
+    if (aliases.includes(normalizedKey)) {
+      return rawValue
+    }
+  }
+
+  return ''
+}
+
+function parseImportedRosterWorkbook(workbookPath: string) {
+  const workbook = XLSX.readFile(workbookPath)
+  const rows: ImportedGroupRow[] = []
+  const issues: string[] = []
+  let skippedCount = 0
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) continue
+
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
+    for (const [index, row] of sheetRows.entries()) {
+      const rowNumber = index + 2
+      const groupCandidate = normalizeSheetUpper(pickSheetValue(row, GROUP_COLUMN_ALIASES)) || normalizeSheetUpper(sheetName)
+      const enrollmentNumber = normalizeSheetCell(pickSheetValue(row, ENROLLMENT_COLUMN_ALIASES)) || null
+      const curp = normalizeSheetUpper(pickSheetValue(row, CURP_COLUMN_ALIASES)) || null
+
+      if (!groupCandidate && !enrollmentNumber && !curp) {
+        continue
+      }
+
+      if (!groupCandidate) {
+        skippedCount += 1
+        issues.push(`Fila ${rowNumber} en ${sheetName}: falta la columna o valor de Grupo.`)
+        continue
+      }
+
+      if (!enrollmentNumber && !curp) {
+        skippedCount += 1
+        issues.push(`Fila ${rowNumber} en ${sheetName}: agrega CURP o Folio interno para localizar al alumno.`)
+        continue
+      }
+
+      rows.push({
+        sheetName,
+        rowNumber,
+        groupLabel: groupCandidate,
+        enrollmentNumber,
+        curp,
+      })
+    }
+  }
+
+  return {
+    rows,
+    skippedCount,
+    issues,
+  }
+}
+
+function normalizeImportedGroupLabel(value: string) {
+  const normalized = value.trim().toUpperCase()
+  if (/^[A-Z]$/.test(normalized)) return `1${normalized}`
+  return normalized
+}
+
+function extractEnrollmentSequenceKey(value: string | null | undefined) {
+  const normalized = (value ?? '').trim()
+  if (!normalized) return null
+  if (/^\d{1,4}$/.test(normalized)) {
+    return normalized.padStart(4, '0')
+  }
+  const match = normalized.match(/(\d{4})$/)
+  return match ? match[1] : null
+}
+
 function buildGroupLabel(index: number) {
   return `1${String.fromCharCode(65 + index)}`
 }
@@ -1466,6 +1664,131 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('auth:session', async () => authSessionSummary())
+
+  ipcMain.handle('admin:departments:list', async () => {
+    requireRole(['ADMIN'], 'consultar departamentos')
+    const departments = await prisma.department.findMany({ orderBy: { name: 'asc' } })
+    return departments.map(departmentSummary)
+  })
+
+  ipcMain.handle('admin:users:list', async () => {
+    requireRole(['ADMIN'], 'consultar usuarios')
+    const users = await prisma.user.findMany({
+      orderBy: [{ role: 'asc' }, { username: 'asc' }],
+      include: { department: true },
+    })
+    return users.map(userSummary)
+  })
+
+  ipcMain.handle('admin:users:create', async (_event, payload) => {
+    const actor = requireRole(['ADMIN'], 'crear usuarios')
+    const input = adminUserCreateSchema.parse(payload)
+    const username = input.username.trim().toLowerCase()
+    const department = await assertActiveDepartment(input.departmentId ?? null)
+
+    try {
+      const created = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            username,
+            displayName: input.displayName.trim(),
+            role: input.role,
+            departmentId: department?.id ?? null,
+            isActive: input.isActive,
+            passwordHash: buildPasswordHash(input.password),
+          },
+          include: { department: true },
+        })
+
+        await tx.auditLog.create({
+          data: {
+            userId: actor.id,
+            entityType: 'USER',
+            entityId: user.id,
+            action: 'CREATE_USER',
+            afterJson: JSON.stringify({ summary: `${user.username} - ${user.displayName}`, role: user.role }),
+          },
+        })
+
+        return user
+      })
+
+      return userSummary(created)
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new Error('El nombre de usuario ya existe.')
+      }
+
+      throw error
+    }
+  })
+
+  ipcMain.handle('admin:users:update', async (_event, userId, payload) => {
+    const actor = requireRole(['ADMIN'], 'editar usuarios')
+    const id = z.string().min(1).parse(userId)
+    const input = adminUserUpdateSchema.parse(payload)
+    const department = await assertActiveDepartment(input.departmentId ?? null)
+    await assertCanChangeAdminStatus(id, input.role, input.isActive)
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id },
+        data: {
+          displayName: input.displayName.trim(),
+          role: input.role,
+          departmentId: department?.id ?? null,
+          isActive: input.isActive,
+        },
+        include: { department: true },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'USER',
+          entityId: user.id,
+          action: 'UPDATE_USER',
+          afterJson: JSON.stringify({ summary: `${user.username} - ${user.displayName}`, role: user.role, isActive: user.isActive }),
+        },
+      })
+
+      return user
+    })
+
+    if (currentSession?.id === updated.id && (!updated.isActive || updated.role !== 'ADMIN')) {
+      currentSession = null
+    }
+
+    return userSummary(updated)
+  })
+
+  ipcMain.handle('admin:users:resetPassword', async (_event, userId, payload) => {
+    const actor = requireRole(['ADMIN'], 'restablecer contrasenas')
+    const id = z.string().min(1).parse(userId)
+    const input = adminUserResetPasswordSchema.parse(payload)
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id },
+        data: { passwordHash: buildPasswordHash(input.password) },
+        include: { department: true },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'USER',
+          entityId: user.id,
+          action: 'RESET_USER_PASSWORD',
+          afterJson: JSON.stringify({ summary: `${user.username} - ${user.displayName}` }),
+        },
+      })
+
+      return user
+    })
+
+    return userSummary(updated)
+  })
 
   ipcMain.handle('admissions:list', async (_event, rawFilters) => {
     requireAuth()
@@ -2990,6 +3313,150 @@ export function registerIpcHandlers() {
     })
 
     return rows.map(assignedRosterRow)
+  })
+
+  ipcMain.handle('groups:importAssignedRoster', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'importar grupos desde Excel')
+    const input = importAssignedRosterSchema.parse(payload)
+    const dedupedRows = new Map<string, ImportedGroupRow>()
+    const issues: string[] = []
+    for (const row of input.rows) {
+      const key = row.curp ? `curp:${row.curp}` : `folio:${row.enrollmentNumber}`
+      const existing = dedupedRows.get(key)
+      if (existing) {
+        issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: se repite el alumno ${row.curp ?? row.enrollmentNumber}; se conserva la ultima asignacion.`)
+      }
+      dedupedRows.set(key, row)
+    }
+
+    const rows = Array.from(dedupedRows.values()).map((row) => ({
+      ...row,
+      groupLabel: normalizeImportedGroupLabel(row.groupLabel),
+    }))
+    const schoolCycle = input.schoolCycle.trim()
+    const groupLabels = Array.from(new Set(rows.map((row) => row.groupLabel))).sort((left, right) => left.localeCompare(right))
+    const existingGroups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle, shift: MATUTINO_SHIFT, label: { in: groupLabels } },
+      select: { label: true },
+    })
+    const existingGroupLabels = new Set(existingGroups.map((group) => group.label))
+
+    await prisma.$transaction(
+      groupLabels.map((label) =>
+        prisma.intakeGroup.upsert({
+          where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } },
+          update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY },
+          create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+        }),
+      ),
+    )
+
+    const groups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle, shift: MATUTINO_SHIFT, label: { in: groupLabels } },
+      select: { id: true, label: true },
+    })
+    const groupByLabel = new Map(groups.map((group) => [group.label, group]))
+    const enrollmentNumbers = rows.map((row) => row.enrollmentNumber).filter((value): value is string => Boolean(value))
+    const curps = rows.map((row) => row.curp).filter((value): value is string => Boolean(value))
+    const students = await prisma.student.findMany({
+      where: {
+        schoolCycle,
+        OR: [
+          { enrollmentNumber: { in: enrollmentNumbers.length > 0 ? enrollmentNumbers : ['__never__'] } },
+          { curp: { in: curps.length > 0 ? curps : ['__never__'] } },
+        ],
+      },
+      include: {
+        groupAssignment: {
+          include: {
+            group: true,
+          },
+        },
+      },
+    })
+
+    const studentByEnrollment = new Map(students.map((student) => [student.enrollmentNumber, student]))
+    const studentByCurp = new Map(students.map((student) => [student.curp.toUpperCase(), student]))
+    const studentBySequence = new Map(students.map((student) => [extractEnrollmentSequenceKey(student.enrollmentNumber), student] as const).filter((entry): entry is [string, typeof students[number]] => Boolean(entry[0])))
+    let importedCount = 0
+    let unmatchedCount = 0
+
+    await prisma.$transaction(async (tx) => {
+      for (const row of rows) {
+        const enrollmentSequenceKey = extractEnrollmentSequenceKey(row.enrollmentNumber)
+        const student =
+          (row.enrollmentNumber ? studentByEnrollment.get(row.enrollmentNumber) : undefined) ??
+          (row.curp ? studentByCurp.get(row.curp) : undefined) ??
+          (enrollmentSequenceKey ? studentBySequence.get(enrollmentSequenceKey) : undefined)
+
+        if (!student) {
+          unmatchedCount += 1
+          issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: no se encontro alumno para ${row.curp ?? row.enrollmentNumber} en el ciclo ${schoolCycle}.`)
+          continue
+        }
+
+        const targetGroup = groupByLabel.get(row.groupLabel)
+        if (!targetGroup) {
+          unmatchedCount += 1
+          issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: el grupo ${row.groupLabel} no pudo prepararse para importar.`)
+          continue
+        }
+
+        const existingAssignment = student.groupAssignment
+        const assignment = existingAssignment
+          ? await tx.studentGroupAssignment.update({
+            where: { id: existingAssignment.id },
+            data: {
+              groupId: targetGroup.id,
+              status: 'ASIGNADO',
+              updatedById: actor.id,
+              reason: 'IMPORTACION_EXCEL',
+            },
+          })
+          : await tx.studentGroupAssignment.create({
+            data: {
+              studentId: student.id,
+              groupId: targetGroup.id,
+              status: 'ASIGNADO',
+              assignedById: actor.id,
+              updatedById: actor.id,
+              reason: 'IMPORTACION_EXCEL',
+            },
+          })
+
+        await tx.student.update({
+          where: { id: student.id },
+          data: { enrollmentStatus: 'ASIGNADO' },
+        })
+
+        await tx.groupAssignmentAudit.create({
+          data: {
+            assignmentId: assignment.id,
+            studentId: student.id,
+            beforeGroupId: existingAssignment?.groupId ?? null,
+            beforeGroupLabel: existingAssignment?.group.label ?? null,
+            afterGroupId: targetGroup.id,
+            afterGroupLabel: targetGroup.label,
+            actorId: actor.id,
+            actorRole: actor.role,
+            reason: 'IMPORTACION_EXCEL',
+          },
+        })
+
+        importedCount += 1
+      }
+    })
+
+    return {
+      ok: true,
+      canceled: false,
+      sourcePath: input.sourcePath ?? null,
+      importedCount,
+      createdGroupCount: groupLabels.filter((label) => !existingGroupLabels.has(label)).length,
+      skippedCount: 0,
+      unmatchedCount,
+      issues: issues.slice(0, 12),
+    }
   })
 
   ipcMain.handle('groups:exportAssignedRoster', async (_event, payload) => {

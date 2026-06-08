@@ -1,39 +1,20 @@
-import { randomBytes, scryptSync } from 'node:crypto'
 import { prisma } from './prisma'
+import { buildPasswordHash, isValidPasswordHash } from '../shared/auth-password'
 
-const AUTH_HASH_PREFIX = 'scrypt'
-
-function buildPasswordHash(password: string) {
-  const salt = randomBytes(16).toString('hex')
-  const derived = scryptSync(password, salt, 64).toString('hex')
-  return `${AUTH_HASH_PREFIX}$${salt}$${derived}`
-}
-
-function isValidPasswordHash(passwordHash: string) {
-  if (!passwordHash.startsWith(`${AUTH_HASH_PREFIX}$`)) {
-    return false
-  }
-
-  const parts = passwordHash.split('$')
-  if (parts.length !== 3) {
-    return false
-  }
-
-  const [prefix, salt, digest] = parts
-  if (prefix !== AUTH_HASH_PREFIX || !salt || !digest) {
-    return false
-  }
-
-  return /^[a-f0-9]+$/i.test(salt) && /^[a-f0-9]+$/i.test(digest)
-}
+const seedDepartments = [
+  { code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.' },
+  { code: 'INGRESOS_PROPIOS', name: 'Ingresos Propios', description: 'Cobros, tarifas, consecutivos y emision de ROC.' },
+  { code: 'ADMINISTRACION', name: 'Administracion General', description: 'Administracion de usuarios, catalogos y configuracion institucional.' },
+  { code: 'DIRECCION', name: 'Direccion', description: 'Departamento directivo preparado para crecimiento modular.' },
+] as const
 
 const seedUsers = [
-  { username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
-  { username: 'control.escolar.2', displayName: 'Control Escolar 2', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
-  { username: 'control.escolar.3', displayName: 'Control Escolar 3', role: 'CONTROL_ESCOLAR', password: 'Control123!' },
-  { username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
-  { username: 'ingresos.propios.2', displayName: 'Ingresos Propios 2', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!' },
-  { username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!' },
+  { username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', password: 'Control123!', departmentCode: 'CONTROL_ESCOLAR' },
+  { username: 'control.escolar.2', displayName: 'Control Escolar 2', role: 'CONTROL_ESCOLAR', password: 'Control123!', departmentCode: 'CONTROL_ESCOLAR' },
+  { username: 'control.escolar.3', displayName: 'Control Escolar 3', role: 'CONTROL_ESCOLAR', password: 'Control123!', departmentCode: 'CONTROL_ESCOLAR' },
+  { username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!', departmentCode: 'INGRESOS_PROPIOS' },
+  { username: 'ingresos.propios.2', displayName: 'Ingresos Propios 2', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!', departmentCode: 'INGRESOS_PROPIOS' },
+  { username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!', departmentCode: 'ADMINISTRACION' },
 ] as const
 
 const baseConcepts = [
@@ -67,11 +48,27 @@ const enrollmentRequirements = [
 ] as const
 
 export async function ensureBackendBaseData() {
+  const departmentByCode = new Map<string, { id: string }>()
+  for (const department of seedDepartments) {
+    const item = await prisma.department.upsert({
+      where: { code: department.code },
+      update: {
+        name: department.name,
+        description: department.description,
+        isActive: true,
+      },
+      create: department,
+      select: { id: true, code: true },
+    })
+    departmentByCode.set(item.code, { id: item.id })
+  }
+
   for (const user of seedUsers) {
     const existing = await prisma.user.findUnique({ where: { username: user.username } })
     const passwordHash = existing?.passwordHash && isValidPasswordHash(existing.passwordHash)
       ? existing.passwordHash
       : buildPasswordHash(user.password)
+    const department = departmentByCode.get(user.departmentCode)
 
     await prisma.user.upsert({
       where: { username: user.username },
@@ -80,6 +77,7 @@ export async function ensureBackendBaseData() {
         role: user.role,
         isActive: true,
         passwordHash,
+        ...(department ? { departmentId: department.id } : {}),
       },
       create: {
         username: user.username,
@@ -87,6 +85,7 @@ export async function ensureBackendBaseData() {
         role: user.role,
         isActive: true,
         passwordHash,
+        ...(department ? { departmentId: department.id } : {}),
       },
     })
   }
