@@ -8,9 +8,11 @@ import {
   cancelReceipt,
   createPayment,
   createStudent,
+  changeStudentGroup,
   createUser,
   autoAssignGroups,
   confirmGroupAssignments,
+  enrollStudentGrade,
   exportMonthlyReceipts,
   exportAssignedRoster,
   generateBatch,
@@ -22,6 +24,7 @@ import {
   listDepartments,
   listConcepts,
   listPayments,
+  listStudentMovements,
   listReceipts,
   listReceiptsByStudent,
   listRecentAuditLogs,
@@ -34,6 +37,7 @@ import {
   previewGroupRoster,
   previewGroupStats,
   resetUserPassword,
+  withdrawStudent,
   updateRocConfig,
   updateConceptSuggested,
   updateConceptTariff,
@@ -81,7 +85,8 @@ const remoteActorSchema = z.object({
   role: z.string().trim().min(1),
 })
 
-const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'])
+const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
+const remoteSemesterLevelSchema = z.union([z.literal(1), z.literal(3), z.literal(5)])
 
 const remoteUserCreateSchema = z.object({
   username: z.string().trim().min(1),
@@ -105,6 +110,7 @@ const remoteUserResetPasswordSchema = z.object({
 
 const remoteGroupCycleSchema = z.object({
   schoolCycle: z.string().trim().min(1),
+  semesterLevel: remoteSemesterLevelSchema.default(1),
 })
 
 const remoteGroupManualMoveSchema = z.object({
@@ -125,6 +131,7 @@ const remoteGroupImportSchema = z.object({
     sheetName: z.string().trim().min(1),
     rowNumber: z.number().int().min(1),
     groupLabel: z.string().trim().min(1),
+    semesterLevel: remoteSemesterLevelSchema.nullable().optional(),
     enrollmentNumber: z.string().trim().nullable(),
     curp: z.string().trim().nullable(),
   })).min(1),
@@ -154,6 +161,7 @@ const remoteStudentInputSchema = z.object({
   secondaryAverage: z.number().nullable().optional().default(null),
   examRoom: z.string().optional().default(''),
   schoolCycle: z.string().trim().min(1),
+  semesterLevel: remoteSemesterLevelSchema.default(1),
   academicStatus: z.string().optional().default(''),
   guardianFullName: z.string().trim().min(1),
   guardianRelationship: z.string().optional().default(''),
@@ -161,6 +169,43 @@ const remoteStudentInputSchema = z.object({
   guardianPhoneSecondary: z.string().optional().default(''),
   guardianEmail: z.string().optional().default(''),
   validateNow: z.boolean().default(true),
+})
+
+const remoteStudentListFiltersSchema = z.object({
+  schoolCycle: z.string().trim().optional(),
+  semesterLevel: z.union([remoteSemesterLevelSchema, z.literal('all')]).optional(),
+  enrollmentStatus: z.string().trim().optional(),
+  documentationStatus: z.string().trim().optional(),
+  query: z.string().trim().optional(),
+})
+
+const remoteStudentGroupChangeSchema = z.object({
+  studentId: z.string().trim().min(1),
+  toGroupId: z.string().trim().min(1),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+})
+
+const remoteStudentWithdrawalSchema = z.object({
+  studentId: z.string().trim().min(1),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+  effectiveDate: z.string().trim().optional(),
+})
+
+const remoteStudentGradeEnrollmentSchema = z.object({
+  studentId: z.string().trim().min(1),
+  schoolCycle: z.string().trim().min(1),
+  semesterLevel: remoteSemesterLevelSchema,
+  toGroupId: z.string().trim().min(1).nullable().optional(),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+})
+
+const remoteStudentMovementListSchema = z.object({
+  studentId: z.string().trim().optional(),
+  schoolCycle: z.string().trim().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
 })
 
 const remoteTariffInputSchema = z.object({
@@ -599,7 +644,9 @@ app.post('/api/hybrid/admin/users/:id/reset-password', async (req: Request, res:
 app.get('/api/hybrid/students', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const validatedOnly = req.query.validatedOnly === 'true'
-  const items = await listStudents(validatedOnly)
+  const filterResult = remoteStudentListFiltersSchema.safeParse(req.query)
+  const filters = filterResult.success ? filterResult.data : {}
+  const items = await listStudents(validatedOnly ? true : filters)
   return res.status(200).json({ ok: true, items })
 })
 
@@ -646,11 +693,58 @@ app.put('/api/hybrid/students/:id', async (req: Request, res: Response) => {
   }
 })
 
+app.post('/api/hybrid/students/change-group', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentGroupChangeSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const result = await changeStudentGroup(parsed.data, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'change_group_failed' })
+  }
+})
+
+app.post('/api/hybrid/students/withdraw', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentWithdrawalSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const result = await withdrawStudent(parsed.data, actor)
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'withdraw_failed' })
+  }
+})
+
+app.post('/api/hybrid/students/enroll-grade', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentGradeEnrollmentSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const student = await enrollStudentGrade(parsed.data, actor)
+    return res.status(200).json({ ok: true, student })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'enroll_grade_failed' })
+  }
+})
+
+app.get('/api/hybrid/students/movements', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remoteStudentMovementListSchema.safeParse(req.query)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  const items = await listStudentMovements(parsed.data)
+  return res.status(200).json({ ok: true, items })
+})
+
 app.post('/api/hybrid/groups/stats', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
-  const items = await listGroupStats(parsed.data.schoolCycle)
+  const items = await listGroupStats(parsed.data.schoolCycle, parsed.data.semesterLevel)
   return res.status(200).json({ ok: true, items })
 })
 
@@ -660,7 +754,7 @@ app.post('/api/hybrid/groups/preview', async (req: Request, res: Response) => {
   if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
-  const items = await previewGroupStats(parsed.data.schoolCycle)
+  const items = await previewGroupStats(parsed.data.schoolCycle, parsed.data.semesterLevel)
   return res.status(200).json({ ok: true, items })
 })
 
@@ -670,7 +764,7 @@ app.post('/api/hybrid/groups/preview-roster', async (req: Request, res: Response
   if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
-  const items = await previewGroupRoster(parsed.data.schoolCycle)
+  const items = await previewGroupRoster(parsed.data.schoolCycle, parsed.data.semesterLevel)
   return res.status(200).json({ ok: true, items })
 })
 
@@ -681,7 +775,7 @@ app.post('/api/hybrid/groups/auto-assign', async (req: Request, res: Response) =
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
-    const result = await autoAssignGroups(parsed.data.schoolCycle, actor)
+    const result = await autoAssignGroups(parsed.data.schoolCycle, actor, parsed.data.semesterLevel)
     return res.status(200).json({ ok: true, result })
   } catch (error) {
     return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_auto_assign_failed' })
@@ -694,7 +788,7 @@ app.post('/api/hybrid/groups/confirm', async (req: Request, res: Response) => {
   if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
-  const result = await confirmGroupAssignments(parsed.data.schoolCycle)
+  const result = await confirmGroupAssignments(parsed.data.schoolCycle, parsed.data.semesterLevel)
   return res.status(200).json({ ok: true, result })
 })
 
@@ -704,7 +798,7 @@ app.post('/api/hybrid/groups/list-assigned-roster', async (req: Request, res: Re
   if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
-  const items = await listAssignedRoster(parsed.data.schoolCycle)
+  const items = await listAssignedRoster(parsed.data.schoolCycle, parsed.data.semesterLevel)
   return res.status(200).json({ ok: true, items })
 })
 
@@ -715,7 +809,7 @@ app.post('/api/hybrid/groups/export-assigned-roster', async (req: Request, res: 
   const parsed = remoteGroupCycleSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
-    const result = await exportAssignedRoster(parsed.data.schoolCycle)
+    const result = await exportAssignedRoster(parsed.data.schoolCycle, parsed.data.semesterLevel)
     return res.status(200).json({ ok: true, result })
   } catch (error) {
     return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'group_export_failed' })

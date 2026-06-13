@@ -8,8 +8,18 @@ import {
   type PreRegistrationStatusUpdate,
 } from '@/components/control-escolar/panels'
 import { StudentCaptureFormPanel } from '@/components/control-escolar/student-capture-form-panel'
+import {
+  type DashboardMetric,
+  DashboardEmptyState,
+  ModuleHero,
+  PanelSectionTitle,
+  StatusBadge,
+  SurfaceCard,
+} from '@/components/dashboard-kit'
+import { AppHeader } from '@/components/app-header'
+import { ControlEscolarToolbar } from '@/components/control-escolar/control-escolar-toolbar'
 import { amountToWords, formatCurrency, formatPrintDate } from '@/lib/formatters'
-import { addPendingSyncOp, clearPendingSyncOps, getDeviceId } from '@/lib/sync-queue'
+import { addPendingSyncOp, getDeviceId } from '@/lib/sync-queue'
 import { getSyncStatusSnapshot, syncAll, type SyncStatusSnapshot } from '@/lib/sync-service'
 import type {
   AdmissionCreatePaymentInput,
@@ -28,14 +38,19 @@ import type {
   SaveStudentRequirementChecklistInput,
   GroupStat,
   GroupPreviewRow,
+  StudentDailyStatusSetInput,
   StudentFormInput,
+  StudentPermissionCancelInput,
+  StudentPermissionCreateInput,
+  StudentPermissionSummary,
   StudentRequirementChecklist,
   StudentSummary,
 } from '@/types/domain'
 import type { DepartmentSummary, UserCreateInput, UserSummary, UserUpdateInput } from '@/types/admin'
+import { StudentTable } from '@/components/StudentTable'
 
-type Screen = 'control-escolar' | 'ingresos-propios' | 'configuracion'
-type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'configuracion' | 'sync'
+type Screen = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion'
+type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion' | 'sync'
 
 const GROUP_COLUMN_ALIASES = ['grupo', 'group', 'grupo asignado', 'grupo destino', 'group label']
 const ENROLLMENT_COLUMN_ALIASES = ['folio interno', 'matricula', 'matricula interna', 'enrollment number', 'enrollmentnumber', 'numero de control']
@@ -47,6 +62,7 @@ const CONTROL_STUDENTS_PER_PAGE = 20
 const RECEIPTS_PER_PAGE = 5
 const CURRENT_DATE = new Date()
 const INSCRIPTION_CONCEPT_CODE = 'B002'
+const REMEMBERED_AUTH_KEY = 'cbta-remembered-auth'
 
 const EMPTY_SYNC_STATUS: SyncStatusSnapshot = {
   lastSuccessfulSyncAt: null,
@@ -165,6 +181,51 @@ function deriveGradeFromGroup(groupLabel: string | null) {
   return `${match[1]}o`
 }
 
+function formatVisibleGroupLabel(groupLabel: string | null) {
+  if (!groupLabel) return 'Sin asignar'
+  const normalized = groupLabel.trim()
+  const compact = normalized.replace(/^\d+\s*/u, '').trim()
+  return compact.length > 0 ? compact : normalized
+}
+
+function formatPreferredEnrollment(student: StudentSummary) {
+  return student.officialEnrollmentNumber?.trim() || student.enrollmentNumber
+}
+
+function dailyStatusClassName(status: StudentSummary['dailyStatus']) {
+  if (status === 'PERMISO') return 'status-tag warning'
+  if (status === 'AUSENTE') return 'status-tag danger'
+  return 'status-tag success'
+}
+
+function readRememberedAuth() {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(REMEMBERED_AUTH_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<AuthLoginInput> | null
+    if (!parsed?.username || !parsed?.password) return null
+    return {
+      username: parsed.username,
+      password: parsed.password,
+    } satisfies AuthLoginInput
+  } catch {
+    return null
+  }
+}
+
+function writeRememberedAuth(value: AuthLoginInput | null) {
+  if (typeof window === 'undefined') return
+
+  if (!value) {
+    window.localStorage.removeItem(REMEMBERED_AUTH_KEY)
+    return
+  }
+
+  window.localStorage.setItem(REMEMBERED_AUTH_KEY, JSON.stringify(value))
+}
+
 function groupSexBalanceLabel(stat: GroupStat) {
   const gap = Math.abs(stat.sex.hombre - stat.sex.mujer)
   return gap <= 4 ? 'OK' : gap <= 8 ? 'Revisar' : 'Ajustar'
@@ -228,6 +289,7 @@ const initialForm: StudentFormInput = {
   secondaryAverage: null,
   examRoom: '',
   schoolCycle: '2026-2027',
+  semesterLevel: 1,
   academicStatus: 'Regular',
   guardianFullName: '',
   guardianRelationship: '',
@@ -248,13 +310,14 @@ function App() {
   const desktopApi = typeof window !== 'undefined' && 'cbta' in window ? window.cbta : null
   const localApi = (desktopApi ?? browserFallbackApi) as Window['cbta']
   const isBrowserMode = !desktopApi
+  const rememberedAuth = readRememberedAuth()
   const [screen, setScreen] = useState<Screen>('control-escolar')
   const [authSession, setAuthSession] = useState<AuthSession | null>(null)
-  const [authForm, setAuthForm] = useState<AuthLoginInput>({ username: '', password: '' })
+  const [authForm, setAuthForm] = useState<AuthLoginInput>(rememberedAuth ?? { username: '', password: '' })
+  const [rememberCredentials, setRememberCredentials] = useState(Boolean(rememberedAuth))
   const [authLoading, setAuthLoading] = useState(true)
   const [authSaving, setAuthSaving] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [students, setStudents] = useState<StudentSummary[]>([])
   const [preRegistrations, setPreRegistrations] = useState<PreRegistrationSummary[]>([])
   const [admissions, setAdmissions] = useState<AdmissionSummary[]>([])
@@ -263,6 +326,7 @@ function App() {
   const [activeAdmission, setActiveAdmission] = useState<AdmissionSummary | null>(null)
   const [validatedStudents, setValidatedStudents] = useState<StudentSummary[]>([])
   const [selectedStudent, setSelectedStudent] = useState<StudentSummary | null>(null)
+  const [studentPermissions, setStudentPermissions] = useState<StudentPermissionSummary[]>([])
   const [concepts, setConcepts] = useState<ChargeConceptSummary[]>([])
   const [selectedConcepts, setSelectedConcepts] = useState<ChargeConceptSummary[]>([])
   const [conceptAmounts, setConceptAmounts] = useState<Record<string, number>>({})
@@ -290,6 +354,7 @@ function App() {
   const [feedbackByScope, setFeedbackByScope] = useState<Record<FeedbackScope, string | null>>({
     'control-escolar': null,
     'ingresos-propios': null,
+    secretaria: null,
     configuracion: null,
     sync: null,
   })
@@ -410,7 +475,7 @@ function App() {
         await loadData(session)
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo validar la sesion actual.'
+      const message = error instanceof Error ? error.message : 'No se pudo validar la sesión actual.'
       setAuthError(message)
     } finally {
       setAuthLoading(false)
@@ -491,16 +556,20 @@ function App() {
   async function loadData(sessionForAdmin: AuthSession | null = authSession) {
     setLoading(true)
     try {
+      const role = sessionForAdmin?.role ?? null
+      const canManageControl = role === 'ADMIN' || role === 'CONTROL_ESCOLAR'
+      const canManageIngresos = role === 'ADMIN' || role === 'INGRESOS_PROPIOS'
+      const canManageSecretaria = role === 'ADMIN' || role === 'SECRETARIA'
       const receiptsAllPromise =
-        typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
+        canManageIngresos && typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
       const cashPaymentsPromise =
-        typeof appApi.payments?.list === 'function' ? appApi.payments.list() : Promise.resolve([])
+        canManageIngresos && typeof appApi.payments?.list === 'function' ? appApi.payments.list() : Promise.resolve([])
       const admissionsPromise =
-        typeof appApi.admissions?.list === 'function' ? appApi.admissions.list() : Promise.resolve([])
+        canManageControl && typeof appApi.admissions?.list === 'function' ? appApi.admissions.list() : Promise.resolve([])
       const rocConfigPromise =
-        typeof appApi.receipts.getConfig === 'function'
+        canManageIngresos && typeof appApi.receipts.getConfig === 'function'
           ? appApi.receipts.getConfig()
-              .catch(() => ({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' }))
+            .catch(() => ({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' }))
           : Promise.resolve({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' })
       const adminUsersPromise =
         sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listUsers === 'function'
@@ -510,12 +579,16 @@ function App() {
         sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listDepartments === 'function'
           ? appApi.admin.listDepartments()
           : Promise.resolve([])
+      const permissionsPromise =
+        canManageSecretaria && typeof appApi.permissions?.list === 'function'
+          ? appApi.permissions.list()
+          : Promise.resolve([])
 
-      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments, permissions] = await Promise.all([
         appApi.students.list(),
-        appApi.preRegistrations.list(),
-        appApi.students.listValidated(),
-        appApi.concepts.listActive(),
+        canManageControl && typeof appApi.preRegistrations?.list === 'function' ? appApi.preRegistrations.list() : Promise.resolve([]),
+        typeof appApi.students.listValidated === 'function' ? appApi.students.listValidated() : Promise.resolve([]),
+        canManageIngresos && typeof appApi.concepts?.listActive === 'function' ? appApi.concepts.listActive() : Promise.resolve([]),
         appApi.audit.listRecent(),
         receiptsAllPromise,
         cashPaymentsPromise,
@@ -523,6 +596,7 @@ function App() {
         rocConfigPromise,
         adminUsersPromise,
         departmentsPromise,
+        permissionsPromise,
       ])
 
       setStudents(allStudents)
@@ -535,6 +609,7 @@ function App() {
       setAdmissions(admissions)
       setAdminUsers(adminUsers)
       setDepartments(departments)
+      setStudentPermissions(permissions)
       setRocInitialNumber(rocConfig.initialRocNumber)
       applySuggestedRocNumber(rocConfig.nextSuggestedRocNumber)
       setSelectedStudent((current) => {
@@ -569,6 +644,7 @@ function App() {
   function defaultScreenByRole(role: AppRole): Screen {
     if (role === 'CONTROL_ESCOLAR') return 'control-escolar'
     if (role === 'INGRESOS_PROPIOS') return 'ingresos-propios'
+    if (role === 'SECRETARIA') return 'secretaria'
     return 'configuracion'
   }
 
@@ -576,6 +652,7 @@ function App() {
     if (role === 'ADMIN') return true
     if (role === 'CONTROL_ESCOLAR') return target === 'control-escolar'
     if (role === 'INGRESOS_PROPIOS') return target === 'ingresos-propios'
+    if (role === 'SECRETARIA') return target === 'secretaria'
     return false
   }
 
@@ -585,11 +662,16 @@ function App() {
     setAuthError(null)
     try {
       const session = await appApi.auth.login(authForm)
+      if (rememberCredentials) {
+        writeRememberedAuth(authForm)
+      } else {
+        writeRememberedAuth(null)
+      }
       setAuthSession(session)
       setScreen(defaultScreenByRole(session.role))
       await loadData(session)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo iniciar sesion.'
+      const message = error instanceof Error ? error.message : 'No se pudo iniciar sesión.'
       setAuthError(message)
     } finally {
       setAuthSaving(false)
@@ -599,9 +681,10 @@ function App() {
   async function handleLogout() {
     await appApi.auth.logout()
     setAuthSession(null)
-    setAuthForm({ username: '', password: '' })
+    setAuthForm(rememberCredentials ? (readRememberedAuth() ?? authForm) : { username: '', password: '' })
     setControlFeedback(null)
     setIngresosFeedback(null)
+    setScopedFeedback('secretaria', null)
     setConfigFeedback(null)
     setSyncFeedback(null)
   }
@@ -682,10 +765,10 @@ function App() {
       await appApi.admissions.createPayment(paymentForm)
       setPaymentForm(initialPaymentForm)
       await loadData()
-      setIngresosFeedback('Pago de inscripcion registrado. Control Escolar ya puede identificar este CURP como pagado.')
+      setIngresosFeedback('Pago de inscripción registrado. Control Escolar ya puede identificar este CURP como pagado.')
       scheduleIngresosFeedbackClear()
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo registrar el pago de inscripcion.'
+      const message = error instanceof Error ? error.message : 'No se pudo registrar el pago de inscripción.'
       setIngresosFeedback(message)
     }
   }
@@ -1054,7 +1137,7 @@ function App() {
     try {
       await appApi.admin.resetUserPassword(userId, { password })
       await loadData(authSession)
-      setConfigFeedback('Contrasena restablecida correctamente.')
+      setConfigFeedback('Contraseña restablecida correctamente.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo restablecer la contrasena.'
       setConfigFeedback(message)
@@ -1234,6 +1317,53 @@ function App() {
     setIngresosFeedback(null)
   }
 
+  async function handleCreateStudentPermission(input: StudentPermissionCreateInput) {
+    if (typeof appApi.permissions?.create !== 'function') {
+      throw new Error('La captura de permisos no esta disponible en esta version.')
+    }
+
+    const permission = await appApi.permissions.create(input)
+    await loadData()
+    setControlFeedback(null)
+    setConfigFeedback(null)
+    setSyncFeedback(null)
+    setFeedback(`Permiso registrado para ${permission.studentName}.`, 'secretaria')
+    return permission
+  }
+
+  async function handleCancelStudentPermission(input: StudentPermissionCancelInput) {
+    if (typeof appApi.permissions?.cancel !== 'function') {
+      throw new Error('La cancelacion de permisos no esta disponible en esta version.')
+    }
+
+    const permission = await appApi.permissions.cancel(input)
+    await loadData()
+    setFeedback(`Permiso cancelado para ${permission.studentName}.`, 'secretaria')
+    return permission
+  }
+
+  async function handleSetStudentDailyStatus(input: StudentDailyStatusSetInput) {
+    if (typeof appApi.permissions?.setDailyStatus !== 'function') {
+      throw new Error('El estatus diario no esta disponible en esta version.')
+    }
+
+    const student = await appApi.permissions.setDailyStatus(input)
+    await loadData()
+    setFeedback(`Estatus del dia actualizado para ${student.fullName}.`, 'secretaria')
+    return student
+  }
+
+  async function handleClearStudentDailyStatus(studentId: string, date: string) {
+    if (typeof appApi.permissions?.clearDailyStatus !== 'function') {
+      throw new Error('La limpieza de estatus diario no esta disponible en esta version.')
+    }
+
+    const student = await appApi.permissions.clearDailyStatus({ studentId, date })
+    await loadData()
+    setFeedback(`Estatus del dia restablecido para ${student.fullName}.`, 'secretaria')
+    return student
+  }
+
   async function handlePrintMonthlyReceipts() {
     setSavingReceipt(true)
     setIngresosFeedback(null)
@@ -1253,12 +1383,6 @@ function App() {
   }
 
   const total = selectedConcepts.reduce((sum, concept) => sum + (conceptAmounts[concept.code] ?? concept.amount), 0)
-
-  function handleSimulateSync() {
-    clearPendingSyncOps()
-    refreshSyncStatus()
-    setSyncFeedback('Cola local de sincronizacion marcada como enviada.')
-  }
 
   async function handleSyncNow() {
     setSyncing(true)
@@ -1289,8 +1413,31 @@ function App() {
     }
   }
 
+  function handleRememberCredentialsChange(enabled: boolean) {
+    setRememberCredentials(enabled)
+    if (!enabled) {
+      writeRememberedAuth(null)
+    }
+  }
+
+  const activePermissionsCount = studentPermissions.filter((permission) => permission.status === 'ACTIVO').length
+  const headerMetaItems =
+    screen === 'control-escolar'
+      ? [`Alumnos ${students.length}`, `Validados ${validatedStudents.length}`]
+      : screen === 'ingresos-propios'
+        ? [`Cobros ${cashPayments.length}`, `ROC ${allReceipts.length}`]
+        : screen === 'secretaria'
+          ? [`Permisos activos ${activePermissionsCount}`, `Alumnos ${students.length}`]
+          : [`Usuarios ${adminUsers.length}`, `Departamentos ${departments.length}`]
+  const roleNavigationItems = [
+    { screen: 'control-escolar' as const, label: 'Control Escolar' },
+    { screen: 'ingresos-propios' as const, label: 'Ingresos Propios' },
+    { screen: 'secretaria' as const, label: 'Secretaría' },
+    { screen: 'configuracion' as const, label: 'Configuración' },
+  ].filter((item) => canAccessScreen(authSession?.role ?? 'ADMIN', item.screen))
+
   if (authLoading) {
-    return <div className="auth-shell"><p>Cargando sesion...</p></div>
+    return <div className="auth-shell"><p>Cargando sesión...</p></div>
   }
 
   if (!authSession) {
@@ -1299,9 +1446,9 @@ function App() {
         <section className="auth-hero">
           <div className="auth-hero-copy">
             <p className="auth-kicker">CBTA 44 Sistema</p>
-            <h1>Operacion escolar y financiera en una sola ventanilla</h1>
+            <h1>Operación escolar y financiera en una sola ventanilla</h1>
             <p>
-              Control Escolar e Ingresos Propios comparten el mismo seguimiento para inscripcion,
+              Control Escolar e Ingresos Propios comparten el mismo seguimiento para inscripción,
               pagos, grupos y ROC institucional.
             </p>
           </div>
@@ -1312,7 +1459,7 @@ function App() {
             </article>
             <article>
               <strong>Ingresos Propios</strong>
-              <span>Pagos de inscripcion, historial y ROC por lote</span>
+              <span>Pagos de inscripción, historial y ROC por lote</span>
             </article>
           </div>
         </section>
@@ -1320,8 +1467,8 @@ function App() {
         <form className="auth-card" onSubmit={handleLogin}>
           <div className="auth-card-header">
             <p className="eyebrow">Acceso institucional</p>
-            <h2>Iniciar sesion</h2>
-            <p>EntrÃ¡ con tu usuario asignado para continuar con la operacion del plantel.</p>
+            <h2>Iniciar sesión</h2>
+            <p>Ingresa con tu usuario asignado para continuar con la operación del plantel.</p>
           </div>
           <label className="form-field">
             <span>Usuario</span>
@@ -1332,13 +1479,21 @@ function App() {
             />
           </label>
           <label className="form-field">
-            <span>Contrasena</span>
+            <span>Contraseña</span>
             <input
               type="password"
-              placeholder="Tu contrasena"
+              placeholder="Tu contraseña"
               value={authForm.password}
               onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))}
             />
+          </label>
+          <label className="remember-auth-row">
+            <input
+              checked={rememberCredentials}
+              onChange={(event) => handleRememberCredentialsChange(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Recordar mis datos</span>
           </label>
           {authError ? <p className="feedback-banner">{authError}</p> : null}
           <button className="primary-button auth-submit" disabled={authSaving} type="submit">
@@ -1350,104 +1505,26 @@ function App() {
   }
 
   return (
-    <div className={isSidebarCollapsed ? 'shell collapsed' : 'shell'}>
-      <aside className={isSidebarCollapsed ? 'sidebar collapsed' : 'sidebar'}>
-        <div className="sidebar-brand">
-          <div>
-            <p className="eyebrow">CBTA 44 Sistema</p>
-            <h1>Operacion escolar</h1>
-            <p className="muted">Inscripciones, grupos y ROC oficial.</p>
-          </div>
-          <button className="sidebar-toggle" onClick={() => setIsSidebarCollapsed((current) => !current)} type="button">
-            {isSidebarCollapsed ? 'Expandir' : 'Colapsar'}
-          </button>
-        </div>
-
-        <section className="panel compact">
-          <h2>Sesion</h2>
-          <p className="muted">{authSession.displayName}</p>
-          <p className="muted">{authSession.role}</p>
-          <button className="secondary-button small-button" onClick={() => void handleLogout()} type="button">
-            Cerrar sesion
-          </button>
-        </section>
-
-        <nav className="nav">
-          {canAccessScreen(authSession.role, 'control-escolar') ? <button
-            className={screen === 'control-escolar' ? 'nav-item active' : 'nav-item'}
-            data-short="CE"
-            onClick={() => setScreen('control-escolar')}
-          >
-            <span>Control Escolar</span>
-          </button> : null}
-          {canAccessScreen(authSession.role, 'ingresos-propios') ? <button
-            className={screen === 'ingresos-propios' ? 'nav-item active' : 'nav-item'}
-            data-short="IP"
-            onClick={() => setScreen('ingresos-propios')}
-          >
-            <span>Ingresos Propios</span>
-          </button> : null}
-          {canAccessScreen(authSession.role, 'configuracion') ? <button
-            className={screen === 'configuracion' ? 'nav-item active' : 'nav-item'}
-            data-short="CF"
-            onClick={() => setScreen('configuracion')}
-          >
-            <span>Configuracion</span>
-          </button> : null}
-        </nav>
-
-        <details className="panel compact secondary-details">
-          <summary>Resumen rapido</summary>
-          <p className="muted">Ficha entregada: {students.filter((item) => item.statusLabel === 'Ficha entregada').length}</p>
-          <p className="muted">Sin grupo: {students.filter((item) => !item.groupLabel).length}</p>
-          <p className="muted">No presentados: {students.filter((item) => item.statusLabel === 'No presentado').length}</p>
-          <p className="muted">Pagos pendientes: {admissions.filter((item) => item.status === 'PAGADO_PENDIENTE_CAPTURA').length}</p>
-        </details>
-
-        <details className="panel compact secondary-details">
-          <summary>Sincronizacion</summary>
-          <p className="muted">Estado: {isOnline ? 'Online' : 'Offline'}</p>
-          <p className="muted">Pendientes locales: {syncStatus.pendingTotal}</p>
-          <p className="muted">
-            Ultimo sync exitoso:{' '}
-            {syncStatus.lastSuccessfulSyncAt ? new Date(syncStatus.lastSuccessfulSyncAt).toLocaleString() : 'Sin registro'}
-          </p>
-          {feedbackByScope.sync ? <p className="muted">Mensaje: {feedbackByScope.sync}</p> : null}
-          {syncStatus.lastSyncError ? <p className="muted">Ultimo error: {syncStatus.lastSyncError}</p> : null}
-          {syncStatus.lastSyncErrorState ? (
-            <p className="muted">Error reintentable: {syncStatus.lastSyncErrorState.retryable ? 'Si' : 'No'}</p>
-          ) : null}
-          <button className="primary-button small-button" disabled={syncing} onClick={() => void handleSyncNow()} type="button">
-            {syncing ? 'Sincronizando...' : 'Sincronizar ahora'}
-          </button>
-          <button className="secondary-button small-button" onClick={handleSimulateSync} type="button">
-            Marcar pendientes como enviados
-          </button>
-        </details>
-      </aside>
-
-      <main className="content">
+    <div className="app-shell">
+      <main className="app-content">
         {feedback ? <FloatingFeedbackToast message={feedback} onClose={() => setScopedFeedback(screen, null)} /> : null}
-        {screen !== 'ingresos-propios' ? (
-          <section className="panel compact">
-            <div className="section-header">
-              <div>
-                <p className="eyebrow">Panel operativo</p>
-                <h2>{screen === 'control-escolar' ? 'Control Escolar' : 'Configuracion'}</h2>
-              </div>
-              <span className="status-tag">{isOnline ? 'Online' : 'Offline'}</span>
-            </div>
-            <div className="button-row">
-              <span className="chip">Alumnos validados: {validatedStudents.length}</span>
-              <span className="chip">Sync pendientes: {syncStatus.pendingTotal}</span>
-            </div>
-          </section>
-        ) : null}
+
+        <AppHeader
+          authSession={authSession}
+          screen={screen}
+          roleNavigationItems={roleNavigationItems}
+          setScreen={setScreen}
+          isOnline={isOnline}
+          syncStatus={syncStatus}
+          syncing={syncing}
+          onSyncNow={() => void handleSyncNow()}
+          onLogout={() => void handleLogout()}
+        />
 
         {isBrowserMode ? (
           <p className="feedback-banner">
-            Estas en modo navegador. La captura y consulta funcionan con almacenamiento local de prueba.
-            Para usar SQLite real y Prisma, abri la app desde Electron.
+            Estás en modo navegador. La captura y consulta funcionan con almacenamiento local de prueba.
+            Para usar SQLite real y Prisma, abre la app desde Electron.
           </p>
         ) : null}
 
@@ -1458,6 +1535,7 @@ function App() {
             students={students}
             preRegistrations={preRegistrations}
             admissions={admissions}
+            recentAuditLogs={recentAuditLogs}
             captureQuery={captureQuery}
             activeAdmission={activeAdmission}
             editingStudentId={editingStudentId}
@@ -1474,6 +1552,16 @@ function App() {
             onExportSep={handleExportSep}
             onReloadData={loadData}
             groupsApi={appApi.groups}
+          />
+        ) : screen === 'secretaria' ? (
+          <SecretariaOverview
+            feedback={feedback}
+            students={students}
+            permissions={studentPermissions}
+            onCreatePermission={handleCreateStudentPermission}
+            onCancelPermission={handleCancelStudentPermission}
+            onSetDailyStatus={handleSetStudentDailyStatus}
+            onClearDailyStatus={handleClearStudentDailyStatus}
           />
         ) : screen === 'ingresos-propios' ? (
           <IngresosPropiosOverview
@@ -1774,13 +1862,13 @@ type FloatingFeedbackToastProps = {
 }
 
 function FloatingFeedbackToast({ message, onClose }: FloatingFeedbackToastProps) {
-  const isError = /(no se pudo|error|fall[oÃ³])/i.test(message)
+  const isError = /(no se pudo|error|fall[oó])/i.test(message)
   const fileName = extractOutputFileNameFromFeedback(message)
   const title = isError
-    ? 'Hay que revisar esta operacion'
+    ? 'Hay que revisar esta operación'
     : fileName
       ? 'ROC mensual generado correctamente'
-      : 'Operacion registrada'
+      : 'Operación registrada'
 
   return (
     <article className={isError ? 'feedback-toast feedback-toast-error' : 'feedback-toast'} role="status">
@@ -1790,8 +1878,8 @@ function FloatingFeedbackToast({ message, onClose }: FloatingFeedbackToastProps)
           <span className={isError ? 'status-tag status-tag-danger' : 'status-tag'}>
             {isError ? 'Error' : 'Listo'}
           </span>
-          <button aria-label="Cerrar notificacion" className="toast-close-button" onClick={onClose} type="button">
-            Ã—
+          <button aria-label="Cerrar notificación" className="toast-close-button" onClick={onClose} type="button">
+            ×
           </button>
         </div>
       </div>
@@ -1849,13 +1937,13 @@ function ConfiguracionTarifasOverview({
     <section className="panel">
       <div className="section-header">
         <div>
-          <p className="eyebrow">Configuracion</p>
+          <p className="eyebrow">Configuración</p>
           <h2>{configTab === 'tarifas' ? 'Tarifas y ROC' : 'Usuarios y departamentos'}</h2>
         </div>
         <span className="status-tag">Solo ADMIN</span>
       </div>
 
-      <div className="config-tabs" role="tablist" aria-label="Configuracion">
+      <div className="config-tabs" role="tablist" aria-label="Configuración">
         <button className={configTab === 'tarifas' ? 'config-tab active' : 'config-tab'} onClick={() => setConfigTab('tarifas')} type="button">
           Tarifas y ROC
         </button>
@@ -1876,92 +1964,92 @@ function ConfiguracionTarifasOverview({
         />
       ) : (
         <>
-      <article className="panel sub-panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">ROC</p>
-            <h3>Configuracion de consecutivo</h3>
-          </div>
-          <span className="status-tag">Se captura una vez</span>
-        </div>
-        <div className="button-row">
-          <Field label="ROC inicial base">
-            <input value={rocInitialDraft} onChange={(event) => setRocInitialDraft(event.target.value)} />
-          </Field>
-          <div className="selected-student-summary compact-summary">
-            <div>
-              <span className="detail-label">Configurado</span>
-              <strong>{rocInitialNumber}</strong>
-            </div>
-            <div>
-              <span className="detail-label">Siguiente sugerido</span>
-              <strong>{suggestedRocNumber}</strong>
-            </div>
-          </div>
-        </div>
-        <div className="button-row">
-          <button className="primary-button small-button" disabled={savingRocConfig} onClick={() => void onUpdateRocConfig(rocInitialDraft)} type="button">
-            Guardar ROC inicial
-          </button>
-        </div>
-      </article>
-
-      <div className="tariff-groups">
-        <div className="tariff-toolbar">
-          <Field label="Grupo de claves">
-            <select className="group-select" value={selectedGroupKey} onChange={(event) => setSelectedGroupKey(event.target.value)}>
-              {groupedConcepts.map((group) => (
-                <option key={group.key} value={group.key}>
-                  {(group.header?.code ?? group.key) + ' - ' + (group.header?.name ?? group.key)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <p className="tariff-help-text">
-            {concepts.filter(isSelectableConcept).length} claves configurables cargadas. La tarifa del seguro de vida se cambia acÃ¡ y queda marcada como "Seguro de vida / No se imprime en ROC".
-          </p>
-        </div>
-
-        {!activeGroup ? <p className="empty-state">No hay claves configurables para este catalogo.</p> : null}
-
-        {activeGroup ? (
-          <section className="concept-group-panel">
-            <div className="concept-group-header static">
+          <article className="panel sub-panel">
+            <div className="section-header">
               <div>
-                <strong>{activeGroup.header?.code ?? activeGroup.key}</strong>
-                <h3>{activeGroup.header?.name ?? activeGroup.key}</h3>
-                {activeGroup.header?.description ? <p>{activeGroup.header.description}</p> : null}
+                <p className="eyebrow">ROC</p>
+                <h3>Configuracion de consecutivo</h3>
               </div>
-              <span>{activeGroup.items.length} claves</span>
+              <span className="status-tag">Se captura una vez</span>
+            </div>
+            <div className="button-row">
+              <Field label="ROC inicial base">
+                <input value={rocInitialDraft} onChange={(event) => setRocInitialDraft(event.target.value)} />
+              </Field>
+              <div className="selected-student-summary compact-summary">
+                <div>
+                  <span className="detail-label">Configurado</span>
+                  <strong>{rocInitialNumber}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Siguiente sugerido</span>
+                  <strong>{suggestedRocNumber}</strong>
+                </div>
+              </div>
+            </div>
+            <div className="button-row">
+              <button className="primary-button small-button" disabled={savingRocConfig} onClick={() => void onUpdateRocConfig(rocInitialDraft)} type="button">
+                Guardar ROC inicial
+              </button>
+            </div>
+          </article>
+
+          <div className="tariff-groups">
+            <div className="tariff-toolbar">
+              <Field label="Grupo de claves">
+                <select className="group-select" value={selectedGroupKey} onChange={(event) => setSelectedGroupKey(event.target.value)}>
+                  {groupedConcepts.map((group) => (
+                    <option key={group.key} value={group.key}>
+                      {(group.header?.code ?? group.key) + ' - ' + (group.header?.name ?? group.key)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <p className="tariff-help-text">
+                {concepts.filter(isSelectableConcept).length} claves configurables cargadas. La tarifa del seguro de vida se cambia acÃ¡ y queda marcada como "Seguro de vida / No se imprime en ROC".
+              </p>
             </div>
 
-            <div className="tariff-table-wrap">
-              <table className="tariff-table">
-                <thead>
-                  <tr>
-                    <th>Clave</th>
-                    <th>Concepto</th>
-                    <th>Tarifa</th>
-                    <th>Periodo</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {activeGroup.items.map((concept) => (
-                    <TariffEditorRow
-                      concept={concept}
-                      isSaving={savingTariffCode === concept.code}
-                      key={concept.code}
-                      onSave={onUpdateTariff}
-                      onToggleSuggested={onUpdateSuggested}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ) : null}
-      </div>
+            {!activeGroup ? <p className="empty-state">No hay claves configurables para este catalogo.</p> : null}
+
+            {activeGroup ? (
+              <section className="concept-group-panel">
+                <div className="concept-group-header static">
+                  <div>
+                    <strong>{activeGroup.header?.code ?? activeGroup.key}</strong>
+                    <h3>{activeGroup.header?.name ?? activeGroup.key}</h3>
+                    {activeGroup.header?.description ? <p>{activeGroup.header.description}</p> : null}
+                  </div>
+                  <span>{activeGroup.items.length} claves</span>
+                </div>
+
+                <div className="tariff-table-wrap">
+                  <table className="tariff-table">
+                    <thead>
+                      <tr>
+                        <th>Clave</th>
+                        <th>Concepto</th>
+                        <th>Tarifa</th>
+                        <th>Periodo</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeGroup.items.map((concept) => (
+                        <TariffEditorRow
+                          concept={concept}
+                          isSaving={savingTariffCode === concept.code}
+                          key={concept.code}
+                          onSave={onUpdateTariff}
+                          onToggleSuggested={onUpdateSuggested}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ) : null}
+          </div>
         </>
       )}
     </section>
@@ -1982,6 +2070,7 @@ const roleOptions: Array<{ value: AppRole; label: string }> = [
   { value: 'ADMIN', label: 'Administrador' },
   { value: 'CONTROL_ESCOLAR', label: 'Control Escolar' },
   { value: 'INGRESOS_PROPIOS', label: 'Ingresos Propios' },
+  { value: 'SECRETARIA', label: 'Secretaría' },
 ]
 
 function AdminUsersOverview({
@@ -2295,6 +2384,7 @@ type ControlEscolarProps = {
   students: StudentSummary[]
   preRegistrations: PreRegistrationSummary[]
   admissions: AdmissionSummary[]
+  recentAuditLogs: AuditLogSummary[]
   captureQuery: string
   activeAdmission: AdmissionSummary | null
   editingStudentId: string | null
@@ -2322,6 +2412,7 @@ function ControlEscolarOverview({
   students,
   preRegistrations,
   admissions,
+  recentAuditLogs,
   captureQuery,
   activeAdmission,
   editingStudentId,
@@ -2343,9 +2434,12 @@ function ControlEscolarOverview({
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas')
   const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'inscripcion' | 'alumnos'>('alumnos')
   const [studentQuery, setStudentQuery] = useState('')
+  const [semesterFilter, setSemesterFilter] = useState<'all' | '1' | '3' | '5'>('all')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [documentationFilter, setDocumentationFilter] = useState('all')
   const [studentPage, setStudentPage] = useState(1)
   const [expandedStudentId, setExpandedStudentId] = useState<string | null>(null)
+  const [showFilters, setShowFilters] = useState(false)
   const [selectedPreRegistrationId, setSelectedPreRegistrationId] = useState<string | null>(null)
   const [groupStats, setGroupStats] = useState<GroupStat[]>([])
   const [groupPreviewRows, setGroupPreviewRows] = useState<GroupPreviewRow[]>([])
@@ -2365,13 +2459,32 @@ function ControlEscolarOverview({
   const [isChecklistModalOpen, setIsChecklistModalOpen] = useState(false)
   const [inscriptionQuery, setInscriptionQuery] = useState('')
   const [inscriptionPage, setInscriptionPage] = useState(1)
+  const uniqueDocumentationStatuses = useMemo(
+    () => Array.from(new Set(students.map((student) => student.documentationStatus).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
+    [students],
+  )
   const normalizedStudentQuery = studentQuery.trim().toLowerCase()
-  const filteredStudents = students.filter((student) => {
-    const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
-    const matchesQuery = normalizedStudentQuery.length === 0 || haystack.includes(normalizedStudentQuery)
+  const matchesDirectoryFilters = (student: StudentSummary, query: string) => {
+    const haystack = [
+      student.enrollmentNumber,
+      student.officialEnrollmentNumber ?? '',
+      student.fullName,
+      student.curp,
+      student.guardianFullName ?? '',
+      student.guardianPhone ?? '',
+    ]
+      .join(' ')
+      .toLowerCase()
+
+    const matchesQuery = query.length === 0 || haystack.includes(query)
+    const matchesSemester = semesterFilter === 'all' || String(student.semesterLevel) === semesterFilter
     const matchesStatus = statusFilter === 'all' || student.statusLabel === statusFilter
-    return matchesQuery && matchesStatus
-  })
+    const matchesDocumentation = documentationFilter === 'all' || student.documentationStatus === documentationFilter
+
+    return matchesQuery && matchesSemester && matchesStatus && matchesDocumentation
+  }
+
+  const filteredStudents = students.filter((student) => matchesDirectoryFilters(student, normalizedStudentQuery))
   const totalStudentPages = Math.max(1, Math.ceil(filteredStudents.length / CONTROL_STUDENTS_PER_PAGE))
   const paginatedStudents = filteredStudents.slice(
     (studentPage - 1) * CONTROL_STUDENTS_PER_PAGE,
@@ -2380,7 +2493,7 @@ function ControlEscolarOverview({
 
   useEffect(() => {
     setStudentPage(1)
-  }, [normalizedStudentQuery, statusFilter])
+  }, [normalizedStudentQuery, semesterFilter, statusFilter, documentationFilter])
 
   useEffect(() => {
     if (studentPage > totalStudentPages) {
@@ -2420,10 +2533,7 @@ function ControlEscolarOverview({
   const previewTotalPages = Math.max(1, Math.ceil(filteredPreviewRows.length / 20))
   const paginatedPreviewRows = filteredPreviewRows.slice((previewPage - 1) * 20, previewPage * 20)
   const normalizedInscriptionQuery = inscriptionQuery.trim().toLowerCase()
-  const filteredInscriptionStudents = students.filter((student) => {
-    const haystack = `${student.enrollmentNumber} ${student.fullName} ${student.curp}`.toLowerCase()
-    return normalizedInscriptionQuery.length === 0 || haystack.includes(normalizedInscriptionQuery)
-  })
+  const filteredInscriptionStudents = students.filter((student) => matchesDirectoryFilters(student, normalizedInscriptionQuery))
   const totalInscriptionPages = Math.max(1, Math.ceil(filteredInscriptionStudents.length / CONTROL_STUDENTS_PER_PAGE))
   const paginatedInscriptionStudents = filteredInscriptionStudents.slice(
     (inscriptionPage - 1) * CONTROL_STUDENTS_PER_PAGE,
@@ -2438,7 +2548,7 @@ function ControlEscolarOverview({
 
   useEffect(() => {
     setInscriptionPage(1)
-  }, [normalizedInscriptionQuery])
+  }, [normalizedInscriptionQuery, semesterFilter, statusFilter, documentationFilter])
 
   useEffect(() => {
     if (inscriptionPage > totalInscriptionPages) {
@@ -2456,6 +2566,7 @@ function ControlEscolarOverview({
 
   async function handleStartEditStudent(studentId: string) {
     await onEditStudent(studentId)
+    setOperationsTab('captura')
     setCaptureTab('formulario')
     setTimeout(() => {
       captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -2620,469 +2731,429 @@ function ControlEscolarOverview({
     void refreshGroupStats()
   }, [form.schoolCycle])
 
+  const toolbarSearchValue = operationsTab === 'captura' ? captureQuery : operationsTab === 'inscripcion' ? inscriptionQuery : studentQuery
+  const toolbarSearchPlaceholder =
+    operationsTab === 'captura'
+      ? 'Folio, CURP o nombre de ficha'
+      : operationsTab === 'bandeja'
+        ? 'La bandeja SEP usa su propio flujo'
+        : operationsTab === 'inscripcion'
+          ? 'Buscar por matrícula, nombre o CURP'
+          : 'Buscar por matrícula, nombre o CURP'
+  const activeFilterCount = Number(semesterFilter !== 'all') + Number(statusFilter !== 'all') + Number(documentationFilter !== 'all')
+
+  function handleToolbarSearchChange(value: string) {
+    if (operationsTab === 'captura') {
+      onUpdateCaptureQuery(value)
+      return
+    }
+    if (operationsTab === 'inscripcion') {
+      setInscriptionQuery(value)
+      return
+    }
+    setStudentQuery(value)
+  }
+
+  const docsPendingCount = students.filter((student) => student.documentationStatus !== 'COMPLETA').length
+  const withoutGroupCount = students.filter((student) => !student.groupLabel).length
+  const controlMetrics: DashboardMetric[] = [
+    { label: 'Alumnos', value: students.length, helper: 'Registrados' },
+    { label: 'Validados', value: students.filter((student) => student.statusLabel === 'Inscrito').length, helper: 'Listos para operar' },
+    { label: 'Docs pendientes', value: docsPendingCount, helper: 'Requieren revisión' },
+    { label: 'Sin grupo', value: withoutGroupCount, helper: 'Ajuste académico', tone: withoutGroupCount > 0 ? 'warning' : 'default' },
+  ]
+
   return (
-    <>
-      {captureTab === 'fichas' ? (
-      <>
-      <section className="panel compact">
-        <div className="button-row">
-          <button
-            className={operationsTab === 'captura' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('captura')}
-            type="button"
-          >
-            Fichas
-          </button>
-          <button
-            className={operationsTab === 'bandeja' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('bandeja')}
-            type="button"
-          >
-            Bandeja
-          </button>
-          <button
-            className={operationsTab === 'grupos' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('grupos')}
-            type="button"
-          >
-            Asignacion
-          </button>
-          <button
-            className={operationsTab === 'inscripcion' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('inscripcion')}
-            type="button"
-          >
-            Inscripcion
-          </button>
-          <button
-            className={operationsTab === 'alumnos' ? 'primary-button small-button' : 'secondary-button small-button'}
-            onClick={() => setOperationsTab('alumnos')}
-            type="button"
-          >
-            Alumnos
-          </button>
-        </div>
-      </section>
+    <section className="module-dashboard">
+      <ModuleHero
+        eyebrow="Control Escolar"
+        title="Control Escolar"
+        subtitle="Consulta el padrón, valida expedientes y acompaña el flujo escolar con una vista más clara y operativa."
+        metrics={controlMetrics}
 
-      {operationsTab === 'captura' ? (
-      <section className="panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Control Escolar</p>
-            <h2>Captura de fichas</h2>
-          </div>
-          <span className="status-tag">Seleccion en tiempo real</span>
-        </div>
-        <div className="student-search-row">
-          <Field className="span-2" label="Buscar pago">
-            <input placeholder="Folio o CURP" value={captureQuery} onChange={(event) => onUpdateCaptureQuery(event.target.value)} />
-          </Field>
-        </div>
-        {activeAdmission ? (
-          <p className="feedback-banner">
-            Captura activa para folio {activeAdmission.folio} ({activeAdmission.curp}) - estatus {activeAdmission.status}
-          </p>
-        ) : null}
-
-        <AdmissionCaptureTable
-          activeAdmissionId={activeAdmission?.id ?? null}
-          admissions={filteredAdmissions}
-          onSelect={handleSelectAdmissionRow}
-        />
-        {filteredAdmissions.length === 0 ? <p className="empty-state">No hay pagos que coincidan con la busqueda.</p> : null}
-      </section>
-      ) : null}
-
-      {operationsTab === 'bandeja' ? (
-      <PreRegistrationInboxPanel
-        onExportSep={onExportSep}
-        onSelectPreRegistration={setSelectedPreRegistrationId}
-        onUpdateStatus={onUpdatePreRegistrationStatus}
-        preRegistrations={preRegistrations}
-        selectedPreRegistration={selectedPreRegistration}
       />
-      ) : null}
 
-      {operationsTab === 'grupos' ? (
-      <section className="panel">
-        <div className="section-header">
-          <div><p className="eyebrow">Control Escolar</p><h2>Asignacion de grupos</h2></div>
-          <span className="status-tag">{isPreviewStats ? 'Vista previa' : 'Nuevo ingreso MATUTINO'}</span>
-        </div>
-          <div className="button-row">
-            <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
-            <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
-            <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
-            <button className="secondary-button small-button" onClick={() => void handleImportAssignedRoster()} type="button">Importar Excel</button>
-            <button className="secondary-button small-button" onClick={() => void handleExportAssignedRoster()} type="button">Exportar Excel</button>
-            <button className="secondary-button small-button" onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
-          </div>
-          <p className="table-summary">La importacion acepta el Excel exportado por este listado o cualquier archivo con columnas Grupo y CURP o Folio interno.</p>
-          {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
-        {isPreviewStats ? <p className="table-summary">Previsualizacion calculada sin guardar cambios.</p> : null}
-        <div className="student-table-wrap">
-          <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>
-            {groupStats.map((stat) => <tr key={stat.groupId}><td>{stat.label}</td><td>{stat.assignedCount}</td><td>{stat.capacity}</td><td>{stat.bands.alto}</td><td>{stat.bands.medio}</td><td>{stat.bands.bajo}</td><td>{stat.sex.hombre}</td><td>{stat.sex.mujer}</td><td>{groupSexBalanceLabel(stat)}</td><td>{groupBandBalanceLabel(stat)}</td></tr>)}
-          </tbody></table>
-        </div>
-        {isPreviewStats && groupPreviewRows.length > 0 ? (
-          <>
-            <p className="table-summary">Listado preliminar por grupo (sin confirmar).</p>
-            <div className="student-search-row">
-              <Field label="Grupo">
-                <select className="group-select" value={previewGroupFilter} onChange={(event) => setPreviewGroupFilter(event.target.value)}>
-                  <option value="all">Todos</option>
-                  {previewGroups.map((group) => (
-                    <option key={group} value={group}>{group}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Sexo">
-                <select className="group-select" value={previewSexFilter} onChange={(event) => setPreviewSexFilter(event.target.value)}>
-                  <option value="all">Todos</option>
-                  <option value="H">Hombre</option>
-                  <option value="M">Mujer</option>
-                </select>
-              </Field>
-            </div>
-            <div className="student-table-wrap">
-              <table className="student-table">
-                <thead>
-                  <tr>
-                    <th>Grupo</th>
-                    <th>Folio interno</th>
-                    <th>Alumno</th>
-                    <th>CURP</th>
-                    <th>Sexo</th>
-                    <th>Promedio</th>
-                    <th>Banda</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {paginatedPreviewRows.map((row) => (
-                    <tr key={`${row.groupLabel}-${row.enrollmentNumber}`}>
-                      <td>{row.groupLabel}</td>
-                      <td>{row.enrollmentNumber}</td>
-                      <td>{row.fullName}</td>
-                      <td>{row.curp}</td>
-                      <td>{row.sex}</td>
-                      <td>{row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1)}</td>
-                      <td>{row.averageBand.toUpperCase()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {filteredPreviewRows.length > 20 ? (
-              <div className="pagination-row">
-                <button
-                  className="secondary-button small-button"
-                  disabled={previewPage === 1}
-                  onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}
-                  type="button"
-                >
-                  Anterior
-                </button>
-                <span>Pagina {previewPage} de {previewTotalPages}</span>
-                <button
-                  className="secondary-button small-button"
-                  disabled={previewPage === previewTotalPages}
-                  onClick={() => setPreviewPage((page) => Math.min(previewTotalPages, page + 1))}
-                  type="button"
-                >
-                  Siguiente
-                </button>
+      <div className="dashboard-module-grid dashboard-grid-1col">
+        <div className="dashboard-module-main">
+          <ControlEscolarToolbar
+            operationsTab={operationsTab}
+            setOperationsTab={setOperationsTab}
+            setCaptureTab={setCaptureTab}
+            toolbarSearchPlaceholder={toolbarSearchPlaceholder}
+            toolbarSearchValue={toolbarSearchValue}
+            handleToolbarSearchChange={handleToolbarSearchChange}
+            showFilters={showFilters}
+            setShowFilters={setShowFilters}
+            activeFilterCount={activeFilterCount}
+            form={form}
+            onUpdateField={onUpdateField}
+            semesterFilter={semesterFilter}
+            setSemesterFilter={setSemesterFilter}
+            statusFilter={statusFilter}
+            setStatusFilter={setStatusFilter}
+            documentationFilter={documentationFilter}
+            setDocumentationFilter={setDocumentationFilter}
+            uniqueDocumentationStatuses={uniqueDocumentationStatuses}
+          />
+
+          {operationsTab === 'captura' && captureTab === 'fichas' ? (
+            <section className="panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Control Escolar</p>
+                  <h2 className="compact-header">Admisión</h2>
+                </div>
+                <div className="button-row">
+                  <span className="status-tag">Captura en tiempo real</span>
+                  <button
+                    className="secondary-button small-button"
+                    onClick={() => setOperationsTab('bandeja')}
+                    type="button"
+                  >
+                    Abrir bandeja SEP
+                  </button>
+                </div>
               </div>
-            ) : null}
-          </>
-        ) : null}
-        <div className="form-grid">
-          <Field label="Alumno para mover">
-            <select className="group-select" value={moveStudentId} onChange={(event) => setMoveStudentId(event.target.value)}>
-              <option value="">Selecciona alumno</option>
-              {students.map((student) => (
-                <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Grupo destino">
-            <select className="group-select" value={moveGroupId} onChange={(event) => setMoveGroupId(event.target.value)}>
-              <option value="">Selecciona grupo</option>
-              {groupStats.map((group) => (
-                <option key={group.groupId} value={group.groupId}>{group.label} (cupo {group.assignedCount}/{group.capacity})</option>
-              ))}
-            </select>
-          </Field>
-          <Field className="span-2" label="Motivo"><input value={moveReason} onChange={(event) => setMoveReason(event.target.value)} placeholder="Motivo de reasignacion" /></Field>
-          <button className="secondary-button small-button" onClick={() => void handleManualMove()} type="button">Reasignar manual</button>
-        </div>
-        <div className="form-grid">
-          <Field label="Alumno no-show">
-            <select className="group-select" value={noShowStudentId} onChange={(event) => setNoShowStudentId(event.target.value)}>
-              <option value="">Selecciona alumno</option>
-              {students.map((student) => (
-                <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
-              ))}
-            </select>
-          </Field>
-          <Field className="span-2" label="Motivo no-show"><input value={noShowReason} onChange={(event) => setNoShowReason(event.target.value)} placeholder="No se presento" /></Field>
-          <button className="secondary-button small-button" onClick={() => void handleNoShow()} type="button">Marcar no-show</button>
-        </div>
-      </section>
-      ) : null}
+              {activeAdmission ? (
+                <p className="feedback-banner">
+                  Captura activa para folio {activeAdmission.folio} ({activeAdmission.curp}) - estatus {activeAdmission.status}
+                </p>
+              ) : null}
 
-      {operationsTab === 'inscripcion' ? (
-      <section className="panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Control Escolar</p>
-            <h2>Inscripcion documental</h2>
-          </div>
-          <span className="status-tag">Checklist y plazo de entrega</span>
-        </div>
-        {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
-        <div className="student-search-row">
-          <Field className="span-2" label="Buscar alumno">
-            <input
-              placeholder="Buscar por folio interno, CURP o nombre"
-              value={inscriptionQuery}
-              onChange={(event) => setInscriptionQuery(event.target.value)}
-            />
-          </Field>
-        </div>
-        <div className="student-table-wrap">
-          <table className="student-table table-inscripcion-ce">
-            <thead>
-              <tr>
-                <th>Folio interno</th>
-                <th>Alumno</th>
-                <th>Pago</th>
-                <th>Documentacion</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {paginatedInscriptionStudents.map((student) => (
-                <tr key={`checklist-${student.id}`} className={selectedChecklistStudentId === student.id ? 'student-row active' : 'student-row'}>
-                  <td><strong>{student.enrollmentNumber}</strong></td>
-                  <td>{student.fullName}</td>
-                  <td>{student.admissionPaid ? 'Pagado' : 'Pendiente'}</td>
-                  <td>{student.documentationStatus}</td>
-                  <td>
-                    <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
-                      Revisar
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {filteredInscriptionStudents.length > CONTROL_STUDENTS_PER_PAGE ? (
-          <div className="pagination-row">
-            <button
-              className="secondary-button small-button"
-              disabled={inscriptionPage === 1}
-              onClick={() => setInscriptionPage((page) => Math.max(1, page - 1))}
-              type="button"
-            >
-              Anterior
-            </button>
-            <span>Pagina {inscriptionPage} de {totalInscriptionPages}</span>
-            <button
-              className="secondary-button small-button"
-              disabled={inscriptionPage === totalInscriptionPages}
-              onClick={() => setInscriptionPage((page) => Math.min(totalInscriptionPages, page + 1))}
-              type="button"
-            >
-              Siguiente
-            </button>
-          </div>
-        ) : null}
-        {filteredInscriptionStudents.length === 0 ? (
-          <p className="empty-state">No hay alumnos que coincidan con la busqueda.</p>
-        ) : null}
-      </section>
-      ) : null}
-
-      {operationsTab === 'alumnos' ? (
-      <section className="panel" ref={studentsSectionRef}>
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Control Escolar</p>
-            <h2>Alumnos registrados</h2>
-          </div>
-          <span className="status-tag">{students.length} registrados</span>
-        </div>
-
-        {students.length === 0 ? <p className="empty-state">Todavia no hay alumnos registrados.</p> : null}
-
-        {students.length > 0 ? (
-          <div className="student-search-row">
-            <Field className="span-2" label="Buscar alumno">
-              <input
-                placeholder="Buscar por folio interno, nombre o CURP"
-                value={studentQuery}
-                onChange={(event) => setStudentQuery(event.target.value)}
+              <AdmissionCaptureTable
+                activeAdmissionId={activeAdmission?.id ?? null}
+                admissions={filteredAdmissions}
+                onSelect={handleSelectAdmissionRow}
               />
-            </Field>
-            <Field label="Estatus">
-              <select className="group-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-                <option value="all">Todos</option>
-                <option value="Ficha entregada">Ficha entregada</option>
-                <option value="Inscrito">Inscrito</option>
-                <option value="Baja temporal">Baja temporal</option>
-                <option value="Baja definitiva">Baja definitiva</option>
-                <option value="Portabilidad">Portabilidad</option>
-                <option value="Recursador">Recursador</option>
-              </select>
-            </Field>
-          </div>
-        ) : null}
+              {filteredAdmissions.length === 0 ? <p className="empty-state">No hay pagos que coincidan con la búsqueda.</p> : null}
+            </section>
+          ) : null}
 
-        {students.length > 0 ? (
-          <p className="table-summary">
-            {filteredStudents.length} alumnos encontrados. Mostrando hasta {CONTROL_STUDENTS_PER_PAGE} por pagina.
-          </p>
-        ) : null}
+          {operationsTab === 'bandeja' ? (
+            <PreRegistrationInboxPanel
+              onExportSep={onExportSep}
+              onSelectPreRegistration={setSelectedPreRegistrationId}
+              onUpdateStatus={onUpdatePreRegistrationStatus}
+              preRegistrations={preRegistrations}
+              selectedPreRegistration={selectedPreRegistration}
+            />
+          ) : null}
 
-        {paginatedStudents.length > 0 ? (
-          <div className="student-table-wrap">
-            <table className="student-table">
-              <thead>
-                <tr>
-                  <th>Folio interno</th>
-                  <th>Alumno</th>
-                  <th>CURP</th>
-                  <th>Grado</th>
-                  <th>Grupo</th>
-                  <th>Estatus</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedStudents.map((student) => {
-                  const active = editingStudentId === student.id
-                  const expanded = expandedStudentId === student.id
-                  const guardianName = student.guardianFullName?.trim().length ? student.guardianFullName : 'Sin tutor capturado'
-                  const guardianPhone = student.guardianPhone?.trim().length ? student.guardianPhone : 'Sin telefono de tutor'
-                  const rfc = student.rfc?.trim().length ? student.rfc : 'Sin RFC'
-                  void rfc
-
-                  return (
-                    <Fragment key={student.id}>
-                      <tr
-                        className={active ? 'student-row active' : 'student-row'}
-                        onClick={() => setExpandedStudentId(expanded ? null : student.id)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault()
-                            setExpandedStudentId(expanded ? null : student.id)
-                          }
-                        }}
-                        role="button"
-                        tabIndex={0}
+          {operationsTab === 'grupos' ? (
+            <section className="panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Control Escolar</p>
+                  <h2 className="compact-header">Movimientos académicos</h2>
+                  <p className="compact-operational-line">Concentra reasignaciones, no-show y balance de grupos fuera del padrón principal.</p>
+                </div>
+                <span className="status-tag">{isPreviewStats ? 'Vista previa' : 'Nuevo ingreso MATUTINO'}</span>
+              </div>
+              <div className="button-row">
+                <button className="secondary-button small-button" onClick={() => void handlePreviewAssign()} type="button">Ver vista previa</button>
+                <button className="primary-button small-button" onClick={() => void handleAutoAssign()} type="button">Generar asignacion</button>
+                <button className="secondary-button small-button" onClick={() => void handleConfirmGroups()} type="button">Confirmar asignacion</button>
+                <button className="secondary-button small-button" onClick={() => void handleImportAssignedRoster()} type="button">Importar Excel</button>
+                <button className="secondary-button small-button" onClick={() => void handleExportAssignedRoster()} type="button">Exportar Excel</button>
+                <button className="secondary-button small-button" onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
+              </div>
+              <p className="table-summary">La importación acepta el Excel exportado por este listado o cualquier archivo con columnas Grupo y CURP o folio interno.</p>
+              {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
+              {isPreviewStats ? <p className="table-summary">Previsualización calculada sin guardar cambios.</p> : null}
+              <div className="student-table-wrap">
+                <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>
+                  {groupStats.map((stat) => <tr key={stat.groupId}><td>{stat.label}</td><td>{stat.assignedCount}</td><td>{stat.capacity}</td><td>{stat.bands.alto}</td><td>{stat.bands.medio}</td><td>{stat.bands.bajo}</td><td>{stat.sex.hombre}</td><td>{stat.sex.mujer}</td><td>{groupSexBalanceLabel(stat)}</td><td>{groupBandBalanceLabel(stat)}</td></tr>)}
+                </tbody></table>
+              </div>
+              {isPreviewStats && groupPreviewRows.length > 0 ? (
+                <>
+                  <p className="table-summary">Listado preliminar por grupo (sin confirmar).</p>
+                  <div className="student-search-row">
+                    <Field label="Grupo">
+                      <select className="group-select" value={previewGroupFilter} onChange={(event) => setPreviewGroupFilter(event.target.value)}>
+                        <option value="all">Todos</option>
+                        {previewGroups.map((group) => (
+                          <option key={group} value={group}>{group}</option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Sexo">
+                      <select className="group-select" value={previewSexFilter} onChange={(event) => setPreviewSexFilter(event.target.value)}>
+                        <option value="all">Todos</option>
+                        <option value="H">Hombre</option>
+                        <option value="M">Mujer</option>
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="student-table-wrap">
+                    <table className="student-table">
+                      <thead>
+                        <tr>
+                          <th>Grupo</th>
+                          <th>Folio interno</th>
+                          <th>Alumno</th>
+                          <th>CURP</th>
+                          <th>Sexo</th>
+                          <th>Promedio</th>
+                          <th>Banda</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginatedPreviewRows.map((row) => (
+                          <tr key={`${row.groupLabel}-${row.enrollmentNumber}`}>
+                            <td>{row.groupLabel}</td>
+                            <td>{row.enrollmentNumber}</td>
+                            <td>{row.fullName}</td>
+                            <td>{row.curp}</td>
+                            <td>{row.sex}</td>
+                            <td>{row.secondaryAverage == null ? 'N/E' : row.secondaryAverage.toFixed(1)}</td>
+                            <td>{row.averageBand.toUpperCase()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {filteredPreviewRows.length > 20 ? (
+                    <div className="pagination-row">
+                      <button
+                        className="secondary-button small-button"
+                        disabled={previewPage === 1}
+                        onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}
+                        type="button"
                       >
-                        <td>
-                          <strong>{student.enrollmentNumber}</strong>
-                        </td>
+                        Anterior
+                      </button>
+                      <span>Pagina {previewPage} de {previewTotalPages}</span>
+                      <button
+                        className="secondary-button small-button"
+                        disabled={previewPage === previewTotalPages}
+                        onClick={() => setPreviewPage((page) => Math.min(previewTotalPages, page + 1))}
+                        type="button"
+                      >
+                        Siguiente
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              <div className="form-grid">
+                <Field label="Alumno para mover">
+                  <select className="group-select" value={moveStudentId} onChange={(event) => setMoveStudentId(event.target.value)}>
+                    <option value="">Selecciona alumno</option>
+                    {students.map((student) => (
+                      <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Grupo destino">
+                  <select className="group-select" value={moveGroupId} onChange={(event) => setMoveGroupId(event.target.value)}>
+                    <option value="">Selecciona grupo</option>
+                    {groupStats.map((group) => (
+                      <option key={group.groupId} value={group.groupId}>{group.label} (cupo {group.assignedCount}/{group.capacity})</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field className="span-2" label="Motivo"><input value={moveReason} onChange={(event) => setMoveReason(event.target.value)} placeholder="Motivo de reasignación" /></Field>
+                <button className="secondary-button small-button" onClick={() => void handleManualMove()} type="button">Reasignar manual</button>
+              </div>
+              <div className="form-grid">
+                <Field label="Alumno no-show">
+                  <select className="group-select" value={noShowStudentId} onChange={(event) => setNoShowStudentId(event.target.value)}>
+                    <option value="">Selecciona alumno</option>
+                    {students.map((student) => (
+                      <option key={student.id} value={student.id}>{student.enrollmentNumber} - {student.fullName}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field className="span-2" label="Motivo no-show"><input value={noShowReason} onChange={(event) => setNoShowReason(event.target.value)} placeholder="No se presentó" /></Field>
+                <button className="secondary-button small-button" onClick={() => void handleNoShow()} type="button">Marcar no-show</button>
+              </div>
+            </section>
+          ) : null}
+
+          {operationsTab === 'inscripcion' ? (
+            <section className="panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Control Escolar</p>
+                  <h2 className="compact-header">Inscripción</h2>
+                  <p className="compact-operational-line">Revisa documentación y abre el checklist del alumno sin perder el padrón de vista.</p>
+                </div>
+                <span className="status-tag">Checklist y plazo de entrega</span>
+              </div>
+              {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
+              <div className="student-table-wrap">
+                <table className="student-table table-inscripcion-ce">
+                  <thead>
+                    <tr>
+                      <th>Matrícula</th>
+                      <th>Alumno</th>
+                      <th>Tutor</th>
+                      <th>Semestre</th>
+                      <th>Estatus hoy</th>
+                      <th>Documentación</th>
+                      <th>Estatus</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginatedInscriptionStudents.map((student) => (
+                      <tr key={`checklist-${student.id}`} className={selectedChecklistStudentId === student.id ? 'student-row active' : 'student-row'}>
+                        <td><strong>{formatPreferredEnrollment(student)}</strong></td>
                         <td>{student.fullName}</td>
-                        <td>{student.curp}</td>
-                        <td>{deriveGradeFromGroup(student.groupLabel)}</td>
-                        <td>{student.groupLabel ?? 'Sin asignar'}</td>
+                        <td>{student.guardianFullName?.trim() || 'Sin tutor capturado'}</td>
+                        <td>{student.semesterLevel}°</td>
+                        <td><span className={dailyStatusClassName(student.dailyStatus)}>{student.dailyStatusLabel}</span></td>
+                        <td>{student.documentationStatus}</td>
                         <td>{student.statusLabel}</td>
-                        <td className="student-actions-cell">
-                          <button
-                            className="secondary-button small-button"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              event.preventDefault()
-                              setExpandedStudentId(null)
-                              void handleStartEditStudent(student.id)
-                            }}
-                            type="button"
-                          >
-                            Editar
+                        <td>
+                          <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
+                            Revisar
                           </button>
                         </td>
                       </tr>
-                      {expanded ? (
-                        <tr className="student-detail-row">
-                          <td colSpan={7}>
-                            <div className="student-detail-grid">
-                              <div>
-                                <span className="detail-label">Tutor</span>
-                                <strong>{guardianName}</strong>
-                              </div>
-                              <div>
-                                <span className="detail-label">Telefono tutor</span>
-                                <strong>{guardianPhone}</strong>
-                              </div>
-                              <div>
-                                <span className="detail-label">Pago inscripcion</span>
-                                <strong>{student.admissionPaid ? 'Registrado' : 'Pendiente'}</strong>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {filteredInscriptionStudents.length > CONTROL_STUDENTS_PER_PAGE ? (
+                <div className="pagination-row">
+                  <button
+                    className="secondary-button small-button"
+                    disabled={inscriptionPage === 1}
+                    onClick={() => setInscriptionPage((page) => Math.max(1, page - 1))}
+                    type="button"
+                  >
+                    Anterior
+                  </button>
+                  <span>Pagina {inscriptionPage} de {totalInscriptionPages}</span>
+                  <button
+                    className="secondary-button small-button"
+                    disabled={inscriptionPage === totalInscriptionPages}
+                    onClick={() => setInscriptionPage((page) => Math.min(totalInscriptionPages, page + 1))}
+                    type="button"
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              ) : null}
+              {filteredInscriptionStudents.length === 0 ? (
+                <p className="empty-state">No hay alumnos que coincidan con la búsqueda.</p>
+              ) : null}
+            </section>
+          ) : null}
 
-        {filteredStudents.length > CONTROL_STUDENTS_PER_PAGE ? (
-          <div className="pagination-row">
-            <button
-              className="secondary-button small-button"
-              disabled={studentPage === 1}
-              onClick={() => setStudentPage((page) => Math.max(1, page - 1))}
-              type="button"
-            >
-              Anterior
-            </button>
-            <span>
-              Pagina {studentPage} de {totalStudentPages}
-            </span>
-            <button
-              className="secondary-button small-button"
-              disabled={studentPage === totalStudentPages}
-              onClick={() => setStudentPage((page) => Math.min(totalStudentPages, page + 1))}
-              type="button"
-            >
-              Siguiente
-            </button>
-          </div>
-        ) : null}
+          {operationsTab === 'alumnos' ? (
+            <section className="panel" ref={studentsSectionRef}>
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Control Escolar</p>
+                  <h2 className="compact-header">Alumnos filtrados</h2>
+                  <p className="compact-operational-line">La lista queda al frente para buscar, validar y abrir la ficha del alumno con menos rodeos.</p>
+                </div>
+                <span className="status-tag">{filteredStudents.length} resultados</span>
+              </div>
 
-        {students.length > 0 && filteredStudents.length === 0 ? (
-          <p className="empty-state">No hay alumnos que coincidan con la busqueda actual.</p>
-        ) : null}
-      </section>
-      ) : null}
+              {students.length === 0 ? (
+                <DashboardEmptyState
+                  title="Todavía no hay alumnos registrados"
+                  description="Comienza agregando un nuevo alumno o abre Admisión para trabajar con la captura inicial."
+                  actions={
+                    <>
+                      <button
+                        className="primary-button"
+                        onClick={() => {
+                          setOperationsTab('captura')
+                          setCaptureTab('formulario')
+                        }}
+                        type="button"
+                      >
+                        Agregar alumno
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => {
+                          setOperationsTab('captura')
+                          setCaptureTab('fichas')
+                        }}
+                        type="button"
+                      >
+                        Importar padrón
+                      </button>
+                    </>
+                  }
+                />
+              ) : null}
 
-      </>
-      ) : null}
+              {paginatedStudents.length > 0 ? (
+                <StudentTable
+                  paginatedStudents={paginatedStudents}
+                  editingStudentId={editingStudentId}
+                  expandedStudentId={expandedStudentId}
+                  setExpandedStudentId={setExpandedStudentId}
+                  handleStartEditStudent={handleStartEditStudent}
+                  formatPreferredEnrollment={formatPreferredEnrollment}
+                  formatVisibleGroupLabel={formatVisibleGroupLabel}
+                  dailyStatusClassName={dailyStatusClassName}
+                />
+              ) : null}
 
-      {captureTab === 'formulario' ? (
-      <StudentCaptureFormPanel
-        FieldComponent={Field}
-        activeAdmission={activeAdmission}
-        captureSectionRef={captureSectionRef}
-        editingStudentId={editingStudentId}
-        feedback={feedback}
-        form={form}
-        onBackToFichas={() => setCaptureTab('fichas')}
-        onCancelEdit={onCancelEdit}
-        onSubmit={onSubmit}
-        onUpdateField={onUpdateField}
-        relationshipOptions={relationshipOptions}
-        saving={saving}
-      />
-      ) : null}
+              {filteredStudents.length > CONTROL_STUDENTS_PER_PAGE ? (
+                <div className="pagination-row">
+                  <button
+                    className="secondary-button small-button"
+                    disabled={studentPage === 1}
+                    onClick={() => setStudentPage((page) => Math.max(1, page - 1))}
+                    type="button"
+                  >
+                    Anterior
+                  </button>
+                  <span>
+                    Pagina {studentPage} de {totalStudentPages}
+                  </span>
+                  <button
+                    className="secondary-button small-button"
+                    disabled={studentPage === totalStudentPages}
+                    onClick={() => setStudentPage((page) => Math.min(totalStudentPages, page + 1))}
+                    type="button"
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              ) : null}
+
+              {students.length > 0 && filteredStudents.length === 0 ? (
+                <DashboardEmptyState
+                  title="Sin resultados para la búsqueda actual"
+                  description="Ajusta matrícula, nombre, tutor o filtros para volver a mostrar alumnos."
+                />
+              ) : null}
+            </section>
+          ) : null}
+
+          {operationsTab === 'captura' && captureTab === 'formulario' ? (
+            <StudentCaptureFormPanel
+              FieldComponent={Field}
+              activeAdmission={activeAdmission}
+              captureSectionRef={captureSectionRef}
+              editingStudentId={editingStudentId}
+              feedback={feedback}
+              form={form}
+              onBackToFichas={() => {
+                setOperationsTab('captura')
+                setCaptureTab('fichas')
+              }}
+              onCancelEdit={onCancelEdit}
+              onSubmit={onSubmit}
+              onUpdateField={onUpdateField}
+              relationshipOptions={relationshipOptions}
+              saving={saving}
+            />
+          ) : null}
+        </div>
+      </div>
+
+
       {isChecklistModalOpen ? (
         <div className="modal-overlay" role="dialog" aria-modal="true" onClick={handleCloseChecklistModal}>
           <div className="modal-card" onClick={(event) => event.stopPropagation()}>
@@ -3100,50 +3171,50 @@ function ControlEscolarOverview({
                 </p>
                 <div className="checklist-list">
                   {requirementChecklist.items.map((item, index) => (
-                      <article className="checklist-item" key={item.requirementId}>
-                        <div className="checklist-item-header">
-                          <div>
-                            <strong>{item.label}</strong>
-                            <span>Req. {item.requiredOriginals} orig / {item.requiredCopies} copias</span>
-                          </div>
-                          <div className="checklist-toggle">
-                            <label>
-                              <input
-                                checked={item.isDelivered}
-                                type="radio"
-                                name={`delivered-${item.requirementId}`}
-                                onChange={() => handleChecklistItemChange(index, { isDelivered: true, missingJustification: '', deadlineAt: '' })}
-                              />
-                              Entregado
-                            </label>
-                            <label>
-                              <input
-                                checked={!item.isDelivered}
-                                type="radio"
-                                name={`delivered-${item.requirementId}`}
-                                onChange={() => handleChecklistItemChange(index, { isDelivered: false })}
-                              />
-                              No entrego
-                            </label>
-                          </div>
+                    <article className="checklist-item" key={item.requirementId}>
+                      <div className="checklist-item-header">
+                        <div>
+                          <strong>{item.label}</strong>
+                          <span>Req. {item.requiredOriginals} orig / {item.requiredCopies} copias</span>
                         </div>
-                        {!item.isDelivered ? (
-                          <div className="checklist-item-details">
-                            <label className="form-field">
-                              <span>Motivo</span>
-                              <input value={item.missingJustification} onChange={(event) => handleChecklistItemChange(index, { missingJustification: event.target.value })} />
-                            </label>
-                            <label className="form-field">
-                              <span>Fecha compromiso</span>
-                              <input type="date" value={item.deadlineAt} onChange={(event) => handleChecklistItemChange(index, { deadlineAt: event.target.value })} />
-                            </label>
-                            <label className="form-field">
-                              <span>Nota</span>
-                              <input value={item.notes} onChange={(event) => handleChecklistItemChange(index, { notes: event.target.value })} />
-                            </label>
-                          </div>
-                        ) : null}
-                      </article>
+                        <div className="checklist-toggle">
+                          <label>
+                            <input
+                              checked={item.isDelivered}
+                              type="radio"
+                              name={`delivered-${item.requirementId}`}
+                              onChange={() => handleChecklistItemChange(index, { isDelivered: true, missingJustification: '', deadlineAt: '' })}
+                            />
+                            Entregado
+                          </label>
+                          <label>
+                            <input
+                              checked={!item.isDelivered}
+                              type="radio"
+                              name={`delivered-${item.requirementId}`}
+                              onChange={() => handleChecklistItemChange(index, { isDelivered: false })}
+                            />
+                            No entrego
+                          </label>
+                        </div>
+                      </div>
+                      {!item.isDelivered ? (
+                        <div className="checklist-item-details">
+                          <label className="form-field">
+                            <span>Motivo</span>
+                            <input value={item.missingJustification} onChange={(event) => handleChecklistItemChange(index, { missingJustification: event.target.value })} />
+                          </label>
+                          <label className="form-field">
+                            <span>Fecha compromiso</span>
+                            <input type="date" value={item.deadlineAt} onChange={(event) => handleChecklistItemChange(index, { deadlineAt: event.target.value })} />
+                          </label>
+                          <label className="form-field">
+                            <span>Nota</span>
+                            <input value={item.notes} onChange={(event) => handleChecklistItemChange(index, { notes: event.target.value })} />
+                          </label>
+                        </div>
+                      ) : null}
+                    </article>
                   ))}
                 </div>
                 <div className="button-row">
@@ -3159,7 +3230,7 @@ function ControlEscolarOverview({
           </div>
         </div>
       ) : null}
-    </>
+    </section>
   )
 }
 
@@ -3197,6 +3268,355 @@ type IngresosProps = {
   onToggleLifeInsurance: (checked: boolean) => void
   onToggleConcept: (concept: ChargeConceptSummary) => void
   onUpdateConceptAmount: (code: string, amount: number) => void
+}
+
+type SecretariaOverviewProps = {
+  students: StudentSummary[]
+  permissions: StudentPermissionSummary[]
+  feedback: string | null
+  onCreatePermission: (input: StudentPermissionCreateInput) => Promise<StudentPermissionSummary>
+  onCancelPermission: (input: StudentPermissionCancelInput) => Promise<StudentPermissionSummary>
+  onSetDailyStatus: (input: StudentDailyStatusSetInput) => Promise<StudentSummary>
+  onClearDailyStatus: (studentId: string, date: string) => Promise<StudentSummary>
+}
+
+function toLocalDateInputValue(value = new Date()) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function toLocalDateTimeInputValue(value: Date) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  const hour = String(value.getHours()).padStart(2, '0')
+  const minute = String(value.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day}T${hour}:${minute}`
+}
+
+function SecretariaOverview({
+  students,
+  permissions,
+  feedback,
+  onCreatePermission,
+  onCancelPermission,
+  onSetDailyStatus,
+  onClearDailyStatus,
+}: SecretariaOverviewProps) {
+  const [query, setQuery] = useState('')
+  const [selectedStudentId, setSelectedStudentId] = useState('')
+  const [kind, setKind] = useState<StudentPermissionCreateInput['kind']>('PERMISO_GENERAL')
+  const [reason, setReason] = useState('')
+  const [notes, setNotes] = useState('')
+  const [savingPermission, setSavingPermission] = useState(false)
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null)
+  const [startsAt, setStartsAt] = useState(() => {
+    const base = new Date()
+    base.setHours(7, 0, 0, 0)
+    return toLocalDateTimeInputValue(base)
+  })
+  const [endsAt, setEndsAt] = useState(() => {
+    const base = new Date()
+    base.setHours(14, 0, 0, 0)
+    return toLocalDateTimeInputValue(base)
+  })
+
+  const today = toLocalDateInputValue()
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredStudents = normalizedQuery.length === 0
+    ? students
+    : students.filter((student) =>
+      [
+        formatPreferredEnrollment(student),
+        student.fullName,
+        student.curp,
+        student.guardianFullName ?? '',
+        student.guardianPhone ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(normalizedQuery),
+    )
+  const selectedStudent = filteredStudents.find((student) => student.id === selectedStudentId)
+    ?? students.find((student) => student.id === selectedStudentId)
+    ?? null
+  const visiblePermissions = permissions
+    .filter((permission) => permission.status !== 'CERRADO')
+    .slice(0, 12)
+  const secretariaMetrics: DashboardMetric[] = [
+    { label: 'Alumnos', value: students.length, helper: 'En padrón' },
+    { label: 'Presentes', value: students.filter((student) => student.dailyStatus === 'PRESENTE').length, helper: 'Sin novedad' },
+    { label: 'Ausentes', value: students.filter((student) => student.dailyStatus === 'AUSENTE').length, helper: 'Marcados hoy', tone: students.some((student) => student.dailyStatus === 'AUSENTE') ? 'warning' : 'default' },
+    { label: 'Permisos activos', value: permissions.filter((permission) => permission.activeToday).length, helper: 'Vigentes hoy' },
+  ]
+
+  async function handleSubmitPermission(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedStudent) return
+    setSavingPermission(true)
+    try {
+      await onCreatePermission({
+        studentId: selectedStudent.id,
+        kind,
+        reason,
+        notes,
+        startsAt: new Date(startsAt).toISOString(),
+        endsAt: new Date(endsAt).toISOString(),
+      })
+      setReason('')
+      setNotes('')
+    } finally {
+      setSavingPermission(false)
+    }
+  }
+
+  async function handleMarkAbsent(studentId: string) {
+    setUpdatingStatusId(studentId)
+    try {
+      await onSetDailyStatus({
+        studentId,
+        date: today,
+        status: 'AUSENTE',
+      })
+    } finally {
+      setUpdatingStatusId(null)
+    }
+  }
+
+  async function handleResetStatus(studentId: string) {
+    setUpdatingStatusId(studentId)
+    try {
+      await onClearDailyStatus(studentId, today)
+    } finally {
+      setUpdatingStatusId(null)
+    }
+  }
+
+  return (
+    <section className="module-dashboard secretaria-layout">
+      <ModuleHero
+        eyebrow="Secretaría"
+        title="Permisos y estatus diario"
+        subtitle="Registra permisos, consulta el estado del día y deja visible la novedad escolar sin duplicar captura."
+        metrics={secretariaMetrics}
+        actions={<StatusBadge>{visiblePermissions.filter((item) => item.activeToday).length} permisos hoy</StatusBadge>}
+      />
+
+      <div className="dashboard-module-grid secretaria-module-grid">
+        <div className="dashboard-module-main">
+          <SurfaceCard className="dashboard-search-panel">
+            <PanelSectionTitle
+              eyebrow="Consulta"
+              title="Buscar alumno"
+              subtitle="Localiza al alumno por matrícula, nombre, CURP, tutor o teléfono y marca su estatus del día."
+            />
+            <Field label="Buscar alumno">
+              <input
+                placeholder="Matrícula, nombre, CURP, tutor o teléfono"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </Field>
+          </SurfaceCard>
+
+          {feedback ? <p className="feedback-banner">{feedback}</p> : null}
+
+          <SurfaceCard>
+            <PanelSectionTitle eyebrow="Padrón" title="Alumnos del día" action={<StatusBadge>{filteredStudents.length}</StatusBadge>} />
+            <div className="student-table-wrap">
+              <table className="student-table">
+                <thead>
+                  <tr>
+                    <th>Matrícula</th>
+                    <th>Alumno</th>
+                    <th>Grupo</th>
+                    <th>Estatus hoy</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredStudents.length === 0 ? (
+                    <tr>
+                      <td colSpan={5}>
+                        <p className="empty-state compact-empty-state">No hay alumnos que coincidan con la búsqueda del día.</p>
+                      </td>
+                    </tr>
+                  ) : null}
+                  {filteredStudents.slice(0, 14).map((student) => (
+                    <tr key={student.id} className={selectedStudentId === student.id ? 'student-row active' : 'student-row'}>
+                      <td><strong>{formatPreferredEnrollment(student)}</strong></td>
+                      <td>
+                        <div className="table-primary-cell">
+                          <strong>{student.fullName}</strong>
+                          <span>{student.guardianFullName ?? 'Sin tutor capturado'}</span>
+                        </div>
+                      </td>
+                      <td>{formatVisibleGroupLabel(student.groupLabel)}</td>
+                      <td>
+                        <div className="table-primary-cell">
+                          <span className={dailyStatusClassName(student.dailyStatus)}>{student.dailyStatusLabel}</span>
+                          <span>{student.activePermissionSummary ?? 'Sin novedad'}</span>
+                        </div>
+                      </td>
+                      <td className="student-actions-cell">
+                        <button className="secondary-button small-button" onClick={() => setSelectedStudentId(student.id)} type="button">
+                          Seleccionar
+                        </button>
+                        <button className="tertiary-button small-button" disabled={updatingStatusId === student.id} onClick={() => void handleMarkAbsent(student.id)} type="button">
+                          Ausente
+                        </button>
+                        <button className="tertiary-button small-button" disabled={updatingStatusId === student.id} onClick={() => void handleResetStatus(student.id)} type="button">
+                          Presente
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </SurfaceCard>
+        </div>
+
+        <div className="dashboard-module-side secretaria-side">
+          <SurfaceCard className="dashboard-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Alumno</p>
+                <h3>Resumen seleccionado</h3>
+              </div>
+              <span className={selectedStudent ? dailyStatusClassName(selectedStudent.dailyStatus) : 'status-tag'}>{selectedStudent?.dailyStatusLabel ?? 'Sin selección'}</span>
+            </div>
+            {selectedStudent ? (
+              <div className="student-detail-grid">
+                <div>
+                  <span className="detail-label">Alumno</span>
+                  <strong>{selectedStudent.fullName}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Matrícula</span>
+                  <strong>{formatPreferredEnrollment(selectedStudent)}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Tutor</span>
+                  <strong>{selectedStudent.guardianFullName ?? 'Sin tutor capturado'}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Grupo</span>
+                  <strong>{formatVisibleGroupLabel(selectedStudent.groupLabel)}</strong>
+                </div>
+                <div>
+                  <span className="detail-label">Permiso activo</span>
+                  <strong>{selectedStudent.activePermissionSummary ?? 'Sin permiso activo'}</strong>
+                </div>
+              </div>
+            ) : (
+              <p className="empty-state">Selecciona un alumno para registrar un permiso o ajustar su estatus del día.</p>
+            )}
+          </SurfaceCard>
+
+          <SurfaceCard className="dashboard-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Estado del día</p>
+                <h3>Acciones rápidas</h3>
+              </div>
+              <span className={selectedStudent ? dailyStatusClassName(selectedStudent.dailyStatus) : 'status-tag'}>{selectedStudent?.dailyStatusLabel ?? 'Sin selección'}</span>
+            </div>
+            {selectedStudent ? (
+              <div className="secretaria-status-actions">
+                <button className="secondary-button" onClick={() => setSelectedStudentId(selectedStudent.id)} type="button">
+                  Mantener seleccionado
+                </button>
+                <button className="tertiary-button" disabled={updatingStatusId === selectedStudent.id} onClick={() => void handleMarkAbsent(selectedStudent.id)} type="button">
+                  Marcar ausente
+                </button>
+                <button className="primary-button" disabled={updatingStatusId === selectedStudent.id} onClick={() => void handleResetStatus(selectedStudent.id)} type="button">
+                  Marcar presente
+                </button>
+              </div>
+            ) : (
+              <DashboardEmptyState
+                title="Selecciona un alumno"
+                description="El panel de estado permite marcar presente o ausente sin bajar a la tabla."
+              />
+            )}
+          </SurfaceCard>
+
+          <form className="panel sub-panel dashboard-side-card" onSubmit={handleSubmitPermission}>
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Permiso</p>
+                <h3>Registrar permiso</h3>
+              </div>
+              <span className="status-tag">Secretaría</span>
+            </div>
+            <div className="form-grid compact-form-grid">
+              <Field label="Tipo">
+                <select value={kind} onChange={(event) => setKind(event.target.value as StudentPermissionCreateInput['kind'])}>
+                  <option value="PERMISO_GENERAL">Permiso general</option>
+                  <option value="SALIDA_ANTICIPADA">Salida anticipada</option>
+                  <option value="DIA_COMPLETO">Día completo</option>
+                  <option value="JUSTIFICANTE_MEDICO">Justificante médico</option>
+                </select>
+              </Field>
+              <Field label="Inicio">
+                <input type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} />
+              </Field>
+              <Field label="Fin">
+                <input type="datetime-local" value={endsAt} onChange={(event) => setEndsAt(event.target.value)} />
+              </Field>
+              <Field className="full-width" label="Motivo">
+                <input required minLength={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+              </Field>
+              <Field className="full-width" label="Notas">
+                <textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} />
+              </Field>
+            </div>
+            <div className="form-actions">
+              <button className="primary-button" disabled={!selectedStudent || savingPermission} type="submit">
+                {savingPermission ? 'Guardando permiso...' : 'Registrar permiso'}
+              </button>
+            </div>
+          </form>
+
+          <SurfaceCard className="dashboard-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Seguimiento</p>
+                <h3>Permisos recientes</h3>
+              </div>
+              <span className="status-tag">{permissions.length} registros</span>
+            </div>
+            {visiblePermissions.length === 0 ? (
+              <p className="empty-state">Todavía no hay permisos registrados.</p>
+            ) : (
+              <div className="secretaria-permission-list">
+                {visiblePermissions.map((permission) => (
+                  <article className="secretaria-permission-item" key={permission.id}>
+                    <div>
+                      <strong>{permission.studentName}</strong>
+                      <p>{permission.reason}</p>
+                      <span>{formatPrintDate(new Date(permission.startsAt))} a {formatPrintDate(new Date(permission.endsAt))}</span>
+                    </div>
+                    <div className="secretaria-permission-actions">
+                      <span className={permission.activeToday ? 'status-tag warning' : 'status-tag'}>{permission.status}</span>
+                      {permission.status !== 'CANCELADO' ? (
+                        <button className="tertiary-button small-button" onClick={() => void onCancelPermission({ permissionId: permission.id })} type="button">
+                          Cancelar
+                        </button>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </SurfaceCard>
+        </div>
+      </div>
+    </section>
+  )
 }
 
 function IngresosPropiosOverview({
@@ -3281,6 +3701,12 @@ function IngresosPropiosOverview({
   const receiptPendingCancellation = cancelReceiptId
     ? allReceipts.find((receipt) => receipt.id === cancelReceiptId) ?? receipts.find((receipt) => receipt.id === cancelReceiptId) ?? null
     : null
+  const ingresosMetrics: DashboardMetric[] = [
+    { label: 'Cobros registrados', value: cashPayments.length, helper: 'En caja' },
+    { label: 'ROC generados', value: cashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length, helper: 'Mensuales' },
+    { label: 'Pendientes ROC', value: pendingPayments.length, helper: 'Por consolidar', tone: pendingPayments.length > 0 ? 'warning' : 'default' },
+    { label: 'Alumnos sin cobro', value: studentsWithoutPayments.length, helper: 'En padrón' },
+  ]
   useEffect(() => {
     if (receiptPage > totalReceiptPages) {
       setReceiptPage(totalReceiptPages)
@@ -3384,37 +3810,45 @@ function IngresosPropiosOverview({
   }
 
   return (
-    <section className="roc-layout">
-      <article className="panel compact" style={{ gridColumn: '1 / -1' }}>
-        <div className="button-row">
-          <button className={operationsTab === 'caja' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('caja')} type="button">
-            Caja / Cobros
-          </button>
-          <button className={operationsTab === 'pendientes-roc' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('pendientes-roc')} type="button">
-            Pendientes de ROC
-          </button>
-          <button className={operationsTab === 'historial' ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => setOperationsTab('historial')} type="button">
-            ROC mensual
-          </button>
+    <section className="module-dashboard ingresos-layout">
+      <ModuleHero
+        eyebrow="Ingresos Propios"
+        title="Caja y ROC oficial"
+        subtitle="Registra cobros, monitorea pendientes y consolida el ROC mensual con una sola superficie de trabajo."
+        metrics={ingresosMetrics}
+        actions={<StatusBadge tone={isOnline ? 'success' : 'warning'}>{isOnline ? 'Online' : 'Offline'}</StatusBadge>}
+      />
+
+      <SurfaceCard className="dashboard-search-panel">
+        <div className="operations-toolbar">
+          <div className="segmented-tabs">
+            <button className={operationsTab === 'caja' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('caja')} type="button">
+              Caja
+            </button>
+            <button className={operationsTab === 'pendientes-roc' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('pendientes-roc')} type="button">
+              Pendientes ROC
+            </button>
+            <button className={operationsTab === 'historial' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('historial')} type="button">
+              ROC mensual
+            </button>
+          </div>
+          <div className="operations-shortcuts">
+            <span>Ctrl + K buscar alumno</span>
+            <span>F2 registrar cobro</span>
+          </div>
         </div>
-        <p className="table-summary compact-operational-line">
-          {cashPayments.length} cobros registrados | {pendingPayments.length} pendientes ROC | {cashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length} ROC generados | {studentsWithoutPayments.length} alumnos sin cobro | {isOnline ? 'Online' : 'Offline'}
-        </p>
-      </article>
+      </SurfaceCard>
 
       {operationsTab === 'caja' ? (
-        <article className="panel wide">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">Caja</p>
-              <h2 className="compact-header">Cobros por clave unificados</h2>
-            </div>
-            <span className="status-tag">Ctrl+K buscar alumno | F2 registrar cobro</span>
-          </div>
-
-          <div className="cash-workspace">
-            <div className="cash-top-bar">
-              <Field className="cash-search-field" label="Buscar alumno">
+        <article className="cash-dashboard-grid">
+          <div className="cash-dashboard-main">
+            <SurfaceCard className="dashboard-search-panel">
+              <PanelSectionTitle
+                eyebrow="Caja"
+                title="Buscar alumno"
+                subtitle="Selecciona al alumno, elige claves de cobro y prepara el resumen antes de registrar."
+              />
+              <div className="cash-top-bar">
                 <input
                   ref={studentSearchRef}
                   placeholder="Buscar por folio interno, nombre o CURP"
@@ -3422,123 +3856,80 @@ function IngresosPropiosOverview({
                   onChange={(event) => setStudentQuery(event.target.value)}
                   onKeyDown={onStudentSearchKeyDown}
                 />
-              </Field>
 
-              {selectedStudent ? (
-                <div className="selected-student-summary compact-summary cash-student-summary">
-                  <div>
-                    <span className="detail-label">Alumno</span>
-                    <strong>{selectedStudent.fullName}</strong>
-                  </div>
-                  <div>
-                    <span className="detail-label">Folio</span>
-                    <strong>{selectedStudent.enrollmentNumber}</strong>
-                  </div>
-                  <div>
-                    <span className="detail-label">ROC historicos</span>
-                    <strong>{receipts.length}</strong>
-                  </div>
-                </div>
-              ) : (
-                <div className="cash-inline-empty">
-                  <p className="empty-state">Busca y selecciona un alumno validado para registrar el cobro.</p>
-                </div>
-              )}
-            </div>
+
+
+              </div>
+            </SurfaceCard>
 
             {normalizedStudentQuery.length >= 2 ? (
-              <div className="student-table-wrap compact-search-results">
-                <table className="student-table">
-                  <thead>
-                    <tr>
-                      <th>Folio</th>
-                      <th>Alumno</th>
-                      <th>Grupo</th>
-                      <th>Estatus cobro</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleStudents.length === 0 ? (
+              <SurfaceCard>
+                <PanelSectionTitle eyebrow="Coincidencias" title="Resultados del buscador" action={<StatusBadge>{visibleStudents.length}</StatusBadge>} />
+                <div className="student-table-wrap compact-search-results">
+                  <table className="student-table">
+                    <thead>
                       <tr>
-                        <td colSpan={4}>
-                          <p className="empty-state compact-empty-state">No hay alumnos que coincidan con la busqueda.</p>
-                        </td>
+                        <th>Folio</th>
+                        <th>Alumno</th>
+                        <th>Grupo</th>
+                        <th>Estatus cobro</th>
                       </tr>
-                    ) : (
-                      visibleStudents.map((student) => (
-                        <tr className={selectedStudent?.id === student.id ? 'student-row active' : 'student-row'} key={student.id} onClick={() => onSelectStudent(student)} role="button" tabIndex={0}>
-                          <td><strong>{highlightMatch(student.enrollmentNumber, studentQuery)}</strong></td>
-                          <td>{highlightMatch(student.fullName, studentQuery)}</td>
-                          <td>{student.groupLabel ?? 'Sin asignar'}</td>
-                          <td>{cashPayments.some((payment) => payment.studentId === student.id) ? 'Con cobros' : 'Sin cobro'}</td>
+                    </thead>
+                    <tbody>
+                      {visibleStudents.length === 0 ? (
+                        <tr>
+                          <td colSpan={4}>
+                            <p className="empty-state compact-empty-state">No hay alumnos que coincidan con la busqueda.</p>
+                          </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                      ) : (
+                        visibleStudents.map((student) => (
+                          <tr className={selectedStudent?.id === student.id ? 'student-row active' : 'student-row'} key={student.id} onClick={() => onSelectStudent(student)} role="button" tabIndex={0}>
+                            <td><strong>{highlightMatch(student.enrollmentNumber, studentQuery)}</strong></td>
+                            <td>{highlightMatch(student.fullName, studentQuery)}</td>
+                            <td>{student.groupLabel ?? 'Sin asignar'}</td>
+                            <td>{cashPayments.some((payment) => payment.studentId === student.id) ? 'Con cobros' : 'Sin cobro'}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </SurfaceCard>
             ) : null}
 
-            <div className="cash-toolbar">
-              <div className="button-row">
-                <button className="secondary-button small-button" disabled={suggestedConcepts.length === 0} onClick={handleAddSuggestedConcepts} type="button">
-                  Agregar sugeridas
-                </button>
-                <button className="tertiary-button small-button" disabled={selectedConcepts.length === 0} onClick={handleClearConcepts} type="button">
-                  Limpiar claves
-                </button>
-              </div>
-
-              <Field className="cash-concept-search" label="Buscar clave o concepto">
-                <input placeholder="Ej. B002, examenes, documentos..." value={conceptQuery} onChange={(event) => onChangeConceptQuery(event.target.value)} />
-              </Field>
-            </div>
-
-            <p className="table-summary compact-operational-line">
-              Elegis las claves manualmente y la seleccion se limpia al cambiar de alumno.
-            </p>
-
-            {showLifeInsuranceOption ? (
-              <label className="checkbox-field compact-insurance-row">
-                <input checked={includeLifeInsurance} onChange={(event) => onToggleLifeInsurance(event.target.checked)} type="checkbox" />
-                <span>Cobrar seguro de vida ({formatCurrency(lifeInsuranceAmount)}). Este cargo se cobra junto con inscripcion, pero no se imprime en el ROC.</span>
-              </label>
-            ) : null}
-
-            <div className="cash-operator-layout">
-              <div className="cash-action-sidebar">
-                <div className="cash-selection-panel compact-selection-panel">
-                  <div className="cash-selection-header">
-                    <div>
-                      <span className="detail-label">Resumen del cobro</span>
-                      <strong>{selectedStudent ? 'Operacion lista para registrar' : 'Selecciona un alumno para empezar'}</strong>
-                    </div>
-                    <span className="status-tag">{selectedConcepts.length} claves</span>
-                  </div>
-                  {selectedConceptLabels.length > 0 ? (
-                    <div className="selected-concept-chips">
-                      {selectedConceptLabels.map((concept) => (
-                        <button className="selected-concept-chip" key={concept.concept.code} onClick={() => onToggleConcept(concept.concept)} type="button">
-                          <span>{concept.concept.code}</span>
-                          <strong>{formatCurrency(concept.amount)}</strong>
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-state compact-empty-state">Todavia no hay claves seleccionadas para este cobro.</p>
-                  )}
-                </div>
-
-                <div className="cash-sidebar-actions">
-                  <p className="total sticky-total">Total actual: {formatCurrency(total)}</p>
-                  <button className="primary-button" disabled={savingReceipt || !selectedStudent || selectedConcepts.length === 0} onClick={() => void handleCreatePaymentAndKeepCapturing()} type="button">
-                    Registrar cobro
+            <SurfaceCard>
+              <PanelSectionTitle
+                eyebrow="Conceptos"
+                title="Claves y conceptos de cobro"
+                subtitle="La tabla mantiene visible la cuota editable, el periodo y si una clave ya fue agregada al resumen."
+                action={<StatusBadge>{filteredPaymentConcepts.length} claves</StatusBadge>}
+              />
+              <div className="cash-toolbar">
+                <div className="button-row">
+                  <button className="secondary-button small-button" disabled={suggestedConcepts.length === 0} onClick={handleAddSuggestedConcepts} type="button">
+                    Agregar sugeridas
                   </button>
-                  <button className="secondary-button small-button" disabled={!selectedStudent && selectedConcepts.length === 0 && studentQuery.length === 0} onClick={handleResetCashDesk} type="button">
-                    Capturar otro alumno
+                  <button className="tertiary-button small-button" disabled={selectedConcepts.length === 0} onClick={handleClearConcepts} type="button">
+                    Limpiar claves
                   </button>
                 </div>
+
+                <Field className="cash-concept-search" label="Buscar clave o concepto">
+                  <input placeholder="Ej. B002, examenes, documentos..." value={conceptQuery} onChange={(event) => onChangeConceptQuery(event.target.value)} />
+                </Field>
               </div>
+
+              <p className="table-summary compact-operational-line">
+                Selecciona las claves manualmente. La selección se limpia al cambiar de alumno.
+              </p>
+
+              {showLifeInsuranceOption ? (
+                <label className="checkbox-field compact-insurance-row">
+                  <input checked={includeLifeInsurance} onChange={(event) => onToggleLifeInsurance(event.target.checked)} type="checkbox" />
+                  <span>Cobrar seguro de vida ({formatCurrency(lifeInsuranceAmount)}). Este cargo se cobra junto con inscripción, pero no se imprime en el ROC.</span>
+                </label>
+              ) : null}
 
               <div className="student-table-wrap compact-keys-wrap">
                 <table className="student-table compact-keys-table">
@@ -3552,6 +3943,13 @@ function IngresosPropiosOverview({
                     </tr>
                   </thead>
                   <tbody>
+                    {filteredPaymentConcepts.length === 0 ? (
+                      <tr>
+                        <td colSpan={5}>
+                          <p className="empty-state compact-empty-state">No hay claves que coincidan con la búsqueda actual.</p>
+                        </td>
+                      </tr>
+                    ) : null}
                     {filteredPaymentConcepts.map((concept) => {
                       const active = selectedConcepts.some((item) => item.code === concept.code)
                       return (
@@ -3583,7 +3981,7 @@ function IngresosPropiosOverview({
                   </tbody>
                 </table>
               </div>
-            </div>
+            </SurfaceCard>
 
             {selectedStudent ? (
               <details className="receipt-history receipt-history-panel">
@@ -3619,6 +4017,92 @@ function IngresosPropiosOverview({
               </details>
             ) : null}
           </div>
+
+          <aside className="cash-dashboard-side">
+            <div className="cash-action-sidebar">
+              <div className="cash-student-card">
+                <div className="cash-card-header">
+                  <div>
+                    <span className="detail-label">Datos del alumno seleccionado</span>
+                    <h3 className="cash-student-name">{selectedStudent ? selectedStudent.fullName : 'Sin selección'}</h3>
+                  </div>
+                  <StatusBadge>{selectedStudent ? 'Validado' : 'Pendiente'}</StatusBadge>
+                </div>
+                {selectedStudent ? (
+                  <div className="cash-student-meta-grid">
+                    <div>
+                      <span className="detail-label">Folio</span>
+                      <strong>{selectedStudent.enrollmentNumber}</strong>
+                    </div>
+                    <div>
+                      <span className="detail-label">ROC históricos</span>
+                      <strong>{receipts.length}</strong>
+                    </div>
+                    <div>
+                      <span className="detail-label">Grupo</span>
+                      <strong>{formatVisibleGroupLabel(selectedStudent.groupLabel)}</strong>
+                    </div>
+                    <div>
+                      <span className="detail-label">Tutor</span>
+                      <strong>{selectedStudent.guardianFullName ?? 'Sin tutor capturado'}</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <DashboardEmptyState
+                    title="Sin alumno seleccionado"
+                    description="Busca un alumno para mostrar su ficha administrativa y comenzar el cobro."
+                  />
+                )}
+              </div>
+
+              <div className="cash-summary-card">
+                <div className="cash-card-header">
+                  <div>
+                    <span className="detail-label">Resumen del cobro</span>
+                    <h3 className="cash-summary-title">Operación lista para registrar</h3>
+                  </div>
+                  <StatusBadge>{selectedConcepts.length} claves</StatusBadge>
+                </div>
+                {selectedStudent ? <span className="detail-label">{selectedStudent.fullName}</span> : null}
+                {selectedConceptLabels.length > 0 ? (
+                  <div className="cash-summary-list">
+                    {selectedConceptLabels.map((concept) => (
+                      <div className="cash-summary-item" key={concept.concept.code}>
+                        <div>
+                          <strong>{concept.concept.code}</strong>
+                          <span>{concept.concept.name}</span>
+                        </div>
+                        <strong>{formatCurrency(concept.amount)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <DashboardEmptyState
+                    title="Agrega una clave para preparar el cobro"
+                    description="El resumen se va llenando conforme eliges conceptos de la tabla."
+                  />
+                )}
+                <div className="cash-summary-total">
+                  <span>Total a cobrar</span>
+                  <strong>{formatCurrency(total)}</strong>
+                </div>
+                <div className="cash-action-group-label">
+                  <span className="detail-label">Acciones</span>
+                </div>
+                <div className="cash-summary-actions">
+                  <button className="primary-button cash-submit-button" disabled={savingReceipt || !selectedStudent || selectedConcepts.length === 0} onClick={() => void handleCreatePaymentAndKeepCapturing()} type="button">
+                    Registrar cobro
+                  </button>
+                  <button className="secondary-button" onClick={() => setOperationsTab('historial')} type="button">
+                    Generar ROC
+                  </button>
+                  <button className="tertiary-button" disabled={!selectedStudent && selectedConcepts.length === 0 && studentQuery.length === 0} onClick={handleResetCashDesk} type="button">
+                    Limpiar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </aside>
         </article>
       ) : null}
 
@@ -3917,4 +4401,5 @@ function Field({ label, required, className, children }: FieldProps) {
 }
 
 export default App
+
 

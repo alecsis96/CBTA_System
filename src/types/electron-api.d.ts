@@ -11,6 +11,10 @@ import type {
   ChargeConceptSummary,
   ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
+  SemesterLevel,
+  StudentAcademicMovementSummary,
+  StudentGradeEnrollmentInput,
+  StudentGroupChangeInput,
   GroupRosterImportRow,
   GroupRosterImportResult,
   GroupRosterExportResult,
@@ -30,15 +34,23 @@ import type {
   GroupStat,
   GroupPreviewRow,
   StudentDetail,
+  StudentDailyStatusSetInput,
   StudentRequirementChecklist,
   StudentFormInput,
+  StudentPermissionCancelInput,
+  StudentPermissionCreateInput,
+  StudentPermissionSummary,
   StudentSummary,
+  StudentWithdrawalInput,
   TariffUpdateInput,
 } from '@/types/domain'
 import type { DepartmentSummary, UserCreateInput, UserResetPasswordInput, UserSummary, UserUpdateInput } from '@/types/admin'
 
 type CbtaApi = {
   appName: string
+  files?: {
+    saveAndOpenWorkbook: (input: { fileName: string; base64: string }) => Promise<{ outputPath: string }>
+  }
   auth: {
     login: (input: AuthLoginInput) => Promise<AuthSession>
     logout: () => Promise<{ ok: boolean }>
@@ -52,7 +64,13 @@ type CbtaApi = {
     resetUserPassword: (userId: string, input: UserResetPasswordInput) => Promise<UserSummary>
   }
   students: {
-    list: () => Promise<StudentSummary[]>
+    list: (filters?: {
+      schoolCycle?: string
+      semesterLevel?: SemesterLevel | 'all'
+      enrollmentStatus?: string
+      documentationStatus?: string
+      query?: string
+    }) => Promise<StudentSummary[]>
     listValidated: () => Promise<StudentSummary[]>
     get: (studentId: string) => Promise<StudentDetail>
     getNextInternalFolioPreview: () => Promise<string>
@@ -60,6 +78,17 @@ type CbtaApi = {
     saveRequirementChecklist: (studentId: string, input: SaveStudentRequirementChecklistInput) => Promise<StudentRequirementChecklist>
     create: (input: StudentFormInput) => Promise<StudentSummary>
     update: (studentId: string, input: StudentFormInput) => Promise<StudentSummary>
+    changeGroup: (input: StudentGroupChangeInput) => Promise<{ ok: boolean; assignmentId: string }>
+    withdraw: (input: StudentWithdrawalInput) => Promise<{ ok: boolean; movementId: string }>
+    enrollGrade: (input: StudentGradeEnrollmentInput) => Promise<StudentSummary>
+    listMovements: (input?: { studentId?: string; schoolCycle?: string; limit?: number }) => Promise<StudentAcademicMovementSummary[]>
+  }
+  permissions: {
+    list: (filters?: { query?: string; status?: string; activeOn?: string }) => Promise<StudentPermissionSummary[]>
+    create: (input: StudentPermissionCreateInput) => Promise<StudentPermissionSummary>
+    cancel: (input: StudentPermissionCancelInput) => Promise<StudentPermissionSummary>
+    setDailyStatus: (input: StudentDailyStatusSetInput) => Promise<StudentSummary>
+    clearDailyStatus: (input: { studentId: string; date: string }) => Promise<StudentSummary>
   }
   preRegistrations: {
     list: () => Promise<PreRegistrationSummary[]>
@@ -90,19 +119,19 @@ type CbtaApi = {
       printBatch: (input: RocMonthlyExportInput) => Promise<RocMonthlyExportResult & { mode: string }>
     }
   groups: {
-    createForIntake: (input: { schoolCycle: string; labels: string[] }) => Promise<Array<{ id: string; label: string }>>
-    listForIntake: (input: { schoolCycle: string }) => Promise<{ groups: Array<{ id: string; label: string; shift: string; capacity: number }>; stats: GroupStat[] }>
-    autoAssign: (input: { schoolCycle: string }) => Promise<{ ok: boolean; assignedCount: number; groupCount: number }>
-    confirmAssignment: (input: { schoolCycle: string }) => Promise<{ ok: boolean; confirmed: number }>
+    createForIntake: (input: { schoolCycle: string; semesterLevel?: SemesterLevel; labels: string[] }) => Promise<Array<{ id: string; label: string }>>
+    listForIntake: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ groups: Array<{ id: string; label: string; shift: string; capacity: number }>; stats: GroupStat[] }>
+    autoAssign: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; assignedCount: number; groupCount: number }>
+    confirmAssignment: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; confirmed: number }>
     manualReassign: (input: { studentId: string; toGroupId: string; reason: string }) => Promise<{ ok: boolean; assignmentId: string }>
     markNoShow: (input: { studentId: string; reason: string }) => Promise<{ ok: boolean }>
-    stats: (input: { schoolCycle: string }) => Promise<GroupStat[]>
-    preview: (input: { schoolCycle: string }) => Promise<GroupStat[]>
-    previewRoster: (input: { schoolCycle: string }) => Promise<GroupPreviewRow[]>
-    listAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupAssignedRosterRow[]>
-    importAssignedRoster: (input: { schoolCycle: string; sourcePath?: string | null; rows: GroupRosterImportRow[] }) => Promise<GroupRosterImportResult>
-    exportAssignedRoster: (input: { schoolCycle: string }) => Promise<GroupRosterExportResult>
-    printAssignedRoster: (input: { schoolCycle: string }) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
+    stats: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupStat[]>
+    preview: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupStat[]>
+    previewRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupPreviewRow[]>
+    listAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupAssignedRosterRow[]>
+    importAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel; sourcePath?: string | null; rows: GroupRosterImportRow[] }) => Promise<GroupRosterImportResult>
+    exportAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupRosterExportResult>
+    printAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
   }
   audit: {
     listRecent: () => Promise<AuditLogSummary[]>

@@ -24,11 +24,20 @@ import type {
   RocMonthlyExportResult,
   RocReceiptSummary,
   SaveStudentRequirementChecklistInput,
+  SemesterLevel,
   SepExportResult,
+  StudentDailyStatusSetInput,
+  StudentAcademicMovementSummary,
   StudentDetail,
   StudentFormInput,
+  StudentGradeEnrollmentInput,
+  StudentGroupChangeInput,
+  StudentPermissionCancelInput,
+  StudentPermissionCreateInput,
+  StudentPermissionSummary,
   StudentRequirementChecklist,
   StudentSummary,
+  StudentWithdrawalInput,
   TariffUpdateInput,
 } from '@/types/domain'
 import type { DepartmentSummary, UserCreateInput, UserResetPasswordInput, UserSummary, UserUpdateInput } from '@/types/admin'
@@ -54,12 +63,38 @@ const SESSION_KEY = 'cbta-browser-session'
 const ROC_CONFIG_KEY = 'cbta-browser-roc-config'
 const USERS_KEY = 'cbta-browser-users'
 const DEPARTMENTS_KEY = 'cbta-browser-departments'
+const STUDENT_MOVEMENTS_KEY = 'cbta-browser-student-movements'
+const STUDENT_PERMISSIONS_KEY = 'cbta-browser-student-permissions'
+const STUDENT_DAILY_STATUS_KEY = 'cbta-browser-student-daily-status'
+
+const MATUTINO_SHIFT = 'MATUTINO'
 
 type BrowserUser = UserSummary & { password: string }
+type BrowserStudentDetail = StudentDetail & {
+  groupLabel: string | null
+  shiftLabel: string | null
+}
+type BrowserGroup = {
+  id: string
+  label: string
+  shift: string
+  capacity: number
+  schoolCycle: string
+  semesterLevel: SemesterLevel
+}
+
+type BrowserStudentPermission = StudentPermissionSummary
+type BrowserDailyStatusRecord = {
+  studentId: string
+  date: string
+  status: 'AUSENTE'
+  notes: string | null
+}
 
 const seededDepartments: DepartmentSummary[] = [
   { id: 'browser-dept-control', code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.', isActive: true },
   { id: 'browser-dept-ingresos', code: 'INGRESOS_PROPIOS', name: 'Ingresos Propios', description: 'Cobros, tarifas, consecutivos y emision de ROC.', isActive: true },
+  { id: 'browser-dept-secretaria', code: 'SECRETARIA', name: 'Secretaria', description: 'Otorga permisos, registra incidencias diarias y da seguimiento operativo a alumnos.', isActive: true },
   { id: 'browser-dept-admin', code: 'ADMINISTRACION', name: 'Administracion General', description: 'Administracion de usuarios, catalogos y configuracion institucional.', isActive: true },
   { id: 'browser-dept-direccion', code: 'DIRECCION', name: 'Direccion', description: 'Departamento directivo preparado para crecimiento modular.', isActive: true },
 ]
@@ -67,6 +102,7 @@ const seededDepartments: DepartmentSummary[] = [
 const browserUsers: BrowserUser[] = [
   { id: 'browser-control-1', username: 'control.escolar.1', displayName: 'Control Escolar 1', role: 'CONTROL_ESCOLAR', departmentId: 'browser-dept-control', departmentName: 'Control Escolar', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Control123!' },
   { id: 'browser-ingresos-1', username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', departmentId: 'browser-dept-ingresos', departmentName: 'Ingresos Propios', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Ingresos123!' },
+  { id: 'browser-secretaria-1', username: 'secretaria.1', displayName: 'Secretaria Escolar 1', role: 'SECRETARIA', departmentId: 'browser-dept-secretaria', departmentName: 'Secretaria', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Secretaria123!' },
   { id: 'browser-admin-1', username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', departmentId: 'browser-dept-admin', departmentName: 'Administracion General', isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), password: 'Admin123!' },
 ]
 
@@ -290,11 +326,35 @@ function assertCanChangeBrowserAdmin(userId: string, role: UserSummary['role'], 
 }
 
 function getStudents() {
-  return safeParse<StudentDetail[]>(window.localStorage.getItem(STUDENTS_KEY), [])
+  return safeParse<BrowserStudentDetail[]>(window.localStorage.getItem(STUDENTS_KEY), [])
 }
 
-function saveStudents(students: StudentDetail[]) {
+function saveStudents(students: BrowserStudentDetail[]) {
   window.localStorage.setItem(STUDENTS_KEY, JSON.stringify(students))
+}
+
+function getStudentMovements() {
+  return safeParse<StudentAcademicMovementSummary[]>(window.localStorage.getItem(STUDENT_MOVEMENTS_KEY), [])
+}
+
+function saveStudentMovements(items: StudentAcademicMovementSummary[]) {
+  window.localStorage.setItem(STUDENT_MOVEMENTS_KEY, JSON.stringify(items))
+}
+
+function getStudentPermissions() {
+  return safeParse<BrowserStudentPermission[]>(window.localStorage.getItem(STUDENT_PERMISSIONS_KEY), [])
+}
+
+function saveStudentPermissions(items: BrowserStudentPermission[]) {
+  window.localStorage.setItem(STUDENT_PERMISSIONS_KEY, JSON.stringify(items))
+}
+
+function getDailyStatusOverrides() {
+  return safeParse<BrowserDailyStatusRecord[]>(window.localStorage.getItem(STUDENT_DAILY_STATUS_KEY), [])
+}
+
+function saveDailyStatusOverrides(items: BrowserDailyStatusRecord[]) {
+  window.localStorage.setItem(STUDENT_DAILY_STATUS_KEY, JSON.stringify(items))
 }
 
 function getConcepts() {
@@ -405,6 +465,15 @@ function saveSession(session: AuthSession | null) {
   window.localStorage.setItem(SESSION_KEY, JSON.stringify(session))
 }
 
+function isoDay(value?: string | Date) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value
+  }
+
+  const base = value ? new Date(value) : new Date()
+  return new Date(base.getFullYear(), base.getMonth(), base.getDate()).toISOString().slice(0, 10)
+}
+
 function toPreRegistrationSummary(item: BrowserPreRegistrationRecord): PreRegistrationSummary {
   return {
     id: item.id,
@@ -419,7 +488,7 @@ function toPreRegistrationSummary(item: BrowserPreRegistrationRecord): PreRegist
   }
 }
 
-function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomUUID()): StudentDetail {
+function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomUUID()): BrowserStudentDetail {
   return {
     id,
     firstName: input.firstName,
@@ -445,6 +514,7 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     secondaryAverage: input.secondaryAverage,
     examRoom: input.examRoom,
     schoolCycle: input.schoolCycle,
+    semesterLevel: input.semesterLevel,
     academicStatus: input.academicStatus,
     guardianFullName: input.guardianFullName,
     guardianRelationship: input.guardianRelationship,
@@ -452,15 +522,29 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     guardianPhoneSecondary: input.guardianPhoneSecondary,
     guardianEmail: input.guardianEmail,
     validateNow: input.validateNow,
+    documentationStatus: 'PENDIENTE',
+    enrollmentStatus: input.validateNow ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
     statusLabel: input.validateNow ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
+    groupLabel: null,
+    shiftLabel: null,
   }
 }
 
-function toStudentSummary(student: StudentDetail): StudentSummary {
+function toStudentSummary(student: BrowserStudentDetail): StudentSummary {
   const fullName = `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim()
   const address = [student.addressLine, student.neighborhood, student.locality, student.municipality, student.state]
     .filter(Boolean)
     .join(', ')
+  const today = isoDay()
+  const activePermission = getStudentPermissions().find((permission) =>
+    permission.studentId === student.id &&
+    permission.status !== 'CANCELADO' &&
+    permission.startsAt.slice(0, 10) <= today &&
+    permission.endsAt.slice(0, 10) >= today,
+  )
+  const dailyOverride = getDailyStatusOverrides().find((item) => item.studentId === student.id && item.date === today)
+  const dailyStatus = activePermission ? 'PERMISO' : dailyOverride?.status === 'AUSENTE' ? 'AUSENTE' : 'PRESENTE'
+  const dailyStatusLabel = dailyStatus === 'PERMISO' ? 'Permiso' : dailyStatus === 'AUSENTE' ? 'Ausente' : 'Presente'
 
   return {
     id: student.id,
@@ -479,11 +563,44 @@ function toStudentSummary(student: StudentDetail): StudentSummary {
     guardianPhone: student.guardianPhone || null,
     admissionPaid: true,
     admissionPaymentStatus: 'PAGADO_PENDIENTE_CAPTURA',
-    documentationStatus: 'PENDIENTE',
+    schoolCycle: student.schoolCycle,
+    semesterLevel: student.semesterLevel,
+    academicStatus: student.academicStatus || null,
+    documentationStatus: student.documentationStatus,
+    enrollmentStatus: student.enrollmentStatus,
     statusLabel: student.statusLabel,
-    groupLabel: null,
-    shiftLabel: null,
+    groupLabel: student.groupLabel,
+    shiftLabel: student.shiftLabel,
+    dailyStatus,
+    dailyStatusLabel,
+    activePermissionSummary: activePermission?.reason ?? null,
   }
+}
+
+function toSemesterLevel(value: number | string | null | undefined): SemesterLevel {
+  if (Number(value) === 3) return 3
+  if (Number(value) === 5) return 5
+  return 1
+}
+
+function getBrowserGroups(schoolCycle: string, semesterLevel: SemesterLevel): BrowserGroup[] {
+  const labels = new Set(
+    getStudents()
+      .filter((student) => student.schoolCycle === schoolCycle && toSemesterLevel(student.semesterLevel) === semesterLevel)
+      .map((student) => student.groupLabel)
+      .filter((label): label is string => Boolean(label)),
+  )
+
+  return Array.from(labels)
+    .sort((a, b) => a.localeCompare(b))
+    .map((label) => ({
+      id: `${schoolCycle}-${semesterLevel}-${label}`,
+      label,
+      shift: MATUTINO_SHIFT,
+      capacity: 40,
+      schoolCycle,
+      semesterLevel,
+    }))
 }
 
 export const browserFallbackApi = {
@@ -576,8 +693,25 @@ export const browserFallbackApi = {
     },
   },
   students: {
-    async list() {
-      return getStudents().map(toStudentSummary)
+    async list(filters?: {
+      schoolCycle?: string
+      semesterLevel?: SemesterLevel | 'all'
+      enrollmentStatus?: string
+      documentationStatus?: string
+      query?: string
+    }) {
+      const normalizedQuery = filters?.query?.trim().toLowerCase() ?? ''
+      return getStudents()
+        .filter((student) => {
+          if (filters?.schoolCycle?.trim() && student.schoolCycle !== filters.schoolCycle.trim()) return false
+          if (filters?.semesterLevel && filters.semesterLevel !== 'all' && toSemesterLevel(student.semesterLevel) !== filters.semesterLevel) return false
+          if (filters?.enrollmentStatus?.trim() && student.enrollmentStatus !== filters.enrollmentStatus.trim()) return false
+          if (filters?.documentationStatus?.trim() && student.documentationStatus !== filters.documentationStatus.trim()) return false
+          if (!normalizedQuery) return true
+          const haystack = `${student.enrollmentNumber} ${student.curp} ${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.toLowerCase()
+          return haystack.includes(normalizedQuery)
+        })
+        .map(toStudentSummary)
     },
     async listValidated() {
       return getStudents()
@@ -654,6 +788,220 @@ export const browserFallbackApi = {
       })
 
       return toStudentSummary(next)
+    },
+    async changeGroup(input: StudentGroupChangeInput) {
+      const students = getStudents()
+      const studentIndex = students.findIndex((item) => item.id === input.studentId)
+      if (studentIndex === -1) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const target = students[studentIndex]
+      const groups = getBrowserGroups(target.schoolCycle, toSemesterLevel(target.semesterLevel))
+      const destination = groups.find((group) => group.id === input.toGroupId)
+      students[studentIndex] = {
+        ...target,
+        groupLabel: destination?.label ?? target.groupLabel,
+        shiftLabel: destination?.shift ?? target.shiftLabel ?? MATUTINO_SHIFT,
+        enrollmentStatus: 'ASIGNADO',
+        statusLabel: 'ASIGNADO',
+      }
+      saveStudents(students)
+      const movementId = crypto.randomUUID()
+      saveStudentMovements([{
+        id: movementId,
+        studentId: target.id,
+        studentName: `${target.firstName} ${target.paternalLastName} ${target.maternalLastName}`.trim(),
+        studentEnrollmentNumber: target.enrollmentNumber,
+        movementType: 'CAMBIO_GRUPO',
+        reasonCode: input.reasonCode,
+        reasonLabel: input.reasonCode,
+        notes: input.notes ?? null,
+        previousSemesterLevel: target.semesterLevel,
+        nextSemesterLevel: target.semesterLevel,
+        previousGroupLabel: target.groupLabel,
+        nextGroupLabel: destination?.label ?? null,
+        previousEnrollmentStatus: target.enrollmentStatus,
+        nextEnrollmentStatus: 'ASIGNADO',
+        actorName: 'Modo navegador',
+        createdAt: new Date().toISOString(),
+      }, ...getStudentMovements()])
+      return { ok: true, assignmentId: movementId }
+    },
+    async withdraw(input: StudentWithdrawalInput) {
+      const students = getStudents()
+      const studentIndex = students.findIndex((item) => item.id === input.studentId)
+      if (studentIndex === -1) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const target = students[studentIndex]
+      students[studentIndex] = {
+        ...target,
+        enrollmentStatus: 'BAJA',
+        statusLabel: 'BAJA',
+        groupLabel: null,
+        shiftLabel: null,
+      }
+      saveStudents(students)
+      const movementId = crypto.randomUUID()
+      saveStudentMovements([{
+        id: movementId,
+        studentId: target.id,
+        studentName: `${target.firstName} ${target.paternalLastName} ${target.maternalLastName}`.trim(),
+        studentEnrollmentNumber: target.enrollmentNumber,
+        movementType: 'BAJA',
+        reasonCode: input.reasonCode,
+        reasonLabel: input.reasonCode,
+        notes: input.notes ?? null,
+        previousSemesterLevel: target.semesterLevel,
+        nextSemesterLevel: target.semesterLevel,
+        previousGroupLabel: target.groupLabel,
+        nextGroupLabel: null,
+        previousEnrollmentStatus: target.enrollmentStatus,
+        nextEnrollmentStatus: 'BAJA',
+        actorName: 'Modo navegador',
+        createdAt: new Date().toISOString(),
+      }, ...getStudentMovements()])
+      return { ok: true, movementId }
+    },
+    async enrollGrade(input: StudentGradeEnrollmentInput) {
+      const students = getStudents()
+      const studentIndex = students.findIndex((item) => item.id === input.studentId)
+      if (studentIndex === -1) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const target = students[studentIndex]
+      students[studentIndex] = {
+        ...target,
+        schoolCycle: input.schoolCycle,
+        semesterLevel: input.semesterLevel,
+        groupLabel: input.toGroupId ?? null,
+        shiftLabel: input.toGroupId ? MATUTINO_SHIFT : null,
+        enrollmentStatus: input.toGroupId ? 'ASIGNADO' : 'INSCRITO',
+        statusLabel: input.toGroupId ? 'ASIGNADO' : 'INSCRITO',
+      }
+      saveStudents(students)
+      saveStudentMovements([{
+        id: crypto.randomUUID(),
+        studentId: target.id,
+        studentName: `${target.firstName} ${target.paternalLastName} ${target.maternalLastName}`.trim(),
+        studentEnrollmentNumber: target.enrollmentNumber,
+        movementType: 'ALTA_GRADO',
+        reasonCode: input.reasonCode,
+        reasonLabel: input.reasonCode,
+        notes: input.notes ?? null,
+        previousSemesterLevel: target.semesterLevel,
+        nextSemesterLevel: input.semesterLevel,
+        previousGroupLabel: target.groupLabel,
+        nextGroupLabel: input.toGroupId ?? null,
+        previousEnrollmentStatus: target.enrollmentStatus,
+        nextEnrollmentStatus: input.toGroupId ? 'ASIGNADO' : 'INSCRITO',
+        actorName: 'Modo navegador',
+        createdAt: new Date().toISOString(),
+      }, ...getStudentMovements()])
+      return toStudentSummary(students[studentIndex])
+    },
+    async listMovements(input?: { studentId?: string; schoolCycle?: string; limit?: number }) {
+      return getStudentMovements()
+        .filter((item) => (input?.studentId ? item.studentId === input.studentId : true))
+        .slice(0, input?.limit ?? 100)
+    },
+  },
+  permissions: {
+    async list(filters?: { query?: string; status?: string; activeOn?: string }) {
+      const normalizedQuery = filters?.query?.trim().toLowerCase() ?? ''
+      const targetDay = isoDay(filters?.activeOn)
+      return getStudentPermissions().filter((permission) => {
+        if (filters?.status?.trim() && filters.status !== 'all' && permission.status !== filters.status) return false
+        if (!normalizedQuery) return true
+        const haystack = [
+          permission.enrollmentNumber,
+          permission.studentName,
+          permission.reason,
+          permission.notes ?? '',
+        ].join(' ').toLowerCase()
+        return haystack.includes(normalizedQuery) || (permission.startsAt.slice(0, 10) <= targetDay && permission.endsAt.slice(0, 10) >= targetDay)
+      })
+    },
+    async create(input: StudentPermissionCreateInput) {
+      const student = getStudents().find((item) => item.id === input.studentId)
+      if (!student) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const session = getSession()
+      const today = isoDay()
+      const startsAt = new Date(input.startsAt).toISOString()
+      const endsAt = new Date(input.endsAt).toISOString()
+      const status =
+        endsAt.slice(0, 10) < today ? 'CERRADO' : startsAt.slice(0, 10) <= today && endsAt.slice(0, 10) >= today ? 'ACTIVO' : 'PROGRAMADO'
+      const permission: BrowserStudentPermission = {
+        id: crypto.randomUUID(),
+        studentId: input.studentId,
+        studentName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim(),
+        enrollmentNumber: student.enrollmentNumber,
+        groupLabel: student.groupLabel,
+        dailyStatus: startsAt.slice(0, 10) <= today && endsAt.slice(0, 10) >= today ? 'PERMISO' : 'PRESENTE',
+        kind: input.kind,
+        reason: input.reason.trim(),
+        notes: input.notes?.trim() || null,
+        startsAt,
+        endsAt,
+        status,
+        grantedByName: session?.displayName ?? 'Modo navegador',
+        closedByName: null,
+        activeToday: startsAt.slice(0, 10) <= today && endsAt.slice(0, 10) >= today,
+      }
+      saveStudentPermissions([permission, ...getStudentPermissions()])
+      return permission
+    },
+    async cancel(input: StudentPermissionCancelInput) {
+      const session = getSession()
+      let updated: BrowserStudentPermission | null = null
+      const next = getStudentPermissions().map((permission) => {
+        if (permission.id !== input.permissionId) return permission
+        updated = {
+          ...permission,
+          status: 'CANCELADO',
+          closedByName: session?.displayName ?? 'Modo navegador',
+          notes: [permission.notes, input.notes?.trim()].filter(Boolean).join(' | ') || null,
+          activeToday: false,
+          dailyStatus: 'PRESENTE',
+        }
+        return updated
+      })
+      saveStudentPermissions(next)
+      if (!updated) {
+        throw new Error('Permiso no encontrado en modo navegador.')
+      }
+      return updated
+    },
+    async setDailyStatus(input: StudentDailyStatusSetInput) {
+      const students = getStudents()
+      const student = students.find((item) => item.id === input.studentId)
+      if (!student) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const date = isoDay(input.date)
+      const existing = getDailyStatusOverrides().filter((item) => !(item.studentId === input.studentId && item.date === date))
+      if (input.status === 'AUSENTE') {
+        existing.unshift({
+          studentId: input.studentId,
+          date,
+          status: 'AUSENTE',
+          notes: input.notes?.trim() || null,
+        })
+      }
+      saveDailyStatusOverrides(existing)
+      return toStudentSummary(student)
+    },
+    async clearDailyStatus(input: { studentId: string; date: string }) {
+      const students = getStudents()
+      const student = students.find((item) => item.id === input.studentId)
+      if (!student) {
+        throw new Error('Alumno no encontrado en modo navegador.')
+      }
+      const date = isoDay(input.date)
+      saveDailyStatusOverrides(getDailyStatusOverrides().filter((item) => !(item.studentId === input.studentId && item.date === date)))
+      return toStudentSummary(student)
     },
   },
   preRegistrations: {

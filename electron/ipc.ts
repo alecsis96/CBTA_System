@@ -1,14 +1,15 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, extname, join } from 'node:path'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import * as XLSX from 'xlsx'
 import { prisma } from './db'
 import { exportOfficialRocTemplateBatch, openOfficialRocTemplate, type RocTemplatePayload } from './roc-template'
+import { getGeneratedRocsDir } from './runtime-paths'
 import { buildPasswordHash, verifyPassword } from '../shared/auth-password'
 
-type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
+type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
 
 type SessionUser = {
   id: string
@@ -19,11 +20,20 @@ type SessionUser = {
 
 let currentSession: SessionUser | null = null
 const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
-const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'])
+const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
+const semesterLevelSchema = z.union([z.literal(1), z.literal(3), z.literal(5)])
+const studentDailyStatusSchema = z.enum(['PRESENTE', 'PERMISO', 'AUSENTE'])
+const studentPermissionKindSchema = z.enum(['PERMISO_GENERAL', 'SALIDA_ANTICIPADA', 'DIA_COMPLETO', 'JUSTIFICANTE_MEDICO'])
+const studentPermissionStatusSchema = z.enum(['PROGRAMADO', 'ACTIVO', 'CERRADO', 'CANCELADO'])
 
 const authLoginSchema = z.object({
   username: z.string().trim().min(1),
   password: z.string().min(1),
+})
+
+const saveWorkbookSchema = z.object({
+  fileName: z.string().trim().min(1),
+  base64: z.string().min(1),
 })
 
 const adminUserCreateSchema = z.object({
@@ -165,6 +175,7 @@ const studentInputSchema = z.object({
   secondaryAverage: z.number().min(0).max(10).optional().nullable(),
   examRoom: z.string().trim().optional().nullable(),
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
   academicStatus: z.string().trim().optional().nullable(),
   guardianFullName: z.string().min(1),
   guardianRelationship: z.string().trim().optional().nullable(),
@@ -172,6 +183,77 @@ const studentInputSchema = z.object({
   guardianPhoneSecondary: z.string().trim().optional().nullable(),
   guardianEmail: z.string().email().optional().or(z.literal('')).nullable(),
   validateNow: z.boolean().default(false),
+})
+
+const studentListFiltersSchema = z.object({
+  schoolCycle: z.string().trim().optional(),
+  semesterLevel: z.union([semesterLevelSchema, z.literal('all')]).optional(),
+  enrollmentStatus: z.string().trim().optional(),
+  documentationStatus: z.string().trim().optional(),
+  query: z.string().trim().optional(),
+}).optional()
+
+const studentGroupChangeSchema = z.object({
+  studentId: z.string().min(1),
+  toGroupId: z.string().min(1),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+})
+
+const studentWithdrawalSchema = z.object({
+  studentId: z.string().min(1),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+  effectiveDate: z.string().trim().optional(),
+})
+
+const studentGradeEnrollmentSchema = z.object({
+  studentId: z.string().min(1),
+  schoolCycle: z.string().trim().min(1),
+  semesterLevel: semesterLevelSchema,
+  toGroupId: z.string().trim().min(1).nullable().optional(),
+  reasonCode: z.string().trim().min(1),
+  notes: z.string().trim().optional(),
+})
+
+const studentMovementListSchema = z.object({
+  studentId: z.string().trim().optional(),
+  schoolCycle: z.string().trim().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).optional()
+
+const permissionListFiltersSchema = z
+  .object({
+    query: z.string().trim().optional(),
+    status: z.string().trim().optional(),
+    activeOn: z.string().trim().optional(),
+  })
+  .optional()
+
+const permissionCreateSchema = z.object({
+  studentId: z.string().min(1),
+  kind: studentPermissionKindSchema.default('PERMISO_GENERAL'),
+  reason: z.string().trim().min(3),
+  notes: z.string().trim().optional(),
+  startsAt: z.string().trim().min(1),
+  endsAt: z.string().trim().min(1),
+})
+
+const permissionCancelSchema = z.object({
+  permissionId: z.string().min(1),
+  notes: z.string().trim().optional(),
+})
+
+const dailyStatusSetSchema = z.object({
+  studentId: z.string().min(1),
+  date: z.string().trim().min(1),
+  status: z.enum(['AUSENTE', 'PRESENTE']),
+  notes: z.string().trim().optional(),
+})
+
+const dailyStatusClearSchema = z.object({
+  studentId: z.string().min(1),
+  date: z.string().trim().min(1),
 })
 
 const receiptInputSchema = z.object({
@@ -297,19 +379,23 @@ const sepExportSchema = z.object({
 
 const createIntakeGroupSchema = z.object({
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
   labels: z.array(z.string().regex(/^1[A-Z]$/)).min(1),
 })
 
 const listIntakeGroupsSchema = z.object({
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
 })
 
 const runAssignmentSchema = z.object({
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
 })
 
 const confirmAssignmentSchema = z.object({
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
 })
 
 const manualReassignSchema = z.object({
@@ -335,6 +421,7 @@ const saveRequirementChecklistSchema = z.object({
 
 const groupAssignedRosterSchema = z.object({
   schoolCycle: z.string().min(1),
+  semesterLevel: semesterLevelSchema.default(1),
 })
 
 const importAssignedRosterSchema = z.object({
@@ -344,6 +431,7 @@ const importAssignedRosterSchema = z.object({
     sheetName: z.string().trim().min(1),
     rowNumber: z.number().int().min(1),
     groupLabel: z.string().trim().min(1),
+    semesterLevel: semesterLevelSchema.nullable().optional(),
     enrollmentNumber: z.string().trim().nullable(),
     curp: z.string().trim().nullable(),
   })).min(1),
@@ -488,6 +576,70 @@ function normalizeOptional(value: string | null | undefined) {
   return trimmed.length > 0 ? trimmed : null
 }
 
+function startOfLocalDay(value?: string | Date) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number)
+    return new Date(year, month - 1, day, 0, 0, 0, 0)
+  }
+
+  const base = value ? new Date(value) : new Date()
+  return new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0, 0)
+}
+
+function endOfLocalDay(value?: string | Date) {
+  const start = startOfLocalDay(value)
+  return new Date(start.getFullYear(), start.getMonth(), start.getDate(), 23, 59, 59, 999)
+}
+
+function normalizePermissionStatus(permission: {
+  status: string
+  startsAt: Date
+  endsAt: Date
+}, now = new Date()) {
+  if (permission.status === 'CANCELADO') {
+    return 'CANCELADO' as const
+  }
+
+  if (now > permission.endsAt) {
+    return 'CERRADO' as const
+  }
+
+  if (now >= permission.startsAt && now <= permission.endsAt) {
+    return 'ACTIVO' as const
+  }
+
+  return 'PROGRAMADO' as const
+}
+
+function deriveStudentDailyStatus(student: {
+  dailyStatuses?: Array<{ status: string }>
+  permissions?: Array<{ status: string; startsAt: Date; endsAt: Date; reason: string }>
+}, now = new Date()) {
+  const activePermission = student.permissions?.find((permission) => normalizePermissionStatus(permission, now) !== 'CANCELADO') ?? null
+  if (activePermission) {
+    return {
+      dailyStatus: 'PERMISO' as const,
+      dailyStatusLabel: 'Permiso',
+      activePermissionSummary: activePermission.reason,
+    }
+  }
+
+  const override = student.dailyStatuses?.[0] ?? null
+  if (override?.status === 'AUSENTE') {
+    return {
+      dailyStatus: 'AUSENTE' as const,
+      dailyStatusLabel: 'Ausente',
+      activePermissionSummary: null,
+    }
+  }
+
+  return {
+    dailyStatus: 'PRESENTE' as const,
+    dailyStatusLabel: 'Presente',
+    activePermissionSummary: null,
+  }
+}
+
 function enrollmentStatusLabel(enrollmentStatus: string | null | undefined) {
   switch (enrollmentStatus) {
     case 'FICHA_ENTREGADA':
@@ -531,6 +683,9 @@ function studentSummary(student: {
   locality: string | null
   municipality: string | null
   state: string | null
+  schoolCycle: string
+  semesterLevel: number
+  academicStatus: string | null
   status: string
   documentationStatus: string
   enrollmentStatus?: string | null
@@ -544,6 +699,15 @@ function studentSummary(student: {
     fullName: string
     phone: string
   } | null
+  dailyStatuses?: Array<{
+    status: string
+  }>
+  permissions?: Array<{
+    status: string
+    startsAt: Date
+    endsAt: Date
+    reason: string
+  }>
   groupAssignment?: {
     group: {
       label: string
@@ -552,6 +716,7 @@ function studentSummary(student: {
   } | null
 }) {
   const latestCashPayment = student.cashPayments?.[0] ?? null
+  const dayStatus = deriveStudentDailyStatus(student)
 
   return {
     id: student.id,
@@ -565,7 +730,11 @@ function studentSummary(student: {
     guardianPhone: student.guardian?.phone ?? null,
     admissionPaid: Boolean(student.admissionPayment) || Boolean(latestCashPayment),
     admissionPaymentStatus: latestCashPayment?.status ?? student.admissionPayment?.status ?? null,
+    schoolCycle: student.schoolCycle,
+    semesterLevel: normalizeSemesterLevel(student.semesterLevel),
+    academicStatus: student.academicStatus ?? null,
     documentationStatus: student.documentationStatus,
+    enrollmentStatus: student.enrollmentStatus ?? 'INSCRITO',
     firstName: student.firstName,
     paternalLastName: student.paternalLastName,
     maternalLastName: student.maternalLastName,
@@ -576,6 +745,9 @@ function studentSummary(student: {
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
     groupLabel: student.groupAssignment?.group.label ?? null,
     shiftLabel: student.groupAssignment?.group.shift ?? null,
+    dailyStatus: dayStatus.dailyStatus,
+    dailyStatusLabel: dayStatus.dailyStatusLabel,
+    activePermissionSummary: dayStatus.activePermissionSummary,
   }
 }
 
@@ -604,8 +776,10 @@ function studentDetail(student: {
   secondaryAverage: unknown
   examRoom: string | null
   schoolCycle: string
+  semesterLevel: number
   academicStatus: string | null
   status: string
+  documentationStatus: string
   enrollmentStatus?: string | null
   guardian: {
     fullName: string
@@ -640,6 +814,7 @@ function studentDetail(student: {
     secondaryAverage: student.secondaryAverage == null ? null : Number(student.secondaryAverage),
     examRoom: student.examRoom ?? '',
     schoolCycle: student.schoolCycle,
+    semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? '',
     guardianFullName: student.guardian?.fullName ?? '',
     guardianRelationship: student.guardian?.relationship ?? '',
@@ -647,7 +822,47 @@ function studentDetail(student: {
     guardianPhoneSecondary: student.guardian?.secondaryPhone ?? '',
     guardianEmail: student.guardian?.email ?? '',
     validateNow: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'].includes(student.status),
+    documentationStatus: student.documentationStatus,
+    enrollmentStatus: student.enrollmentStatus ?? 'INSCRITO',
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
+  }
+}
+
+function academicMovementSummary(item: {
+  id: string
+  studentId: string
+  movementType: string
+  reasonCode: string
+  reasonLabel: string
+  notes: string | null
+  previousSemesterLevel: number | null
+  nextSemesterLevel: number | null
+  previousGroupLabel: string | null
+  nextGroupLabel: string | null
+  previousEnrollmentStatus: string | null
+  nextEnrollmentStatus: string | null
+  createdAt: Date
+  actorRole: string
+  student: { enrollmentNumber: string; firstName: string; paternalLastName: string; maternalLastName: string }
+  actor: { displayName: string } | null
+}) {
+  return {
+    id: item.id,
+    studentId: item.studentId,
+    studentName: `${item.student.firstName} ${item.student.paternalLastName} ${item.student.maternalLastName}`.replace(/\s+/g, ' ').trim(),
+    studentEnrollmentNumber: item.student.enrollmentNumber,
+    movementType: item.movementType,
+    reasonCode: item.reasonCode,
+    reasonLabel: item.reasonLabel,
+    notes: item.notes ?? null,
+    previousSemesterLevel: item.previousSemesterLevel == null ? null : normalizeSemesterLevel(item.previousSemesterLevel),
+    nextSemesterLevel: item.nextSemesterLevel == null ? null : normalizeSemesterLevel(item.nextSemesterLevel),
+    previousGroupLabel: item.previousGroupLabel ?? null,
+    nextGroupLabel: item.nextGroupLabel ?? null,
+    previousEnrollmentStatus: item.previousEnrollmentStatus ?? null,
+    nextEnrollmentStatus: item.nextEnrollmentStatus ?? null,
+    actorName: item.actor?.displayName ?? 'Sistema',
+    createdAt: item.createdAt.toISOString(),
   }
 }
 
@@ -1020,7 +1235,15 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
   const receipt = await prisma.rocReceipt.findUnique({
     where: { id: receiptId },
     include: {
-      student: true,
+      student: {
+        include: {
+          groupAssignment: {
+            include: {
+              group: true
+            }
+          }
+        }
+      },
       lines: {
         include: {
           concept: true,
@@ -1033,36 +1256,26 @@ async function buildOfficialTemplateFromReceipt(receiptId: string) {
     throw new Error('No se encontro el ROC solicitado.')
   }
 
-  const outputPath = await openOfficialRocTemplate({
-    rocNumber: receipt.rocNumber,
-    fullName: `${receipt.student.paternalLastName} ${receipt.student.maternalLastName} ${receipt.student.firstName}`,
-    identifier: receipt.student.rfc || receipt.student.enrollmentNumber,
-    address: [receipt.student.addressLine, receipt.student.neighborhood, receipt.student.locality, receipt.student.municipality, receipt.student.state]
-      .filter(Boolean)
-      .join(', '),
-    grade: '',
-    group: '',
-    shift: 'MATUTINO',
-    printDate: new Date().toLocaleDateString('es-MX', {
-      day: '2-digit',
-      month: 'short',
-      year: '2-digit',
-    }),
-    totalAmount: Number(receipt.totalAmount),
-    amountInWords: amountToWords(Number(receipt.totalAmount)),
-    lines: receipt.lines.map((line) => ({
-      code: line.concept.code,
-      name: line.concept.name,
-      amount: Number(line.unitAmount),
-    })),
-  })
+  if (receipt.status === 'ANULADO') {
+    throw new Error(`El ROC ${receipt.rocNumber} esta anulado y no se puede reimprimir. Si fue un error, genera uno nuevo desde pendientes.`)
+  }
+
+  const outputPath = await openOfficialRocTemplate(receiptToTemplatePayload(receipt))
 
   return { receipt, outputPath }
 }
 
 type ReceiptForTemplate = Prisma.RocReceiptGetPayload<{
   include: {
-    student: true
+    student: {
+      include: {
+        groupAssignment: {
+          include: {
+            group: true
+          }
+        }
+      }
+    }
     lines: {
       include: {
         concept: true
@@ -1079,17 +1292,73 @@ function formatRocPrintDate(value: Date) {
   })
 }
 
-function receiptToTemplatePayload(receipt: ReceiptForTemplate): RocTemplatePayload {
+function rocGradeLabel(semesterLevel: number) {
+  return String(normalizeSemesterLevel(semesterLevel))
+}
+
+function rocGroupLabel(groupLabel: string | null | undefined) {
+  return (groupLabel ?? '').trim().replace(/^\d+\s*/u, '')
+}
+
+function buildRocStudentPayloadFields(student: ReceiptForTemplate['student']) {
   return {
-    rocNumber: receipt.rocNumber,
-    fullName: `${receipt.student.paternalLastName} ${receipt.student.maternalLastName} ${receipt.student.firstName}`.replace(/\s+/g, ' ').trim(),
-    identifier: receipt.student.rfc || receipt.student.enrollmentNumber,
-    address: [receipt.student.addressLine, receipt.student.neighborhood, receipt.student.locality, receipt.student.municipality, receipt.student.state]
+    fullName: `${student.paternalLastName} ${student.maternalLastName} ${student.firstName}`.replace(/\s+/g, ' ').trim(),
+    identifier: student.rfc || student.enrollmentNumber,
+    address: [student.addressLine, student.neighborhood, student.locality, student.municipality, student.state]
       .filter(Boolean)
       .join(', '),
-    grade: '',
-    group: '',
-    shift: 'MATUTINO',
+    grade: rocGradeLabel(student.semesterLevel),
+    group: rocGroupLabel(student.groupAssignment?.group?.label),
+    shift: student.groupAssignment?.group?.shift ?? 'MATUTINO',
+  }
+}
+
+function summaryStudentInclude(referenceDate?: string | Date) {
+  const dayStart = startOfLocalDay(referenceDate)
+  const dayEnd = endOfLocalDay(referenceDate)
+
+  return {
+    groupAssignment: { include: { group: true } },
+    guardian: true,
+    admissionPayment: { select: { status: true } },
+    cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' as const }, take: 1 },
+    dailyStatuses: {
+      where: { date: dayStart },
+      select: { status: true },
+      take: 1,
+    },
+    permissions: {
+      where: {
+        status: { in: ['PROGRAMADO', 'ACTIVO'] as string[] },
+        startsAt: { lte: dayEnd },
+        endsAt: { gte: dayStart },
+      },
+      select: { status: true, startsAt: true, endsAt: true, reason: true },
+      orderBy: { startsAt: 'asc' as const },
+      take: 1,
+    },
+  }
+}
+
+async function loadStudentSummaryById(studentId: string, referenceDate?: string | Date) {
+  const student = await prisma.student.findUnique({
+    where: { id: studentId },
+    include: summaryStudentInclude(referenceDate),
+  })
+
+  if (!student) {
+    throw new Error('No se encontro el alumno solicitado.')
+  }
+
+  return studentSummary(student)
+}
+
+function receiptToTemplatePayload(receipt: ReceiptForTemplate): RocTemplatePayload {
+  const studentFields = buildRocStudentPayloadFields(receipt.student)
+
+  return {
+    rocNumber: receipt.rocNumber,
+    ...studentFields,
     printDate: formatRocPrintDate(receipt.issuedAt),
     totalAmount: Number(receipt.totalAmount),
     amountInWords: amountToWords(Number(receipt.totalAmount)),
@@ -1175,6 +1444,25 @@ function formatPeriodLabel(year: number, month: number) {
 const ASSIGNMENT_GROUP_COUNT = 10
 const ASSIGNMENT_MAX_CAPACITY = 40
 const MATUTINO_SHIFT = 'MATUTINO'
+const movementReasonLabels = {
+  CAMBIO_GRUPO: {
+    AJUSTE_CUPO: 'Ajuste de cupo',
+    SOLICITUD_ALUMNO: 'Solicitud del alumno',
+    AJUSTE_ACADEMICO: 'Ajuste academico',
+    AJUSTE_ADMINISTRATIVO: 'Ajuste administrativo',
+  },
+  BAJA: {
+    CAMBIO_PLANTEL: 'Cambio de plantel',
+    MOTIVOS_PERSONALES: 'Motivos personales',
+    BAJA_ACADEMICA: 'Baja academica',
+    BAJA_ADMINISTRATIVA: 'Baja administrativa',
+  },
+  ALTA_GRADO: {
+    REGULARIZACION: 'Regularizacion',
+    PROMOCION: 'Promocion',
+    REASIGNACION_ESCOLAR: 'Reasignacion escolar',
+  },
+} as const
 
 function avgBand(value: number | null) {
   if (value == null) return 'medio'
@@ -1198,6 +1486,7 @@ type ImportedGroupRow = {
   sheetName: string
   rowNumber: number
   groupLabel: string
+  semesterLevel?: 1 | 3 | 5 | null
   enrollmentNumber: string | null
   curp: string | null
 }
@@ -1288,6 +1577,21 @@ function normalizeImportedGroupLabel(value: string) {
   const normalized = value.trim().toUpperCase()
   if (/^[A-Z]$/.test(normalized)) return `1${normalized}`
   return normalized
+}
+
+function normalizeSemesterLevel(value: number | null | undefined): 1 | 3 | 5 {
+  if (value === 3 || value === 5) return value
+  return 1
+}
+
+function inferSemesterLevelFromGroupLabel(groupLabel: string | null | undefined): 1 | 3 | 5 {
+  const match = groupLabel?.trim().match(/^(\d+)/)
+  if (!match) return 1
+  return normalizeSemesterLevel(Number(match[1]))
+}
+
+function movementReasonLabel(type: keyof typeof movementReasonLabels, code: string) {
+  return movementReasonLabels[type][code as keyof (typeof movementReasonLabels)[typeof type]] ?? code
 }
 
 function extractEnrollmentSequenceKey(value: string | null | undefined) {
@@ -1634,7 +1938,62 @@ function assignedRosterHtml(rows: Array<{ groupLabel: string; enrollmentNumber: 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Listado de grupos</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{margin:0 0 18px}h2{margin:22px 0 10px}table{width:100%;border-collapse:collapse;margin-bottom:12px}th,td{border:1px solid #c9d6c9;padding:8px;text-align:left;font-size:12px}th{background:#eef5ee}</style></head><body><h1>Listado de grupos asignados</h1>${sections}</body></html>`
 }
 
+function safeWorkbookFileName(fileName: string) {
+  const normalized = fileName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim()
+  const withExtension = normalized.toLowerCase().endsWith('.xlsx') ? normalized : `${normalized}.xlsx`
+  return withExtension || `roc-remoto-${Date.now()}.xlsx`
+}
+
+function buildWorkbookVariantPath(outputPath: string) {
+  const extension = extname(outputPath) || '.xlsx'
+  const baseName = basename(outputPath, extension)
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')
+  return join(getGeneratedRocsDir(), `${baseName}-${timestamp}${extension}`)
+}
+
+function isBusyFileError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === 'EBUSY'
+}
+
+async function delay(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function writeWorkbookWithLockFallback(outputPath: string, content: Buffer) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await writeFile(outputPath, content)
+      return outputPath
+    } catch (error) {
+      if (!isBusyFileError(error)) {
+        throw error
+      }
+
+      if (attempt < 2) {
+        await delay(250)
+        continue
+      }
+    }
+  }
+
+  const variantPath = buildWorkbookVariantPath(outputPath)
+  await writeFile(variantPath, content)
+  return variantPath
+}
+
 export function registerIpcHandlers() {
+  ipcMain.handle('files:saveAndOpenWorkbook', async (_event, payload) => {
+    const input = saveWorkbookSchema.parse(payload)
+    const fileName = safeWorkbookFileName(input.fileName)
+    const outputPath = join(getGeneratedRocsDir(), fileName)
+    const savedPath = await writeWorkbookWithLockFallback(outputPath, Buffer.from(input.base64, 'base64'))
+    const openResult = await shell.openPath(savedPath)
+    if (openResult) {
+      throw new Error(openResult)
+    }
+    return { outputPath: savedPath }
+  })
+
   ipcMain.handle('auth:login', async (_event, payload) => {
     const input = authLoginSchema.parse(payload)
     const username = input.username.toLowerCase()
@@ -1644,7 +2003,7 @@ export function registerIpcHandlers() {
       throw new Error('Credenciales invalidas.')
     }
 
-    if (!['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'ADMIN'].includes(user.role)) {
+    if (!['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'].includes(user.role)) {
       throw new Error('El usuario tiene un rol no soportado por la aplicacion.')
     }
 
@@ -2142,10 +2501,27 @@ export function registerIpcHandlers() {
     return exportSepCsv(input)
   })
 
-  ipcMain.handle('students:list', async () => {
+  ipcMain.handle('students:list', async (_event, rawFilters) => {
     requireAuth()
+    const filters = studentListFiltersSchema.parse(rawFilters)
+    const query = filters?.query?.trim()
     const students = await prisma.student.findMany({
-      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
+      where: {
+        ...(filters?.schoolCycle ? { schoolCycle: filters.schoolCycle.trim() } : {}),
+        ...(filters?.semesterLevel && filters.semesterLevel !== 'all' ? { semesterLevel: filters.semesterLevel } : {}),
+        ...(filters?.enrollmentStatus && filters.enrollmentStatus !== 'all' ? { enrollmentStatus: filters.enrollmentStatus } : {}),
+        ...(filters?.documentationStatus && filters.documentationStatus !== 'all' ? { documentationStatus: filters.documentationStatus } : {}),
+        ...(query ? {
+          OR: [
+            { enrollmentNumber: { contains: query } },
+            { curp: { contains: query.toUpperCase() } },
+            { firstName: { contains: query } },
+            { paternalLastName: { contains: query } },
+            { maternalLastName: { contains: query } },
+          ],
+        } : {}),
+      },
+      include: summaryStudentInclude(),
       orderBy: { createdAt: 'desc' },
     })
 
@@ -2156,7 +2532,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const students = await prisma.student.findMany({
       where: { status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] } },
-      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
+      include: summaryStudentInclude(),
       orderBy: { createdAt: 'desc' },
     })
 
@@ -2167,7 +2543,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const student = await prisma.student.findUnique({
       where: { id: z.string().min(1).parse(studentId) },
-      include: { guardian: true },
+      include: { guardian: true, groupAssignment: { include: { group: true } } },
     })
 
     if (!student) {
@@ -2182,6 +2558,286 @@ export function registerIpcHandlers() {
     const sequence = await prisma.sequenceCounter.findUnique({ where: { scope: 'STUDENT_INTERNAL_FOLIO' } })
     const nextValue = (sequence?.lastValue ?? 0) + 1
     return `${INTERNAL_FOLIO_PREFIX}${String(nextValue).padStart(4, '0')}`
+  })
+
+  ipcMain.handle('permissions:list', async (_event, rawFilters) => {
+    requireRole(['SECRETARIA', 'ADMIN'], 'consultar permisos escolares')
+    const filters = permissionListFiltersSchema.parse(rawFilters)
+    const query = filters?.query?.trim()
+    const activeReferenceDate = filters?.activeOn?.trim() ? new Date(filters.activeOn.trim()) : new Date()
+    const activeDayStart = startOfLocalDay(activeReferenceDate)
+    const activeDayEnd = endOfLocalDay(activeReferenceDate)
+    const permissions = await prisma.studentPermission.findMany({
+      where: {
+        ...(filters?.status && filters.status !== 'all' ? { status: filters.status } : {}),
+        ...(query ? {
+          OR: [
+            { reason: { contains: query } },
+            { notes: { contains: query } },
+            { student: { is: { enrollmentNumber: { contains: query } } } },
+            { student: { is: { officialEnrollmentNumber: { contains: query } } } },
+            { student: { is: { curp: { contains: query.toUpperCase() } } } },
+            { student: { is: { firstName: { contains: query } } } },
+            { student: { is: { paternalLastName: { contains: query } } } },
+            { student: { is: { maternalLastName: { contains: query } } } },
+          ],
+        } : {}),
+      },
+      include: {
+        student: {
+          include: {
+            groupAssignment: { include: { group: true } },
+            dailyStatuses: {
+              where: { date: activeDayStart },
+              select: { status: true },
+              take: 1,
+            },
+          },
+        },
+        grantedBy: { select: { displayName: true } },
+        closedBy: { select: { displayName: true } },
+      },
+      orderBy: [{ startsAt: 'desc' }, { createdAt: 'desc' }],
+    })
+
+    return permissions.map((permission) => {
+      const normalizedStatus = normalizePermissionStatus(permission)
+      const activeToday = permission.status !== 'CANCELADO' && permission.startsAt <= activeDayEnd && permission.endsAt >= activeDayStart
+      return {
+        id: permission.id,
+        studentId: permission.studentId,
+        studentName: `${permission.student.firstName} ${permission.student.paternalLastName} ${permission.student.maternalLastName}`.replace(/\s+/g, ' ').trim(),
+        enrollmentNumber: permission.student.officialEnrollmentNumber?.trim() || permission.student.enrollmentNumber,
+        groupLabel: permission.student.groupAssignment?.group.label ?? null,
+        dailyStatus: activeToday ? 'PERMISO' : permission.student.dailyStatuses?.[0]?.status === 'AUSENTE' ? 'AUSENTE' : 'PRESENTE',
+        kind: permission.kind,
+        reason: permission.reason,
+        notes: permission.notes ?? null,
+        startsAt: permission.startsAt.toISOString(),
+        endsAt: permission.endsAt.toISOString(),
+        status: normalizedStatus,
+        grantedByName: permission.grantedBy?.displayName ?? null,
+        closedByName: permission.closedBy?.displayName ?? null,
+        activeToday,
+      }
+    })
+  })
+
+  ipcMain.handle('permissions:create', async (_event, payload) => {
+    const actor = requireRole(['SECRETARIA', 'ADMIN'], 'registrar permisos escolares')
+    const input = permissionCreateSchema.parse(payload)
+    const startsAt = new Date(input.startsAt)
+    const endsAt = new Date(input.endsAt)
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+      throw new Error('Captura una fecha valida para el permiso.')
+    }
+    if (endsAt < startsAt) {
+      throw new Error('La fecha final del permiso no puede ser menor que la inicial.')
+    }
+
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      select: { id: true, enrollmentNumber: true, firstName: true, paternalLastName: true, maternalLastName: true },
+    })
+
+    if (!student) {
+      throw new Error('No se encontro el alumno para registrar el permiso.')
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
+      const permission = await tx.studentPermission.create({
+        data: {
+          studentId: input.studentId,
+          kind: input.kind,
+          reason: input.reason.trim(),
+          notes: normalizeOptional(input.notes),
+          startsAt,
+          endsAt,
+          status: normalizePermissionStatus({ status: 'PROGRAMADO', startsAt, endsAt }),
+          grantedById: actor.id,
+        },
+        include: {
+          student: {
+            include: {
+              groupAssignment: { include: { group: true } },
+              dailyStatuses: {
+                where: { date: startOfLocalDay() },
+                select: { status: true },
+                take: 1,
+              },
+            },
+          },
+          grantedBy: { select: { displayName: true } },
+          closedBy: { select: { displayName: true } },
+        },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'STUDENT_PERMISSION',
+          entityId: permission.id,
+          action: 'CREATE_PERMISSION',
+          afterJson: JSON.stringify({
+            studentId: input.studentId,
+            summary: `${student.enrollmentNumber} - ${student.firstName} ${student.paternalLastName}`,
+            reason: input.reason.trim(),
+            startsAt: permission.startsAt.toISOString(),
+            endsAt: permission.endsAt.toISOString(),
+          }),
+        },
+      })
+
+      return permission
+    })
+
+    return {
+      id: created.id,
+      studentId: created.studentId,
+      studentName: `${created.student.firstName} ${created.student.paternalLastName} ${created.student.maternalLastName}`.replace(/\s+/g, ' ').trim(),
+      enrollmentNumber: created.student.officialEnrollmentNumber?.trim() || created.student.enrollmentNumber,
+      groupLabel: created.student.groupAssignment?.group.label ?? null,
+      dailyStatus: 'PERMISO',
+      kind: created.kind,
+      reason: created.reason,
+      notes: created.notes ?? null,
+      startsAt: created.startsAt.toISOString(),
+      endsAt: created.endsAt.toISOString(),
+      status: normalizePermissionStatus(created),
+      grantedByName: created.grantedBy?.displayName ?? null,
+      closedByName: created.closedBy?.displayName ?? null,
+      activeToday: created.startsAt <= endOfLocalDay() && created.endsAt >= startOfLocalDay(),
+    }
+  })
+
+  ipcMain.handle('permissions:cancel', async (_event, payload) => {
+    const actor = requireRole(['SECRETARIA', 'ADMIN'], 'cancelar permisos escolares')
+    const input = permissionCancelSchema.parse(payload)
+    const updated = await prisma.$transaction(async (tx) => {
+      const existing = await tx.studentPermission.findUnique({
+        where: { id: input.permissionId },
+        include: {
+          student: {
+            include: {
+              groupAssignment: { include: { group: true } },
+              dailyStatuses: {
+                where: { date: startOfLocalDay() },
+                select: { status: true },
+                take: 1,
+              },
+            },
+          },
+          grantedBy: { select: { displayName: true } },
+        },
+      })
+
+      if (!existing) {
+        throw new Error('No se encontro el permiso a cancelar.')
+      }
+
+      const permission = await tx.studentPermission.update({
+        where: { id: input.permissionId },
+        data: {
+          status: 'CANCELADO',
+          notes: normalizeOptional([existing.notes, normalizeOptional(input.notes)].filter(Boolean).join(' | ')),
+          closedById: actor.id,
+        },
+        include: {
+          student: {
+            include: {
+              groupAssignment: { include: { group: true } },
+              dailyStatuses: {
+                where: { date: startOfLocalDay() },
+                select: { status: true },
+                take: 1,
+              },
+            },
+          },
+          grantedBy: { select: { displayName: true } },
+          closedBy: { select: { displayName: true } },
+        },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'STUDENT_PERMISSION',
+          entityId: permission.id,
+          action: 'CANCEL_PERMISSION',
+          afterJson: JSON.stringify({
+            studentId: permission.studentId,
+            notes: normalizeOptional(input.notes),
+          }),
+        },
+      })
+
+      return permission
+    })
+
+    return {
+      id: updated.id,
+      studentId: updated.studentId,
+      studentName: `${updated.student.firstName} ${updated.student.paternalLastName} ${updated.student.maternalLastName}`.replace(/\s+/g, ' ').trim(),
+      enrollmentNumber: updated.student.officialEnrollmentNumber?.trim() || updated.student.enrollmentNumber,
+      groupLabel: updated.student.groupAssignment?.group.label ?? null,
+      dailyStatus: updated.student.dailyStatuses?.[0]?.status === 'AUSENTE' ? 'AUSENTE' : 'PRESENTE',
+      kind: updated.kind,
+      reason: updated.reason,
+      notes: updated.notes ?? null,
+      startsAt: updated.startsAt.toISOString(),
+      endsAt: updated.endsAt.toISOString(),
+      status: 'CANCELADO',
+      grantedByName: updated.grantedBy?.displayName ?? null,
+      closedByName: updated.closedBy?.displayName ?? null,
+      activeToday: false,
+    }
+  })
+
+  ipcMain.handle('permissions:setDailyStatus', async (_event, payload) => {
+    const actor = requireRole(['SECRETARIA', 'ADMIN'], 'registrar estatus diario')
+    const input = dailyStatusSetSchema.parse(payload)
+    const date = startOfLocalDay(input.date)
+    const student = await prisma.student.findUnique({ where: { id: input.studentId }, select: { id: true } })
+    if (!student) {
+      throw new Error('No se encontro el alumno para actualizar su estatus diario.')
+    }
+
+    await prisma.$transaction(async (tx) => {
+      if (input.status === 'PRESENTE') {
+        await tx.studentDailyStatus.deleteMany({ where: { studentId: input.studentId, date } })
+      } else {
+        await tx.studentDailyStatus.upsert({
+          where: { studentId_date: { studentId: input.studentId, date } },
+          update: {
+            status: input.status,
+            notes: normalizeOptional(input.notes),
+            recordedById: actor.id,
+          },
+          create: {
+            studentId: input.studentId,
+            date,
+            status: input.status,
+            notes: normalizeOptional(input.notes),
+            recordedById: actor.id,
+          },
+        })
+      }
+    })
+
+    return loadStudentSummaryById(input.studentId, date)
+  })
+
+  ipcMain.handle('permissions:clearDailyStatus', async (_event, payload) => {
+    requireRole(['SECRETARIA', 'ADMIN'], 'limpiar estatus diario')
+    const input = dailyStatusClearSchema.parse(payload)
+    const date = startOfLocalDay(input.date)
+    await prisma.studentDailyStatus.deleteMany({
+      where: {
+        studentId: input.studentId,
+        date,
+      },
+    })
+    return loadStudentSummaryById(input.studentId, date)
   })
 
   ipcMain.handle('students:getRequirementChecklist', async (_event, studentId) => {
@@ -2289,6 +2945,7 @@ export function registerIpcHandlers() {
           secondaryAverage: input.secondaryAverage ?? null,
           examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
+          semesterLevel: normalizeSemesterLevel(input.semesterLevel),
           academicStatus: normalizeOptional(input.academicStatus),
           documentationStatus: 'PENDIENTE',
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
@@ -2330,7 +2987,7 @@ export function registerIpcHandlers() {
       return createdStudent
     })
 
-    return studentSummary(student)
+    return loadStudentSummaryById(student.id)
   })
 
   ipcMain.handle('students:update', async (_event, studentId, payload) => {
@@ -2382,6 +3039,7 @@ export function registerIpcHandlers() {
           secondaryAverage: input.secondaryAverage ?? null,
           examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
+          semesterLevel: normalizeSemesterLevel(input.semesterLevel),
           academicStatus: normalizeOptional(input.academicStatus),
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
@@ -2427,7 +3085,111 @@ export function registerIpcHandlers() {
       return updatedStudent
     })
 
-    return studentSummary(student)
+    return loadStudentSummaryById(student.id)
+  })
+
+  ipcMain.handle('students:changeGroup', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'cambiar grupo de alumno')
+    const input = studentGroupChangeSchema.parse(payload)
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      include: { groupAssignment: { include: { group: true } } },
+    })
+    if (!student) throw new Error('No se encontro el alumno.')
+    if (['BAJA', 'BAJA_DEFINITIVA'].includes(student.enrollmentStatus)) throw new Error('El alumno esta dado de baja.')
+    const targetGroup = await prisma.intakeGroup.findUnique({
+      where: { id: input.toGroupId },
+      include: { assignments: { where: { status: { not: 'NO_SHOW' } } } },
+    })
+    if (!targetGroup) throw new Error('Grupo destino no encontrado.')
+    if (targetGroup.assignments.length >= targetGroup.capacity) throw new Error(`El grupo destino ya alcanzo el cupo maximo de ${targetGroup.capacity}.`)
+    const reasonLabel = movementReasonLabel('CAMBIO_GRUPO', input.reasonCode)
+
+    const result = await prisma.$transaction(async (tx) => {
+      const existingAssignment = student.groupAssignment
+      const assignment = existingAssignment
+        ? await tx.studentGroupAssignment.update({ where: { id: existingAssignment.id }, data: { groupId: targetGroup.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.notes?.trim() || reasonLabel } })
+        : await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: targetGroup.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: input.notes?.trim() || reasonLabel } })
+      await tx.student.update({ where: { id: student.id }, data: { semesterLevel: normalizeSemesterLevel(targetGroup.semesterLevel), enrollmentStatus: 'ASIGNADO' } })
+      await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: student.id, beforeGroupId: existingAssignment?.groupId ?? null, beforeGroupLabel: existingAssignment?.group.label ?? null, afterGroupId: targetGroup.id, afterGroupLabel: targetGroup.label, actorId: actor.id, actorRole: actor.role, reason: input.notes?.trim() || reasonLabel } })
+      const movement = await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'CAMBIO_GRUPO', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: normalizeSemesterLevel(targetGroup.semesterLevel), previousGroupId: existingAssignment?.groupId ?? null, previousGroupLabel: existingAssignment?.group.label ?? null, nextGroupId: targetGroup.id, nextGroupLabel: targetGroup.label, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus: 'ASIGNADO', actorId: actor.id, actorRole: actor.role } })
+      return { assignmentId: assignment.id, movementId: movement.id }
+    })
+
+    return { ok: true, assignmentId: result.assignmentId, movementId: result.movementId }
+  })
+
+  ipcMain.handle('students:withdraw', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'dar de baja alumnos')
+    const input = studentWithdrawalSchema.parse(payload)
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      include: { groupAssignment: { include: { group: true } } },
+    })
+    if (!student) throw new Error('No se encontro el alumno.')
+    const reasonLabel = movementReasonLabel('BAJA', input.reasonCode)
+    const movementId = await prisma.$transaction(async (tx) => {
+      if (student.groupAssignment) {
+        await tx.studentGroupAssignment.delete({ where: { id: student.groupAssignment.id } })
+      }
+      await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'BAJA' } })
+      const movement = await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'BAJA', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: student.semesterLevel, previousGroupId: student.groupAssignment?.groupId ?? null, previousGroupLabel: student.groupAssignment?.group.label ?? null, nextGroupId: null, nextGroupLabel: null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus: 'BAJA', effectiveDate: input.effectiveDate ? new Date(input.effectiveDate) : null, actorId: actor.id, actorRole: actor.role } })
+      return movement.id
+    })
+    return { ok: true, movementId }
+  })
+
+  ipcMain.handle('students:enrollGrade', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'registrar alta a grado')
+    const input = studentGradeEnrollmentSchema.parse(payload)
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
+    })
+    if (!student) throw new Error('No se encontro el alumno.')
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
+    const targetGroup = input.toGroupId ? await prisma.intakeGroup.findUnique({ where: { id: input.toGroupId }, include: { assignments: { where: { status: { not: 'NO_SHOW' } } } } }) : null
+    if (targetGroup && targetGroup.assignments.length >= targetGroup.capacity) throw new Error(`El grupo destino ya alcanzo el cupo maximo de ${targetGroup.capacity}.`)
+    const reasonLabel = movementReasonLabel('ALTA_GRADO', input.reasonCode)
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const previousAssignment = student.groupAssignment
+      if (!targetGroup && previousAssignment) {
+        await tx.studentGroupAssignment.delete({ where: { id: previousAssignment.id } })
+      }
+      if (targetGroup) {
+        if (previousAssignment) {
+          await tx.studentGroupAssignment.update({ where: { id: previousAssignment.id }, data: { groupId: targetGroup.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.notes?.trim() || reasonLabel } })
+        } else {
+          await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: targetGroup.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: input.notes?.trim() || reasonLabel } })
+        }
+      }
+      const nextEnrollmentStatus = targetGroup ? 'ASIGNADO' : 'INSCRITO'
+      const nextStudent = await tx.student.update({
+        where: { id: student.id },
+        data: { schoolCycle: input.schoolCycle.trim(), semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular' },
+        include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
+      })
+      await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'ALTA_GRADO', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: semesterLevel, previousGroupId: previousAssignment?.groupId ?? null, previousGroupLabel: previousAssignment?.group.label ?? null, nextGroupId: targetGroup?.id ?? null, nextGroupLabel: targetGroup?.label ?? null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus, actorId: actor.id, actorRole: actor.role } })
+      return nextStudent
+    })
+
+    return studentSummary(updated)
+  })
+
+  ipcMain.handle('students:listMovements', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'consultar movimientos escolares')
+    const input = studentMovementListSchema.parse(payload)
+    const movements = await prisma.studentAcademicMovement.findMany({
+      where: {
+        ...(input?.studentId ? { studentId: input.studentId } : {}),
+        ...(input?.schoolCycle ? { student: { schoolCycle: input.schoolCycle.trim() } } : {}),
+      },
+      include: { student: true, actor: { select: { displayName: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: input?.limit ?? 20,
+    })
+    return movements.map(academicMovementSummary)
   })
 
   ipcMain.handle('concepts:listActive', async () => {
@@ -2713,7 +3475,15 @@ export function registerIpcHandlers() {
       },
       orderBy: { issuedAt: 'asc' },
       include: {
-        student: true,
+        student: {
+          include: {
+            groupAssignment: {
+              include: {
+                group: true
+              }
+            }
+          }
+        },
         lines: { include: { concept: true } },
       },
     })
@@ -2884,6 +3654,13 @@ export function registerIpcHandlers() {
 
     const student = await prisma.student.findUnique({
       where: { id: input.studentId },
+      include: {
+        groupAssignment: {
+          include: {
+            group: true
+          }
+        }
+      },
     })
 
     if (!student) {
@@ -2907,16 +3684,10 @@ export function registerIpcHandlers() {
     }
 
     const totalAmount = printableConcepts.reduce((sum, concept) => sum + Number(concept.tariffs[0]?.amount ?? 0), 0)
+    const studentFields = buildRocStudentPayloadFields(student)
     const outputPath = await openOfficialRocTemplate({
       rocNumber: input.rocNumber,
-      fullName: `${student.paternalLastName} ${student.maternalLastName} ${student.firstName}`,
-      identifier: student.rfc || student.enrollmentNumber,
-      address: [student.addressLine, student.neighborhood, student.locality, student.municipality, student.state]
-        .filter(Boolean)
-        .join(', '),
-      grade: '',
-      group: '',
-      shift: 'MATUTINO',
+      ...studentFields,
       printDate: new Date().toLocaleDateString('es-MX', {
         day: '2-digit',
         month: 'short',
@@ -2973,7 +3744,15 @@ export function registerIpcHandlers() {
     const receipt = await prisma.rocReceipt.findUnique({
       where: { id: input.receiptId },
       include: {
-        student: true,
+        student: {
+          include: {
+            groupAssignment: {
+              include: {
+                group: true
+              }
+            }
+          }
+        },
         lines: {
           include: {
             concept: true,
@@ -3045,7 +3824,15 @@ export function registerIpcHandlers() {
       },
       orderBy: { issuedAt: 'asc' },
       include: {
-        student: true,
+        student: {
+          include: {
+            groupAssignment: {
+              include: {
+                group: true
+              }
+            }
+          }
+        },
         lines: { include: { concept: true } },
       },
     })
@@ -3075,12 +3862,13 @@ export function registerIpcHandlers() {
   ipcMain.handle('groups:createForIntake', async (_event, payload) => {
     requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear grupos de nuevo ingreso')
     const input = createIntakeGroupSchema.parse(payload)
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
     return prisma.$transaction(
       input.labels.map((label) =>
         prisma.intakeGroup.upsert({
-          where: { schoolCycle_label_shift: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT } },
+          where: { schoolCycle_semesterLevel_label_shift: { schoolCycle: input.schoolCycle.trim(), semesterLevel, label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT } },
           update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY },
-          create: { schoolCycle: input.schoolCycle.trim(), label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+          create: { schoolCycle: input.schoolCycle.trim(), semesterLevel, label: label.trim().toUpperCase(), shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
         }),
       ),
     )
@@ -3090,7 +3878,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const input = listIntakeGroupsSchema.parse(payload)
     const groups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle: input.schoolCycle.trim(), shift: MATUTINO_SHIFT, isActive: true },
+      where: { schoolCycle: input.schoolCycle.trim(), semesterLevel: normalizeSemesterLevel(input.semesterLevel), shift: MATUTINO_SHIFT, isActive: true },
       orderBy: { label: 'asc' },
       include: { assignments: { include: { student: true } } },
     })
@@ -3104,7 +3892,7 @@ export function registerIpcHandlers() {
     requireAuth()
     const input = listIntakeGroupsSchema.parse(payload)
     const groups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle: input.schoolCycle.trim(), shift: MATUTINO_SHIFT, isActive: true },
+      where: { schoolCycle: input.schoolCycle.trim(), semesterLevel: normalizeSemesterLevel(input.semesterLevel), shift: MATUTINO_SHIFT, isActive: true },
       orderBy: { label: 'asc' },
       include: { assignments: { include: { student: true } } },
     })
@@ -3115,9 +3903,11 @@ export function registerIpcHandlers() {
     requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'previsualizar asignacion de grupos')
     const input = runAssignmentSchema.parse(payload)
     const schoolCycle = input.schoolCycle.trim()
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
     const students = await prisma.student.findMany({
       where: {
         schoolCycle,
+        semesterLevel,
         status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
         enrollmentStatus: { not: 'NO_SHOW' },
       },
@@ -3170,9 +3960,11 @@ export function registerIpcHandlers() {
     requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'ver listado previo de grupos')
     const input = runAssignmentSchema.parse(payload)
     const schoolCycle = input.schoolCycle.trim()
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
     const students = await prisma.student.findMany({
       where: {
         schoolCycle,
+        semesterLevel,
         status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
         enrollmentStatus: { not: 'NO_SHOW' },
       },
@@ -3244,9 +4036,11 @@ export function registerIpcHandlers() {
     const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'asignar grupos automaticamente')
     const input = runAssignmentSchema.parse(payload)
     const schoolCycle = input.schoolCycle.trim()
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
     const students = await prisma.student.findMany({
       where: {
         schoolCycle,
+        semesterLevel,
         status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] },
         enrollmentStatus: { not: 'NO_SHOW' },
       },
@@ -3254,8 +4048,8 @@ export function registerIpcHandlers() {
       orderBy: [{ secondaryAverage: 'desc' }, { curp: 'asc' }],
     })
     const labels = Array.from({ length: ASSIGNMENT_GROUP_COUNT }, (_item, index) => buildGroupLabel(index))
-    await prisma.$transaction(labels.map((label) => prisma.intakeGroup.upsert({ where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } }, update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY }, create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY } })))
-    const groups = await prisma.intakeGroup.findMany({ where: { schoolCycle, shift: MATUTINO_SHIFT, isActive: true }, orderBy: { label: 'asc' } })
+    await prisma.$transaction(labels.map((label) => prisma.intakeGroup.upsert({ where: { schoolCycle_semesterLevel_label_shift: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT } }, update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY }, create: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY } })))
+    const groups = await prisma.intakeGroup.findMany({ where: { schoolCycle, semesterLevel, shift: MATUTINO_SHIFT, isActive: true }, orderBy: { label: 'asc' } })
     const totals = {
       MUJER: 0,
       HOMBRE: 0,
@@ -3292,8 +4086,9 @@ export function registerIpcHandlers() {
   ipcMain.handle('groups:confirmAssignment', async (_event, payload) => {
     requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'confirmar asignacion de grupos')
     const input = confirmAssignmentSchema.parse(payload)
-    const count = await prisma.studentGroupAssignment.updateMany({ where: { student: { schoolCycle: input.schoolCycle.trim() }, status: 'ASIGNADO' }, data: { status: 'CONFIRMADO', confirmedAt: new Date() } })
-    await prisma.student.updateMany({ where: { schoolCycle: input.schoolCycle.trim(), enrollmentStatus: 'ASIGNADO' }, data: { enrollmentStatus: 'CONFIRMADO' } })
+    const semesterLevel = normalizeSemesterLevel(input.semesterLevel)
+    const count = await prisma.studentGroupAssignment.updateMany({ where: { student: { schoolCycle: input.schoolCycle.trim(), semesterLevel }, status: 'ASIGNADO' }, data: { status: 'CONFIRMADO', confirmedAt: new Date() } })
+    await prisma.student.updateMany({ where: { schoolCycle: input.schoolCycle.trim(), semesterLevel, enrollmentStatus: 'ASIGNADO' }, data: { enrollmentStatus: 'CONFIRMADO' } })
     return { ok: true, confirmed: count.count }
   })
 
@@ -3303,7 +4098,7 @@ export function registerIpcHandlers() {
     const rows = await prisma.studentGroupAssignment.findMany({
       where: {
         status: { in: ['ASIGNADO', 'CONFIRMADO'] },
-        student: { schoolCycle: input.schoolCycle.trim() },
+        student: { schoolCycle: input.schoolCycle.trim(), semesterLevel: normalizeSemesterLevel(input.semesterLevel) },
       },
       include: {
         student: true,
@@ -3334,28 +4129,33 @@ export function registerIpcHandlers() {
       groupLabel: normalizeImportedGroupLabel(row.groupLabel),
     }))
     const schoolCycle = input.schoolCycle.trim()
-    const groupLabels = Array.from(new Set(rows.map((row) => row.groupLabel))).sort((left, right) => left.localeCompare(right))
-    const existingGroups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle, shift: MATUTINO_SHIFT, label: { in: groupLabels } },
-      select: { label: true },
+    const normalizedRows = rows.map((row) => ({ ...row, semesterLevel: normalizeSemesterLevel(row.semesterLevel ?? inferSemesterLevelFromGroupLabel(row.groupLabel)) }))
+    const groupKeys = Array.from(new Set(normalizedRows.map((row) => `${row.semesterLevel}:${row.groupLabel}`))).sort((left, right) => left.localeCompare(right))
+    const groupFilters = groupKeys.map((key) => {
+      const [semesterLevelText, label] = key.split(':')
+      return { semesterLevel: normalizeSemesterLevel(Number(semesterLevelText)), label }
     })
-    const existingGroupLabels = new Set(existingGroups.map((group) => group.label))
+    const existingGroups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { label: true, semesterLevel: true },
+    })
+    const existingGroupKeys = new Set(existingGroups.map((group) => `${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`))
 
     await prisma.$transaction(
-      groupLabels.map((label) =>
+      groupFilters.map(({ semesterLevel, label }) =>
         prisma.intakeGroup.upsert({
-          where: { schoolCycle_label_shift: { schoolCycle, label, shift: MATUTINO_SHIFT } },
+          where: { schoolCycle_semesterLevel_label_shift: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT } },
           update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY },
-          create: { schoolCycle, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+          create: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
         }),
       ),
     )
 
     const groups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle, shift: MATUTINO_SHIFT, label: { in: groupLabels } },
-      select: { id: true, label: true },
+      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { id: true, label: true, semesterLevel: true },
     })
-    const groupByLabel = new Map(groups.map((group) => [group.label, group]))
+    const groupByLabel = new Map(groups.map((group) => [`${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`, group]))
     const students = await prisma.student.findMany({
       where: {
         schoolCycle,
@@ -3375,7 +4175,7 @@ export function registerIpcHandlers() {
     let importedCount = 0
     let unmatchedCount = 0
 
-    for (const row of rows) {
+    for (const row of normalizedRows) {
       const enrollmentSequenceKey = extractEnrollmentSequenceKey(row.enrollmentNumber)
       const student =
         (row.enrollmentNumber ? studentByEnrollment.get(row.enrollmentNumber) : undefined) ??
@@ -3388,7 +4188,7 @@ export function registerIpcHandlers() {
         continue
       }
 
-      const targetGroup = groupByLabel.get(row.groupLabel)
+      const targetGroup = groupByLabel.get(`${row.semesterLevel}:${row.groupLabel}`)
       if (!targetGroup) {
         unmatchedCount += 1
         issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: el grupo ${row.groupLabel} no pudo prepararse para importar.`)
@@ -3420,7 +4220,7 @@ export function registerIpcHandlers() {
 
         await tx.student.update({
           where: { id: student.id },
-          data: { enrollmentStatus: 'ASIGNADO' },
+          data: { enrollmentStatus: 'ASIGNADO', semesterLevel: row.semesterLevel },
         })
 
         await tx.groupAssignmentAudit.create({
@@ -3436,6 +4236,25 @@ export function registerIpcHandlers() {
             reason: 'IMPORTACION_EXCEL',
           },
         })
+        await tx.studentAcademicMovement.create({
+          data: {
+            studentId: student.id,
+            movementType: 'CAMBIO_GRUPO',
+            reasonCode: 'IMPORTACION_EXCEL',
+            reasonLabel: 'Importacion masiva de grupos',
+            notes: input.sourcePath ?? null,
+            previousSemesterLevel: student.semesterLevel,
+            nextSemesterLevel: row.semesterLevel,
+            previousGroupId: existingAssignment?.groupId ?? null,
+            previousGroupLabel: existingAssignment?.group.label ?? null,
+            nextGroupId: targetGroup.id,
+            nextGroupLabel: targetGroup.label,
+            previousEnrollmentStatus: student.enrollmentStatus,
+            nextEnrollmentStatus: 'ASIGNADO',
+            actorId: actor.id,
+            actorRole: actor.role,
+          },
+        })
       })
 
       importedCount += 1
@@ -3446,7 +4265,7 @@ export function registerIpcHandlers() {
       canceled: false,
       sourcePath: input.sourcePath ?? null,
       importedCount,
-      createdGroupCount: groupLabels.filter((label) => !existingGroupLabels.has(label)).length,
+      createdGroupCount: groupKeys.filter((key) => !existingGroupKeys.has(key)).length,
       skippedCount: 0,
       unmatchedCount,
       issues: issues.slice(0, 12),
@@ -3459,7 +4278,7 @@ export function registerIpcHandlers() {
     const rows = await prisma.studentGroupAssignment.findMany({
       where: {
         status: { in: ['ASIGNADO', 'CONFIRMADO'] },
-        student: { schoolCycle: input.schoolCycle.trim() },
+        student: { schoolCycle: input.schoolCycle.trim(), semesterLevel: normalizeSemesterLevel(input.semesterLevel) },
       },
       include: {
         student: true,
@@ -3481,7 +4300,7 @@ export function registerIpcHandlers() {
     const rows = await prisma.studentGroupAssignment.findMany({
       where: {
         status: { in: ['ASIGNADO', 'CONFIRMADO'] },
-        student: { schoolCycle: input.schoolCycle.trim() },
+        student: { schoolCycle: input.schoolCycle.trim(), semesterLevel: normalizeSemesterLevel(input.semesterLevel) },
       },
       include: {
         student: true,
@@ -3498,11 +4317,14 @@ export function registerIpcHandlers() {
     const input = manualReassignSchema.parse(payload)
     const assignment = await prisma.studentGroupAssignment.findUnique({ where: { studentId: input.studentId }, include: { group: true } })
     if (!assignment) throw new Error('El alumno no tiene grupo asignado.')
+    const student = await prisma.student.findUnique({ where: { id: input.studentId } })
+    if (!student) throw new Error('No se encontro el alumno.')
     const target = await prisma.intakeGroup.findUnique({ where: { id: input.toGroupId }, include: { assignments: { where: { status: { not: 'NO_SHOW' } } } } })
     if (!target) throw new Error('Grupo destino no encontrado.')
     if (target.assignments.length >= target.capacity) throw new Error(`El grupo destino ya alcanzo el cupo maximo de ${target.capacity}.`)
     const item = await prisma.studentGroupAssignment.update({ where: { id: assignment.id }, data: { groupId: target.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.reason.trim() } })
     await prisma.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: input.studentId, beforeGroupId: assignment.groupId, beforeGroupLabel: assignment.group.label, afterGroupId: target.id, afterGroupLabel: target.label, actorId: actor.id, actorRole: actor.role, reason: input.reason.trim() } })
+    await prisma.studentAcademicMovement.create({ data: { studentId: input.studentId, movementType: 'CAMBIO_GRUPO', reasonCode: 'AJUSTE_ADMINISTRATIVO', reasonLabel: 'Ajuste administrativo', notes: input.reason.trim(), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: normalizeSemesterLevel(target.semesterLevel), previousGroupId: assignment.groupId, previousGroupLabel: assignment.group.label, nextGroupId: target.id, nextGroupLabel: target.label, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus: 'ASIGNADO', actorId: actor.id, actorRole: actor.role } })
     return { ok: true, assignmentId: item.id }
   })
 
@@ -3511,10 +4333,13 @@ export function registerIpcHandlers() {
     const input = markNoShowSchema.parse(payload)
     const assignment = await prisma.studentGroupAssignment.findUnique({ where: { studentId: input.studentId } })
     if (!assignment) throw new Error('El alumno no tiene una asignacion previa.')
+    const student = await prisma.student.findUnique({ where: { id: input.studentId } })
+    if (!student) throw new Error('No se encontro el alumno.')
     await prisma.$transaction(async (tx) => {
       await tx.studentGroupAssignment.update({ where: { id: assignment.id }, data: { status: 'NO_SHOW', updatedById: actor.id, reason: input.reason.trim() } })
       await tx.student.update({ where: { id: input.studentId }, data: { enrollmentStatus: 'NO_SHOW' } })
       await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: input.studentId, beforeGroupId: assignment.groupId, afterGroupId: assignment.groupId, actorId: actor.id, actorRole: actor.role, reason: `NO_SHOW: ${input.reason.trim()}` } })
+      await tx.studentAcademicMovement.create({ data: { studentId: input.studentId, movementType: 'BAJA', reasonCode: 'BAJA_ADMINISTRATIVA', reasonLabel: 'Baja administrativa', notes: input.reason.trim(), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: student.semesterLevel, previousGroupId: assignment.groupId, previousGroupLabel: null, nextGroupId: null, nextGroupLabel: null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus: 'NO_SHOW', actorId: actor.id, actorRole: actor.role } })
     })
     return { ok: true }
   })

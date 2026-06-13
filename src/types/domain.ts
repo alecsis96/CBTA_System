@@ -4,6 +4,8 @@ export type Metric = {
   note: string
 }
 
+export type SemesterLevel = 1 | 3 | 5
+
 export type StudentSummary = {
   id: string
   fullName: string
@@ -21,14 +23,23 @@ export type StudentSummary = {
   guardianPhone: string | null
   admissionPaid: boolean
   admissionPaymentStatus: string | null
+  schoolCycle: string
+  semesterLevel: SemesterLevel
+  academicStatus: string | null
   documentationStatus: string
+  enrollmentStatus: string
   statusLabel: string
   groupLabel: string | null
   shiftLabel: string | null
+  dailyStatus: StudentDailyStatusCode
+  dailyStatusLabel: string
+  activePermissionSummary: string | null
 }
 
 export type StudentDetail = StudentFormInput & {
   id: string
+  documentationStatus: string
+  enrollmentStatus: string
   statusLabel: string
 }
 
@@ -79,6 +90,7 @@ export type StudentFormInput = {
   secondaryAverage: number | null
   examRoom: string
   schoolCycle: string
+  semesterLevel: SemesterLevel
   academicStatus: string
   guardianFullName: string
   guardianRelationship: string
@@ -301,6 +313,7 @@ export type SaveStudentRequirementChecklistInput = {
 
 export type GroupAssignedRosterRow = {
   groupLabel: string
+  semesterLevel: SemesterLevel
   enrollmentNumber: string
   fullName: string
   curp: string
@@ -330,11 +343,103 @@ export type GroupRosterImportRow = {
   sheetName: string
   rowNumber: number
   groupLabel: string
+  semesterLevel?: SemesterLevel | null
   enrollmentNumber: string | null
   curp: string | null
 }
 
-export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'ADMIN'
+export type StudentAcademicMovementSummary = {
+  id: string
+  studentId: string
+  studentName: string
+  studentEnrollmentNumber: string
+  movementType: 'CAMBIO_GRUPO' | 'BAJA' | 'ALTA_GRADO'
+  reasonCode: string
+  reasonLabel: string
+  notes: string | null
+  previousSemesterLevel: SemesterLevel | null
+  nextSemesterLevel: SemesterLevel | null
+  previousGroupLabel: string | null
+  nextGroupLabel: string | null
+  previousEnrollmentStatus: string | null
+  nextEnrollmentStatus: string | null
+  actorName: string
+  createdAt: string
+}
+
+export type StudentGroupChangeInput = {
+  studentId: string
+  toGroupId: string
+  reasonCode: string
+  notes?: string
+}
+
+export type StudentWithdrawalInput = {
+  studentId: string
+  reasonCode: string
+  notes?: string
+  effectiveDate?: string
+}
+
+export type StudentGradeEnrollmentInput = {
+  studentId: string
+  schoolCycle: string
+  semesterLevel: SemesterLevel
+  toGroupId?: string | null
+  reasonCode: string
+  notes?: string
+}
+
+export type StudentDailyStatusCode = 'PRESENTE' | 'PERMISO' | 'AUSENTE'
+
+export type StudentPermissionKind =
+  | 'PERMISO_GENERAL'
+  | 'SALIDA_ANTICIPADA'
+  | 'DIA_COMPLETO'
+  | 'JUSTIFICANTE_MEDICO'
+
+export type StudentPermissionRecordStatus = 'PROGRAMADO' | 'ACTIVO' | 'CERRADO' | 'CANCELADO'
+
+export type StudentPermissionSummary = {
+  id: string
+  studentId: string
+  studentName: string
+  enrollmentNumber: string
+  groupLabel: string | null
+  dailyStatus: StudentDailyStatusCode
+  kind: StudentPermissionKind
+  reason: string
+  notes: string | null
+  startsAt: string
+  endsAt: string
+  status: StudentPermissionRecordStatus
+  grantedByName: string | null
+  closedByName: string | null
+  activeToday: boolean
+}
+
+export type StudentPermissionCreateInput = {
+  studentId: string
+  kind: StudentPermissionKind
+  reason: string
+  notes?: string
+  startsAt: string
+  endsAt: string
+}
+
+export type StudentPermissionCancelInput = {
+  permissionId: string
+  notes?: string
+}
+
+export type StudentDailyStatusSetInput = {
+  studentId: string
+  date: string
+  status: Extract<StudentDailyStatusCode, 'AUSENTE' | 'PRESENTE'>
+  notes?: string
+}
+
+export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
 
 export type DepartmentSummary = {
   id: string

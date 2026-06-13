@@ -8,6 +8,7 @@ import { buildPasswordHash, isValidPasswordHash } from '../shared/auth-password'
 const seedDepartments = [
   { code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.' },
   { code: 'INGRESOS_PROPIOS', name: 'Ingresos Propios', description: 'Cobros, tarifas, consecutivos y emision de ROC.' },
+  { code: 'SECRETARIA', name: 'Secretaria', description: 'Otorga permisos, registra incidencias diarias y da seguimiento operativo a alumnos.' },
   { code: 'ADMINISTRACION', name: 'Administracion General', description: 'Administracion de usuarios, catalogos y configuracion institucional.' },
   { code: 'DIRECCION', name: 'Direccion', description: 'Departamento directivo preparado para crecimiento modular.' },
 ] as const
@@ -18,6 +19,7 @@ const seedUsers = [
   { username: 'control.escolar.3', displayName: 'Control Escolar 3', role: 'CONTROL_ESCOLAR', password: 'Control123!', departmentCode: 'CONTROL_ESCOLAR' },
   { username: 'ingresos.propios.1', displayName: 'Ingresos Propios 1', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!', departmentCode: 'INGRESOS_PROPIOS' },
   { username: 'ingresos.propios.2', displayName: 'Ingresos Propios 2', role: 'INGRESOS_PROPIOS', password: 'Ingresos123!', departmentCode: 'INGRESOS_PROPIOS' },
+  { username: 'secretaria.1', displayName: 'Secretaria Escolar 1', role: 'SECRETARIA', password: 'Secretaria123!', departmentCode: 'SECRETARIA' },
   { username: 'admin.1', displayName: 'Administrador General', role: 'ADMIN', password: 'Admin123!', departmentCode: 'ADMINISTRACION' },
 ] as const
 

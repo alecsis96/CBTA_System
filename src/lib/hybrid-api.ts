@@ -10,8 +10,13 @@ import type {
   RocNextNumberResult,
   RocMonthlyExportInput,
   RocMonthlyExportResult,
+  SemesterLevel,
+  StudentAcademicMovementSummary,
   StudentDetail,
   StudentFormInput,
+  StudentGradeEnrollmentInput,
+  StudentGroupChangeInput,
+  StudentWithdrawalInput,
   TariffUpdateInput,
 } from '@/types/domain'
 import type { UserCreateInput, UserResetPasswordInput, UserUpdateInput } from '@/types/admin'
@@ -36,7 +41,10 @@ type RemoteMonthlyBatchResult = RocMonthlyExportResult & {
 const configuredBaseUrl = import.meta.env.VITE_HYBRID_API_URL?.trim()
 const configuredApiKey = import.meta.env.VITE_HYBRID_API_KEY?.trim() ?? import.meta.env.VITE_SYNC_API_KEY?.trim() ?? ''
 const derivedBaseUrl = import.meta.env.VITE_SYNC_API_URL?.trim()?.replace(/\/api\/sync\/op\/?$/, '') ?? ''
-const remoteBaseUrl = configuredBaseUrl || derivedBaseUrl
+const localDevHybridBaseUrl = import.meta.env.VITE_LOCAL_DEV_HYBRID_API_URL?.trim() || 'http://127.0.0.1:8787'
+const remoteBaseUrl = import.meta.env.DEV
+  ? localDevHybridBaseUrl
+  : (configuredBaseUrl || derivedBaseUrl)
 const useRemoteHybrid = import.meta.env.VITE_USE_REMOTE_HYBRID?.trim() !== 'false'
 
 function isRemoteConfigured() {
@@ -76,7 +84,12 @@ function canUseRemoteNow() {
   return typeof navigator !== 'undefined' && navigator.onLine && isRemoteConfigured()
 }
 
-function saveBase64Workbook(base64: string, fileName: string) {
+async function saveBase64Workbook(localApi: AppApi, base64: string, fileName: string) {
+  if (localApi.files?.saveAndOpenWorkbook) {
+    await localApi.files.saveAndOpenWorkbook({ fileName, base64 })
+    return
+  }
+
   const binary = window.atob(base64)
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
   const blob = new Blob([bytes], {
@@ -138,6 +151,7 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
     secondaryAverage: typeof student.secondaryAverage === 'number' ? student.secondaryAverage : null,
     examRoom: String(student.examRoom ?? ''),
     schoolCycle: String(student.schoolCycle ?? ''),
+    semesterLevel: Number(student.semesterLevel ?? 1) as StudentDetail['semesterLevel'],
     academicStatus: String(student.academicStatus ?? ''),
     guardianFullName: String(guardian?.fullName ?? ''),
     guardianRelationship: String(guardian?.relationship ?? ''),
@@ -145,13 +159,34 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
     guardianPhoneSecondary: String(guardian?.secondaryPhone ?? ''),
     guardianEmail: String(guardian?.email ?? ''),
     validateNow: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'].includes(String(student.status ?? '')),
+    documentationStatus: String(student.documentationStatus ?? 'PENDIENTE'),
+    enrollmentStatus: String(student.enrollmentStatus ?? 'INSCRITO'),
     statusLabel: String(student.enrollmentStatus ?? 'INSCRITO'),
   }
+}
+
+function buildStudentListQuery(filters?: {
+  schoolCycle?: string
+  semesterLevel?: SemesterLevel | 'all'
+  enrollmentStatus?: string
+  documentationStatus?: string
+  query?: string
+}) {
+  const params = new URLSearchParams()
+  if (filters?.schoolCycle?.trim()) params.set('schoolCycle', filters.schoolCycle.trim())
+  if (filters?.semesterLevel && filters.semesterLevel !== 'all') params.set('semesterLevel', String(filters.semesterLevel))
+  if (filters?.enrollmentStatus?.trim()) params.set('enrollmentStatus', filters.enrollmentStatus.trim())
+  if (filters?.documentationStatus?.trim()) params.set('documentationStatus', filters.documentationStatus.trim())
+  if (filters?.query?.trim()) params.set('query', filters.query.trim())
+  const suffix = params.toString()
+  return suffix ? `?${suffix}` : ''
 }
 
 export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi {
   return {
     ...localApi,
+    appName: localApi.appName,
+    files: localApi.files,
     admin: {
       ...localApi.admin,
       listDepartments: async () => {
@@ -212,12 +247,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
     },
     students: {
       ...localApi.students,
-      list: async () => {
+      list: async (filters) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>('/api/hybrid/students', { method: 'GET' }, getActor)
+          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
           return data.items
         }
-        return localApi.students.list()
+        return localApi.students.list(filters)
       },
       listValidated: async () => {
         if (canUseRemoteNow()) {
@@ -257,6 +292,39 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         const updated = await localApi.students.update(studentId, input)
         addPendingSyncOp({ type: 'STUDENT_UPDATE', entityId: studentId, payload: { studentId, student: input }, deviceId: getDeviceId() })
         return updated
+      },
+      changeGroup: async (input: StudentGroupChangeInput) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['changeGroup']>> }>('/api/hybrid/students/change-group', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.students.changeGroup(input)
+      },
+      withdraw: async (input: StudentWithdrawalInput) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['withdraw']>> }>('/api/hybrid/students/withdraw', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.result
+        }
+        return localApi.students.withdraw(input)
+      },
+      enrollGrade: async (input: StudentGradeEnrollmentInput) => {
+        if (canUseRemoteNow()) {
+          const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['enrollGrade']>> }>('/api/hybrid/students/enroll-grade', { method: 'POST', body: JSON.stringify(input) }, getActor)
+          return data.student
+        }
+        return localApi.students.enrollGrade(input)
+      },
+      listMovements: async (input) => {
+        if (canUseRemoteNow()) {
+          const params = new URLSearchParams()
+          if (input?.studentId) params.set('studentId', input.studentId)
+          if (input?.schoolCycle) params.set('schoolCycle', input.schoolCycle)
+          if (input?.limit) params.set('limit', String(input.limit))
+          const suffix = params.toString() ? `?${params.toString()}` : ''
+          const data = await remoteFetch<{ items: StudentAcademicMovementSummary[] }>(`/api/hybrid/students/movements${suffix}`, { method: 'GET' }, getActor)
+          return data.items
+        }
+        return localApi.students.listMovements(input)
       },
     },
     concepts: {
@@ -310,7 +378,7 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         if (canUseRemoteNow()) {
           const data = await remoteFetch<{ result: RemoteBatchResult }>('/api/hybrid/payments/batch', { method: 'POST', body: JSON.stringify(input) }, getActor)
           if (data.result.workbookBase64) {
-            saveBase64Workbook(data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
+            await saveBase64Workbook(localApi, data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
           }
           return data.result
         }
@@ -362,11 +430,20 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         }
         return localApi.receipts.updateConfig(input)
       },
+      create: async (input) => {
+        return localApi.receipts.create(input)
+      },
+      openOfficialTemplate: async (input) => {
+        return localApi.receipts.openOfficialTemplate(input)
+      },
+      reprint: async (receiptId) => {
+        return localApi.receipts.reprint(receiptId)
+      },
       printBatch: async (input: RocMonthlyExportInput) => {
         if (canUseRemoteNow()) {
           const data = await remoteFetch<{ result: RemoteMonthlyBatchResult }>('/api/hybrid/receipts/monthly', { method: 'POST', body: JSON.stringify(input) }, getActor)
           if (data.result.workbookBase64) {
-            saveBase64Workbook(data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
+            await saveBase64Workbook(localApi, data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
           }
           return {
             ...data.result,
@@ -452,7 +529,7 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         if (canUseRemoteNow()) {
           const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['groups']['exportAssignedRoster']>> & { workbookBase64?: string; fileName?: string } }>('/api/hybrid/groups/export-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
           if (data.result.workbookBase64) {
-            saveBase64Workbook(data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
+            await saveBase64Workbook(localApi, data.result.workbookBase64, data.result.fileName ?? data.result.outputPath)
           }
           return data.result
         }

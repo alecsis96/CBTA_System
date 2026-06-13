@@ -3,6 +3,9 @@ import { ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('cbta', {
   appName: 'CBTA 44 Sistema',
+  files: {
+    saveAndOpenWorkbook: (input: unknown) => ipcRenderer.invoke('files:saveAndOpenWorkbook', input),
+  },
   auth: {
     login: (input: unknown) => ipcRenderer.invoke('auth:login', input),
     logout: () => ipcRenderer.invoke('auth:logout'),
@@ -16,7 +19,7 @@ contextBridge.exposeInMainWorld('cbta', {
     resetUserPassword: (userId: string, input: unknown) => ipcRenderer.invoke('admin:users:resetPassword', userId, input),
   },
   students: {
-    list: () => ipcRenderer.invoke('students:list'),
+    list: (filters?: unknown) => ipcRenderer.invoke('students:list', filters),
     listValidated: () => ipcRenderer.invoke('students:listValidated'),
     get: (studentId: string) => ipcRenderer.invoke('students:get', studentId),
     getNextInternalFolioPreview: () => ipcRenderer.invoke('students:getNextInternalFolioPreview'),
@@ -24,6 +27,17 @@ contextBridge.exposeInMainWorld('cbta', {
     saveRequirementChecklist: (studentId: string, input: unknown) => ipcRenderer.invoke('students:saveRequirementChecklist', studentId, input),
     create: (input: unknown) => ipcRenderer.invoke('students:create', input),
     update: (studentId: string, input: unknown) => ipcRenderer.invoke('students:update', studentId, input),
+    changeGroup: (input: unknown) => ipcRenderer.invoke('students:changeGroup', input),
+    withdraw: (input: unknown) => ipcRenderer.invoke('students:withdraw', input),
+    enrollGrade: (input: unknown) => ipcRenderer.invoke('students:enrollGrade', input),
+    listMovements: (input?: unknown) => ipcRenderer.invoke('students:listMovements', input),
+  },
+  permissions: {
+    list: (filters?: unknown) => ipcRenderer.invoke('permissions:list', filters),
+    create: (input: unknown) => ipcRenderer.invoke('permissions:create', input),
+    cancel: (input: unknown) => ipcRenderer.invoke('permissions:cancel', input),
+    setDailyStatus: (input: unknown) => ipcRenderer.invoke('permissions:setDailyStatus', input),
+    clearDailyStatus: (input: unknown) => ipcRenderer.invoke('permissions:clearDailyStatus', input),
   },
   preRegistrations: {
     list: () => ipcRenderer.invoke('preRegistrations:list'),

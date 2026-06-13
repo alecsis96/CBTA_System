@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron'
 import * as path from 'node:path'
 import { initializeDatabaseEnvironment } from './db-bootstrap'
+import { ensureLocalDbCompatibility } from './db-compat'
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL)
 
@@ -29,6 +30,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   initializeDatabaseEnvironment()
+  await ensureLocalDbCompatibility()
 
   const [{ registerIpcHandlers }, { ensureBaseData }] = await Promise.all([
     import('./ipc'),

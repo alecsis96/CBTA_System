@@ -20,7 +20,7 @@ type StudentCaptureFormPanelProps = {
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>
   onUpdateField: <K extends keyof StudentFormInput>(field: K, value: StudentFormInput[K]) => void
   onCancelEdit: () => void
-  onBackToFichas: () => void
+  onBackToFichas?: () => void
 }
 
 export function StudentCaptureFormPanel({
@@ -48,9 +48,11 @@ export function StudentCaptureFormPanel({
         </div>
         <div className="button-row">
           <span className="status-tag">{editingStudentId ? 'Edicion activa' : 'Captura real activa'}</span>
-          <button className="secondary-button small-button" onClick={onBackToFichas} type="button">
-            Regresar a fichas
-          </button>
+          {onBackToFichas ? (
+            <button className="secondary-button small-button" onClick={onBackToFichas} type="button">
+              Regresar a fichas
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -75,6 +77,13 @@ export function StudentCaptureFormPanel({
           </Field>
           <Field label="Ciclo escolar" required>
             <input value={form.schoolCycle} onChange={(event) => onUpdateField('schoolCycle', event.target.value)} />
+          </Field>
+          <Field label="Semestre destino" required>
+            <select value={String(form.semesterLevel)} onChange={(event) => onUpdateField('semesterLevel', Number(event.target.value) as StudentFormInput['semesterLevel'])}>
+              <option value="1">1° semestre</option>
+              <option value="3">3° semestre</option>
+              <option value="5">5° semestre</option>
+            </select>
           </Field>
           <Field label="Nombre(s)" required>
             <input value={form.firstName} onChange={(event) => onUpdateField('firstName', event.target.value)} />

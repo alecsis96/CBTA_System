@@ -34,7 +34,11 @@ model User {
   groupAssignmentsCreated StudentGroupAssignment[] @relation("GroupAssignedBy")
   groupAssignmentsUpdated StudentGroupAssignment[] @relation("GroupUpdatedBy")
   groupAssignmentAudits GroupAssignmentAudit[] @relation("GroupAuditActor")
+  academicMovements StudentAcademicMovement[] @relation("AcademicMovementActor")
   cashPayments CashPayment[] @relation("CashPaymentCreatedBy")
+  grantedPermissions StudentPermission[] @relation("PermissionGrantedBy")
+  closedPermissions StudentPermission[] @relation("PermissionClosedBy")
+  recordedDailyStatuses StudentDailyStatus[] @relation("DailyStatusRecordedBy")
 }
 
 model Student {
@@ -63,6 +67,7 @@ model Student {
   secondaryAverage  Decimal?
   examRoom          String?
   schoolCycle       String
+  semesterLevel     Int            @default(1)
   academicStatus    String?
   conductStatus     String         @default("REGULAR")
   addressConfirmedAt DateTime?
@@ -81,14 +86,55 @@ model Student {
   cashPayments      CashPayment[]
   groupAssignment   StudentGroupAssignment?
   groupAuditLogs    GroupAssignmentAudit[]
+  academicMovements StudentAcademicMovement[]
   requirementStatuses StudentRequirementStatus[]
+  permissions       StudentPermission[]
+  dailyStatuses     StudentDailyStatus[]
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
+}
+
+model StudentPermission {
+  id          String   @id @default(cuid())
+  studentId    String
+  kind        String   @default("PERMISO_GENERAL")
+  reason      String
+  notes       String?
+  startsAt    DateTime
+  endsAt      DateTime
+  status      String   @default("PROGRAMADO")
+  grantedById String?
+  closedById  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  grantedBy   User?    @relation("PermissionGrantedBy", fields: [grantedById], references: [id], onDelete: SetNull)
+  closedBy    User?    @relation("PermissionClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+
+  @@index([studentId, startsAt, endsAt])
+  @@index([status])
+}
+
+model StudentDailyStatus {
+  id           String   @id @default(cuid())
+  studentId     String
+  date         DateTime
+  status       String   @default("AUSENTE")
+  notes        String?
+  recordedById String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  student      Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  recordedBy   User?    @relation("DailyStatusRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, date])
+  @@index([date, status])
 }
 
 model IntakeGroup {
   id         String                   @id @default(cuid())
   schoolCycle String
+  semesterLevel Int                   @default(1)
   label      String
   shift      String                   @default("MATUTINO")
   capacity   Int                      @default(40)
@@ -97,7 +143,7 @@ model IntakeGroup {
   updatedAt  DateTime                 @updatedAt
   assignments StudentGroupAssignment[]
 
-  @@unique([schoolCycle, label, shift])
+  @@unique([schoolCycle, semesterLevel, label, shift])
 }
 
 model StudentGroupAssignment {
@@ -132,6 +178,29 @@ model GroupAssignmentAudit {
   assignment      StudentGroupAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   student         Student                @relation(fields: [studentId], references: [id], onDelete: Cascade)
   actor           User?                  @relation("GroupAuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+}
+
+model StudentAcademicMovement {
+  id                      String   @id @default(cuid())
+  studentId               String
+  movementType            String
+  reasonCode              String
+  reasonLabel             String
+  notes                   String?
+  previousSemesterLevel   Int?
+  nextSemesterLevel       Int?
+  previousGroupId         String?
+  previousGroupLabel      String?
+  nextGroupId             String?
+  nextGroupLabel          String?
+  previousEnrollmentStatus String?
+  nextEnrollmentStatus    String?
+  effectiveDate           DateTime?
+  actorId                 String?
+  actorRole               String
+  createdAt               DateTime @default(now())
+  student                 Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  actor                   User?    @relation("AcademicMovementActor", fields: [actorId], references: [id], onDelete: SetNull)
 }
 
 model AdmissionPayment {

@@ -16,7 +16,7 @@
   "description": "Sistema base para Control Escolar e Ingresos Propios con ROC oficial.",
   "main": "dist-electron/electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.node.json --watch\" \"wait-on tcp:5173 dist-electron/electron/main.js dist-electron/electron/preload.js && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.node.json --watch\" \"tsx watch backend/sync-server.ts\" \"wait-on tcp:5173 tcp:8787 dist-electron/electron/main.js dist-electron/electron/preload.js && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "dev:sync-server": "tsx watch backend/sync-server.ts",
     "start:sync-server": "tsx backend/sync-server.ts",
     "dev:renderer": "vite",
@@ -140,8 +140,12 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jszip": "^3.10.1",
+    "lie": "^3.3.0",
+    "pako": "^2.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "readable-stream": "^4.7.0",
+    "setimmediate": "^1.0.5",
     "xlsx": "^0.18.5",
     "zod": "^3.23.8"
   },
