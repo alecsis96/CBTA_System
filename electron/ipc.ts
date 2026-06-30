@@ -3210,7 +3210,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('concepts:updateTariff', async (_event, payload) => {
-    const actor = requireRole(['ADMIN'], 'actualizar tarifas')
+    const actor = requireRole(['ADMIN', 'INGRESOS_PROPIOS'], 'actualizar tarifas')
     const input = tariffUpdateSchema.parse(payload)
 
     const concept = await prisma.chargeConcept.findUnique({

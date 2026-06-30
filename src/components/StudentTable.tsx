@@ -87,7 +87,7 @@ export function StudentTable({
                       }}
                       type="button"
                     >
-                      editar
+                      Revisar
                     </button>
                   </td>
                 </tr>
@@ -100,8 +100,12 @@ export function StudentTable({
                           <strong>{student.curp}</strong>
                         </div>
                         <div>
-                          <span className="detail-label">Turno</span>
-                          <strong>{student.shiftLabel ?? 'Sin turno'}</strong>
+                          <span className="detail-label">Teléfono</span>
+                          <strong>{student.phone ?? 'Sin teléfono'}</strong>
+                        </div>
+                        <div>
+                          <span className="detail-label">Domicilio</span>
+                          <strong>{student.address ?? 'Sin domicilio'}</strong>
                         </div>
                         <div>
                           <span className="detail-label">Permiso activo</span>

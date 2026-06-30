@@ -1700,6 +1700,9 @@ export async function listConcepts() {
 }
 
 export async function updateConceptTariff(input: TariffUpdateInput, actor: RemoteActor) {
+  if (!['ADMIN', 'INGRESOS_PROPIOS'].includes(actor.role)) {
+    throw new Error('No autorizado para actualizar tarifas.')
+  }
   const concept = await prisma.chargeConcept.findUnique({ where: { code: input.code } })
   if (!concept) throw new Error('No se encontro la clave a actualizar.')
   const updated = await prisma.$transaction(async (tx) => {
@@ -1717,6 +1720,9 @@ export async function updateConceptTariff(input: TariffUpdateInput, actor: Remot
 }
 
 export async function updateConceptSuggested(input: ConceptSuggestionUpdateInput, actor: RemoteActor) {
+  if (actor.role !== 'ADMIN') {
+    throw new Error('No autorizado para actualizar claves sugeridas.')
+  }
   const updated = await prisma.chargeConcept.update({
     where: { code: input.code },
     data: { isSuggested: input.isSuggested },

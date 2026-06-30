@@ -59,6 +59,29 @@ export function ModuleHero({ eyebrow, title, subtitle, metrics, actions }: Modul
   )
 }
 
+export function ModuleBarCompact({ eyebrow, title, metrics, actions }: Omit<ModuleHeroProps, 'subtitle'>) {
+  return (
+    <section className="module-bar">
+      <div className="module-title-row">
+        <div>
+          <span className="module-title-eyebrow">{eyebrow}</span>
+          <h2 className="module-title">{title}</h2>
+        </div>
+        {actions ? <div>{actions}</div> : null}
+      </div>
+      <div className="metric-strip">
+        {metrics.map((metric) => (
+          <div className={metric.tone === 'warning' ? 'metric-chip warning' : 'metric-chip'} key={`${metric.label}-${metric.value}`}>
+            <span className="metric-chip-label">{metric.label}</span>
+            <strong className="metric-chip-value">{metric.value}</strong>
+            {metric.helper ? <span className="metric-chip-helper">{metric.helper}</span> : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export function SurfaceCard({ className, children }: { className?: string; children: ReactNode }) {
   return <section className={className ? `panel dashboard-surface ${className}` : 'panel dashboard-surface'}>{children}</section>
 }
@@ -126,7 +149,9 @@ export function ActivityPanel({ logs }: { logs: AuditLogSummary[] }) {
             <article className="activity-feed-item" key={log.id}>
               <strong>{log.action}</strong>
               <p>{log.detail || `${log.entityType} ${log.entityId}`}</p>
-              <span>{log.actorName} · {new Date(log.createdAt).toLocaleString('es-MX')}</span>
+              <span>
+                {log.actorName} · {new Date(log.createdAt).toLocaleString('es-MX')}
+              </span>
             </article>
           ))}
         </div>

@@ -1,4 +1,5 @@
 import { PanelSectionTitle, SurfaceCard } from '@/components/dashboard-kit'
+import { SearchInput } from '@/components/ui/SearchInput'
 import type { StudentFormInput } from '@/types/domain'
 
 type ControlEscolarToolbarProps = {
@@ -115,17 +116,14 @@ export function ControlEscolarToolbar({
         </div>
 
         <div className="control-toolbar-lower">
-          <label className="control-toolbar-search search-shell">
-            <span className="search-icon" aria-hidden="true"></span>
-            <input
-              aria-label="Buscar alumno"
-              disabled={operationsTab === 'bandeja' || operationsTab === 'grupos'}
-              placeholder={toolbarSearchPlaceholder}
-              value={toolbarSearchValue}
-              onChange={(event) => handleToolbarSearchChange(event.target.value)}
-            />
-            <span className="search-shortcut-chip">Ctrl + K</span>
-          </label>
+          <SearchInput
+            aria-label="Buscar alumno"
+            disabled={operationsTab === 'bandeja' || operationsTab === 'grupos'}
+            placeholder={toolbarSearchPlaceholder}
+            value={toolbarSearchValue}
+            onChange={handleToolbarSearchChange}
+            showShortcut
+          />
 
           <div className="control-filters-panel compact-filter-panel">
             <button className="secondary-button small-button filter-toggle-button" onClick={() => setShowFilters((current) => !current)} type="button">
