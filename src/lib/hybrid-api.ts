@@ -86,7 +86,15 @@ function canUseRemoteNow() {
 
 function shouldFallbackToLocal(error: unknown) {
   if (!(error instanceof Error)) return false
-  return ['not_found', 'remote_database_unreachable', 'Failed to fetch'].some((message) => error.message.includes(message))
+  return [
+    'not_found',
+    'remote_database_unreachable',
+    'Failed to fetch',
+    "Can't reach database server",
+    'database server',
+    'ECONNREFUSED',
+    'ERR_NETWORK_CHANGED',
+  ].some((message) => error.message.includes(message))
 }
 
 async function saveBase64Workbook(localApi: AppApi, base64: string, fileName: string) {
@@ -305,8 +313,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       create: async (input: StudentFormInput) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['create']>> }>('/api/hybrid/students', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.student
+          try {
+            const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['create']>> }>('/api/hybrid/students', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.student
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         const created = await localApi.students.create(input)
         addPendingSyncOp({ type: 'STUDENT_CREATE', entityId: created.id, payload: { student: input }, deviceId: getDeviceId() })
@@ -314,8 +326,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       update: async (studentId: string, input: StudentFormInput) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['update']>> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'PUT', body: JSON.stringify(input) }, getActor)
-          return data.student
+          try {
+            const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['update']>> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'PUT', body: JSON.stringify(input) }, getActor)
+            return data.student
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         const updated = await localApi.students.update(studentId, input)
         addPendingSyncOp({ type: 'STUDENT_UPDATE', entityId: studentId, payload: { studentId, student: input }, deviceId: getDeviceId() })
