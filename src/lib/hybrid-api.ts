@@ -74,7 +74,8 @@ async function remoteFetch<T>(path: string, init: RequestInit, getActor: ActorGe
 
   const data = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string } & Record<string, unknown>
   if (!response.ok || data.ok === false) {
-    throw new Error(typeof data.error === 'string' ? data.error : 'No se pudo completar la operacion remota.')
+    const message = typeof data.error === 'string' ? data.error : 'No se pudo completar la operacion remota.'
+    throw new Error(`${response.status}:${message}`)
   }
 
   return data as T
@@ -94,6 +95,10 @@ function shouldFallbackToLocal(error: unknown) {
     'database server',
     'ECONNREFUSED',
     'ERR_NETWORK_CHANGED',
+    '500:',
+    '502:',
+    '503:',
+    '504:',
   ].some((message) => error.message.includes(message))
 }
 
@@ -273,13 +278,18 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           return localApi.students.list(filters)
         }
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
-          const localItems = await localApi.students.list(filters)
-          if (localItems.length > data.items.length) {
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
+            const localItems = await localApi.students.list(filters)
+            if (localItems.length > data.items.length) {
+              preferLocalStudentRoster = true
+              return localItems
+            }
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
             preferLocalStudentRoster = true
-            return localItems
           }
-          return data.items
         }
         return localApi.students.list(filters)
       },
@@ -288,8 +298,13 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           return localApi.students.listValidated()
         }
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['listValidated']>> }>('/api/hybrid/students?validatedOnly=true', { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['listValidated']>> }>('/api/hybrid/students?validatedOnly=true', { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+            preferLocalStudentRoster = true
+          }
         }
         return localApi.students.listValidated()
       },
@@ -306,8 +321,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       getNextInternalFolioPreview: async () => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ nextFolio: string }>('/api/hybrid/students/next-folio-preview', { method: 'GET' }, getActor)
-          return data.nextFolio
+          try {
+            const data = await remoteFetch<{ nextFolio: string }>('/api/hybrid/students/next-folio-preview', { method: 'GET' }, getActor)
+            return data.nextFolio
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.getNextInternalFolioPreview()
       },
@@ -339,22 +358,34 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       changeGroup: async (input: StudentGroupChangeInput) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['changeGroup']>> }>('/api/hybrid/students/change-group', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.result
+          try {
+            const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['changeGroup']>> }>('/api/hybrid/students/change-group', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.result
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.changeGroup(input)
       },
       withdraw: async (input: StudentWithdrawalInput) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['withdraw']>> }>('/api/hybrid/students/withdraw', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.result
+          try {
+            const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['withdraw']>> }>('/api/hybrid/students/withdraw', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.result
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.withdraw(input)
       },
       enrollGrade: async (input: StudentGradeEnrollmentInput) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['enrollGrade']>> }>('/api/hybrid/students/enroll-grade', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.student
+          try {
+            const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['enrollGrade']>> }>('/api/hybrid/students/enroll-grade', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.student
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.enrollGrade(input)
       },
@@ -373,8 +404,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           if (input?.schoolCycle) params.set('schoolCycle', input.schoolCycle)
           if (input?.limit) params.set('limit', String(input.limit))
           const suffix = params.toString() ? `?${params.toString()}` : ''
-          const data = await remoteFetch<{ items: StudentAcademicMovementSummary[] }>(`/api/hybrid/students/movements${suffix}`, { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: StudentAcademicMovementSummary[] }>(`/api/hybrid/students/movements${suffix}`, { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.listMovements(input)
       },
@@ -388,8 +423,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       ...localApi.concepts,
       listActive: async () => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['concepts']['listActive']>> }>('/api/hybrid/concepts', { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['concepts']['listActive']>> }>('/api/hybrid/concepts', { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.concepts.listActive()
       },
@@ -417,8 +456,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       list: async (filters) => {
         if (canUseRemoteNow()) {
           const suffix = filters?.status ? `?status=${encodeURIComponent(filters.status)}` : ''
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['payments']['list']>> }>(`/api/hybrid/payments${suffix}`, { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['payments']['list']>> }>(`/api/hybrid/payments${suffix}`, { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.payments.list(filters)
       },
@@ -446,15 +489,23 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       ...localApi.receipts,
       listByStudent: async (studentId: string) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['receipts']['listByStudent']>> }>(`/api/hybrid/receipts?studentId=${encodeURIComponent(studentId)}`, { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['receipts']['listByStudent']>> }>(`/api/hybrid/receipts?studentId=${encodeURIComponent(studentId)}`, { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.receipts.listByStudent(studentId)
       },
       listAll: async () => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['receipts']['listAll']>> }>('/api/hybrid/receipts', { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['receipts']['listAll']>> }>('/api/hybrid/receipts', { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.receipts.listAll()
       },
@@ -521,22 +572,34 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       ...localApi.groups,
       stats: async (input) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['stats']>> }>('/api/hybrid/groups/stats', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['stats']>> }>('/api/hybrid/groups/stats', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.groups.stats(input)
       },
       preview: async (input) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['preview']>> }>('/api/hybrid/groups/preview', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['preview']>> }>('/api/hybrid/groups/preview', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.groups.preview(input)
       },
       previewRoster: async (input) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['previewRoster']>> }>('/api/hybrid/groups/preview-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['previewRoster']>> }>('/api/hybrid/groups/preview-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.groups.previewRoster(input)
       },
@@ -570,8 +633,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       listAssignedRoster: async (input) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['listAssignedRoster']>> }>('/api/hybrid/groups/list-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['groups']['listAssignedRoster']>> }>('/api/hybrid/groups/list-assigned-roster', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.groups.listAssignedRoster(input)
       },
@@ -605,8 +672,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       ...localApi.audit,
       listRecent: async () => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['audit']['listRecent']>> }>('/api/hybrid/audit', { method: 'GET' }, getActor)
-          return data.items
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['audit']['listRecent']>> }>('/api/hybrid/audit', { method: 'GET' }, getActor)
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.audit.listRecent()
       },
