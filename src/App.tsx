@@ -150,6 +150,7 @@ function App() {
   const [savingRocConfig, setSavingRocConfig] = useState(false)
   const [savingTariffCode, setSavingTariffCode] = useState<string | null>(null)
   const [savingUserId, setSavingUserId] = useState<string | null>(null)
+  const [savingAdminTestAction, setSavingAdminTestAction] = useState<string | null>(null)
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
   const [newlyCreatedStudentId, setNewlyCreatedStudentId] = useState<string | null>(null)
   const [isRecentActivityCollapsed, setIsRecentActivityCollapsed] = useState(false)
@@ -855,6 +856,38 @@ function App() {
     }
   }
 
+  async function handleAdminControlEscolarTestReset(action: string, input?: { studentId?: string; schoolCycle?: string; schoolPeriod?: number }) {
+    const periodInput = {
+      schoolCycle: input?.schoolCycle ?? '2026-2027',
+      schoolPeriod: input?.schoolPeriod ?? 1,
+    }
+    setSavingAdminTestAction(action)
+    setConfigFeedback(null)
+
+    try {
+      const result =
+        action === 'student'
+          ? await appApi.admin.resetStudentEnrollmentTest({ studentId: input?.studentId ?? '' })
+          : action === 'enrollment'
+            ? await appApi.admin.resetPeriodEnrollmentTests(periodInput)
+            : action === 'reinscription'
+              ? await appApi.admin.resetPeriodReinscriptionTests(periodInput)
+              : action === 'graduation'
+                ? await appApi.admin.resetPeriodGraduationTests(periodInput)
+                : await appApi.admin.clearControlEscolarTestHistory(periodInput)
+
+      await loadData(authSession)
+      setConfigFeedback(
+        `Reset completado: ${result.affectedStudents} alumnos, ${result.deletedMovements} movimientos, ${result.deletedAuditLogs} auditorias, ${result.deletedGroupAuditLogs} auditorias de grupo eliminadas.${result.skipped ? ` Omitidos: ${result.skipped}.` : ''}`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo ejecutar el reset temporal.'
+      setConfigFeedback(message)
+    } finally {
+      setSavingAdminTestAction(null)
+    }
+  }
+
   async function handleUpdatePreRegistrationStatus(
     preRegistrationId: string,
     status: 'EN_REVISION_CONTROL_ESCOLAR' | 'OBSERVADO' | 'RECHAZADO' | 'VALIDADO_PARA_PAGO' | 'PAGADO',
@@ -1232,6 +1265,7 @@ function App() {
             editingStudentId={editingStudentId}
             newlyCreatedStudentId={newlyCreatedStudentId}
             saving={saving}
+            loading={loading}
             studentsSectionRef={studentsSectionRef}
             captureSectionRef={captureSectionRef}
             onCancelEdit={handleCancelEdit}
@@ -1302,8 +1336,10 @@ function App() {
             savingTariffCode={savingTariffCode}
             savingRocConfig={savingRocConfig}
             savingUserId={savingUserId}
+            savingAdminTestAction={savingAdminTestAction}
             users={adminUsers}
             departments={departments}
+            students={students}
             currentUserId={authSession.id}
             onUpdateTariff={handleUpdateTariff}
             onUpdateRocConfig={handleUpdateRocConfig}
@@ -1311,6 +1347,7 @@ function App() {
             onCreateUser={handleCreateAdminUser}
             onUpdateUser={handleUpdateAdminUser}
             onResetUserPassword={handleResetAdminUserPassword}
+            onRunAdminTestReset={handleAdminControlEscolarTestReset}
           />
         )}
 
@@ -1357,8 +1394,10 @@ export type ConfiguracionTarifasProps = {
   savingTariffCode: string | null
   savingRocConfig: boolean
   savingUserId: string | null
+  savingAdminTestAction: string | null
   users: UserSummary[]
   departments: DepartmentSummary[]
+  students: StudentSummary[]
   currentUserId: string
   onUpdateTariff: (code: string, amount: number, periodLabel: string) => Promise<void>
   onUpdateRocConfig: (initialRocNumber: string) => Promise<void>
@@ -1366,6 +1405,7 @@ export type ConfiguracionTarifasProps = {
   onCreateUser: (input: UserCreateInput) => Promise<void>
   onUpdateUser: (userId: string, input: UserUpdateInput) => Promise<void>
   onResetUserPassword: (userId: string, password: string) => Promise<void>
+  onRunAdminTestReset: (action: string, input?: { studentId?: string; schoolCycle?: string; schoolPeriod?: number }) => Promise<void>
 }
 
 export type FloatingFeedbackToastProps = {
@@ -1419,6 +1459,7 @@ export type ControlEscolarProps = {
   editingStudentId: string | null
   newlyCreatedStudentId: string | null
   saving: boolean
+  loading: boolean
   feedback: string | null
   studentsSectionRef: MutableRefObject<HTMLElement | null>
   captureSectionRef: MutableRefObject<HTMLElement | null>

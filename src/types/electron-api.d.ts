@@ -66,6 +66,11 @@ type CbtaApi = {
     createUser: (input: UserCreateInput) => Promise<UserSummary>
     updateUser: (userId: string, input: UserUpdateInput) => Promise<UserSummary>
     resetUserPassword: (userId: string, input: UserResetPasswordInput) => Promise<UserSummary>
+    resetStudentEnrollmentTest: (input: { studentId: string }) => Promise<AdminControlEscolarResetResult>
+    resetPeriodEnrollmentTests: (input: AdminControlEscolarPeriodResetInput) => Promise<AdminControlEscolarResetResult>
+    resetPeriodReinscriptionTests: (input: AdminControlEscolarPeriodResetInput) => Promise<AdminControlEscolarResetResult>
+    resetPeriodGraduationTests: (input: AdminControlEscolarPeriodResetInput) => Promise<AdminControlEscolarResetResult>
+    clearControlEscolarTestHistory: (input?: Partial<AdminControlEscolarPeriodResetInput>) => Promise<AdminControlEscolarResetResult>
   }
   students: {
     list: (filters?: {
@@ -156,6 +161,20 @@ type CbtaApi = {
     printPaymentReceipt: (payload: AdmissionSummary) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
     printFicha: (payload: AdmissionSummary) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
   }
+}
+
+type AdminControlEscolarPeriodResetInput = {
+  schoolCycle: string
+  schoolPeriod: number
+}
+
+type AdminControlEscolarResetResult = {
+  ok: boolean
+  affectedStudents: number
+  deletedMovements: number
+  deletedAuditLogs: number
+  deletedGroupAuditLogs: number
+  skipped?: number
 }
 
 declare global {

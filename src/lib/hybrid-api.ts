@@ -95,10 +95,13 @@ function shouldFallbackToLocal(error: unknown) {
     'database server',
     'ECONNREFUSED',
     'ERR_NETWORK_CHANGED',
+    '404:',
     '500:',
     '502:',
     '503:',
     '504:',
+    'No se encontro el alumno',
+    'No se encontró el alumno',
   ].some((message) => error.message.includes(message))
 }
 
@@ -270,6 +273,11 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         }
         return localApi.admin.resetUserPassword(userId, input)
       },
+      resetStudentEnrollmentTest: async (input) => localApi.admin.resetStudentEnrollmentTest(input),
+      resetPeriodEnrollmentTests: async (input) => localApi.admin.resetPeriodEnrollmentTests(input),
+      resetPeriodReinscriptionTests: async (input) => localApi.admin.resetPeriodReinscriptionTests(input),
+      resetPeriodGraduationTests: async (input) => localApi.admin.resetPeriodGraduationTests(input),
+      clearControlEscolarTestHistory: async (input) => localApi.admin.clearControlEscolarTestHistory(input),
     },
     students: {
       ...localApi.students,
@@ -309,12 +317,16 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         return localApi.students.listValidated()
       },
       get: async (studentId: string) => {
+        if (preferLocalStudentRoster) {
+          return localApi.students.get(studentId)
+        }
         if (canUseRemoteNow()) {
           try {
             const data = await remoteFetch<{ student: Record<string, unknown> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'GET' }, getActor)
             return mapRemoteStudentDetail(data.student)
           } catch (error) {
             if (!shouldFallbackToLocal(error)) throw error
+            preferLocalStudentRoster = true
           }
         }
         return localApi.students.get(studentId)
@@ -344,12 +356,18 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         return created
       },
       update: async (studentId: string, input: StudentFormInput) => {
+        if (preferLocalStudentRoster) {
+          const updated = await localApi.students.update(studentId, input)
+          addPendingSyncOp({ type: 'STUDENT_UPDATE', entityId: studentId, payload: { studentId, student: input }, deviceId: getDeviceId() })
+          return updated
+        }
         if (canUseRemoteNow()) {
           try {
             const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['update']>> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'PUT', body: JSON.stringify(input) }, getActor)
             return data.student
           } catch (error) {
             if (!shouldFallbackToLocal(error)) throw error
+            preferLocalStudentRoster = true
           }
         }
         const updated = await localApi.students.update(studentId, input)

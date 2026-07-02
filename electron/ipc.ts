@@ -56,6 +56,15 @@ const adminUserResetPasswordSchema = z.object({
   password: z.string().min(8),
 })
 
+const adminTestStudentResetSchema = z.object({
+  studentId: z.string().trim().min(1),
+})
+
+const adminTestPeriodResetSchema = z.object({
+  schoolCycle: z.string().trim().min(1).default('2026-2027'),
+  schoolPeriod: z.number().int().min(1).max(2).default(1),
+}).default({ schoolCycle: '2026-2027', schoolPeriod: 1 })
+
 function authSessionSummary() {
   return currentSession
 }
@@ -2108,6 +2117,69 @@ async function writeWorkbookWithLockFallback(outputPath: string, content: Buffer
   return variantPath
 }
 
+type TestResetResult = {
+  ok: boolean
+  affectedStudents: number
+  deletedMovements: number
+  deletedAuditLogs: number
+  deletedGroupAuditLogs: number
+  skipped: number
+}
+
+function emptyTestResetResult(): TestResetResult {
+  return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+}
+
+function previousSchoolPeriod(targetSchoolCycle: string, targetPeriod: number) {
+  if (targetPeriod === 2) {
+    return { schoolCycle: targetSchoolCycle, schoolPeriod: 1 }
+  }
+
+  const match = targetSchoolCycle.match(/^(\d{4})-(\d{4})$/)
+  if (!match) {
+    return { schoolCycle: targetSchoolCycle, schoolPeriod: 2 }
+  }
+
+  return { schoolCycle: `${Number(match[1]) - 1}-${Number(match[2]) - 1}`, schoolPeriod: 2 }
+}
+
+function parseBeforeEnrollmentNumber(beforeJson: string | null) {
+  if (!beforeJson) return null
+  try {
+    const parsed = JSON.parse(beforeJson) as { enrollmentNumber?: unknown }
+    return typeof parsed.enrollmentNumber === 'string' && parsed.enrollmentNumber.trim() ? parsed.enrollmentNumber.trim() : null
+  } catch {
+    return null
+  }
+}
+
+async function restoreGroupAssignmentForReset(
+  tx: Prisma.TransactionClient,
+  studentId: string,
+  previousGroupId: string | null,
+) {
+  const currentAssignment = await tx.studentGroupAssignment.findUnique({ where: { studentId } })
+  if (!previousGroupId) {
+    if (currentAssignment) {
+      await tx.groupAssignmentAudit.deleteMany({ where: { assignmentId: currentAssignment.id } })
+      await tx.studentGroupAssignment.delete({ where: { id: currentAssignment.id } })
+    }
+    return
+  }
+
+  if (currentAssignment) {
+    await tx.studentGroupAssignment.update({
+      where: { id: currentAssignment.id },
+      data: { groupId: previousGroupId, status: 'ASIGNADO', reason: 'RESET_PRUEBA_ADMIN' },
+    })
+    return
+  }
+
+  await tx.studentGroupAssignment.create({
+    data: { studentId, groupId: previousGroupId, status: 'ASIGNADO', reason: 'RESET_PRUEBA_ADMIN' },
+  })
+}
+
 export function registerIpcHandlers() {
   ipcMain.handle('files:saveAndOpenWorkbook', async (_event, payload) => {
     const input = saveWorkbookSchema.parse(payload)
@@ -2274,6 +2346,246 @@ export function registerIpcHandlers() {
     })
 
     return userSummary(updated)
+  })
+
+  ipcMain.handle('admin:tests:resetStudentEnrollment', async (_event, payload) => {
+    requireRole(['ADMIN'], 'reiniciar pruebas de control escolar')
+    const input = adminTestStudentResetSchema.parse(payload)
+    const result = emptyTestResetResult()
+
+    await prisma.$transaction(async (tx) => {
+      const movement = await tx.studentAcademicMovement.findFirst({
+        where: {
+          studentId: input.studentId,
+          reasonCode: { in: ['INSCRIPCION_FORMAL', 'REINSCRIPCION_SEMESTRAL', 'EGRESO_SEMESTRAL'] },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+
+      if (!movement) {
+        result.skipped += 1
+        return
+      }
+
+      if (movement.reasonCode === 'INSCRIPCION_FORMAL') {
+        const audit = await tx.auditLog.findFirst({
+          where: { entityType: 'Student', entityId: input.studentId, action: 'INSCRIPCION_FORMAL' },
+          orderBy: { createdAt: 'desc' },
+        })
+        const previousEnrollmentNumber = parseBeforeEnrollmentNumber(audit?.beforeJson ?? null)
+        if (!previousEnrollmentNumber) {
+          result.skipped += 1
+          return
+        }
+        await tx.student.update({
+          where: { id: input.studentId },
+          data: {
+            enrollmentNumber: previousEnrollmentNumber,
+            officialEnrollmentNumber: null,
+            enrollmentStatus: 'FICHA_ENTREGADA',
+            status: 'CAPTURADO',
+            validatedAt: null,
+            validatedBy: null,
+          },
+        })
+      } else {
+        const previousPeriod = previousSchoolPeriod('2026-2027', 1)
+        await restoreGroupAssignmentForReset(tx, input.studentId, movement.previousGroupId)
+        await tx.student.update({
+          where: { id: input.studentId },
+          data: {
+            schoolCycle: previousPeriod.schoolCycle,
+            schoolPeriod: previousPeriod.schoolPeriod,
+            semesterLevel: movement.previousSemesterLevel ?? undefined,
+            enrollmentStatus: movement.previousEnrollmentStatus ?? 'ASIGNADO',
+            status: 'VALIDADO',
+          },
+        })
+      }
+
+      const deletedGroupAuditLogs = await tx.groupAssignmentAudit.deleteMany({ where: { studentId: input.studentId } })
+      const deletedAuditLogs = await tx.auditLog.deleteMany({
+        where: {
+          entityType: 'Student',
+          entityId: input.studentId,
+          action: { in: ['INSCRIPCION_FORMAL', 'REINSCRIPCION_SEMESTRAL', 'EGRESO_SEMESTRAL', 'CAMBIO_GRUPO', 'BAJA_ALUMNO', 'ALTA_GRADO'] },
+        },
+      })
+      const deletedMovements = await tx.studentAcademicMovement.deleteMany({ where: { studentId: input.studentId } })
+      result.affectedStudents += 1
+      result.deletedGroupAuditLogs += deletedGroupAuditLogs.count
+      result.deletedAuditLogs += deletedAuditLogs.count
+      result.deletedMovements += deletedMovements.count
+    })
+
+    return result
+  })
+
+  ipcMain.handle('admin:tests:resetPeriodEnrollment', async (_event, payload) => {
+    requireRole(['ADMIN'], 'reiniciar pruebas de inscripcion')
+    const input = adminTestPeriodResetSchema.parse(payload)
+    const result = emptyTestResetResult()
+
+    await prisma.$transaction(async (tx) => {
+      const movements = await tx.studentAcademicMovement.findMany({
+        where: {
+          reasonCode: 'INSCRIPCION_FORMAL',
+          student: { schoolCycle: input.schoolCycle, schoolPeriod: input.schoolPeriod },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      const seen = new Set<string>()
+
+      for (const movement of movements) {
+        if (seen.has(movement.studentId)) continue
+        seen.add(movement.studentId)
+        const audit = await tx.auditLog.findFirst({
+          where: { entityType: 'Student', entityId: movement.studentId, action: 'INSCRIPCION_FORMAL' },
+          orderBy: { createdAt: 'desc' },
+        })
+        const previousEnrollmentNumber = parseBeforeEnrollmentNumber(audit?.beforeJson ?? null)
+        if (!previousEnrollmentNumber) {
+          result.skipped += 1
+          continue
+        }
+        await tx.student.update({
+          where: { id: movement.studentId },
+          data: {
+            enrollmentNumber: previousEnrollmentNumber,
+            officialEnrollmentNumber: null,
+            enrollmentStatus: 'FICHA_ENTREGADA',
+            status: 'CAPTURADO',
+            validatedAt: null,
+            validatedBy: null,
+          },
+        })
+        const deletedGroupAuditLogs = await tx.groupAssignmentAudit.deleteMany({ where: { studentId: movement.studentId } })
+        const deletedAuditLogs = await tx.auditLog.deleteMany({ where: { entityType: 'Student', entityId: movement.studentId, action: 'INSCRIPCION_FORMAL' } })
+        const deletedMovements = await tx.studentAcademicMovement.deleteMany({ where: { studentId: movement.studentId, reasonCode: 'INSCRIPCION_FORMAL' } })
+        result.affectedStudents += 1
+        result.deletedGroupAuditLogs += deletedGroupAuditLogs.count
+        result.deletedAuditLogs += deletedAuditLogs.count
+        result.deletedMovements += deletedMovements.count
+      }
+    })
+
+    return result
+  })
+
+  ipcMain.handle('admin:tests:resetPeriodReinscription', async (_event, payload) => {
+    requireRole(['ADMIN'], 'reiniciar pruebas de reinscripcion')
+    const input = adminTestPeriodResetSchema.parse(payload)
+    const result = emptyTestResetResult()
+    const previousPeriod = previousSchoolPeriod(input.schoolCycle, input.schoolPeriod)
+
+    await prisma.$transaction(async (tx) => {
+      const movements = await tx.studentAcademicMovement.findMany({
+        where: {
+          reasonCode: 'REINSCRIPCION_SEMESTRAL',
+          student: { schoolCycle: input.schoolCycle, schoolPeriod: input.schoolPeriod },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      const seen = new Set<string>()
+
+      for (const movement of movements) {
+        if (seen.has(movement.studentId)) continue
+        seen.add(movement.studentId)
+        await restoreGroupAssignmentForReset(tx, movement.studentId, movement.previousGroupId)
+        await tx.student.update({
+          where: { id: movement.studentId },
+          data: {
+            schoolCycle: previousPeriod.schoolCycle,
+            schoolPeriod: previousPeriod.schoolPeriod,
+            semesterLevel: movement.previousSemesterLevel ?? undefined,
+            enrollmentStatus: movement.previousEnrollmentStatus ?? 'ASIGNADO',
+            status: 'VALIDADO',
+          },
+        })
+        const deletedGroupAuditLogs = await tx.groupAssignmentAudit.deleteMany({ where: { studentId: movement.studentId } })
+        const deletedAuditLogs = await tx.auditLog.deleteMany({ where: { entityType: 'Student', entityId: movement.studentId, action: 'REINSCRIPCION_SEMESTRAL' } })
+        const deletedMovements = await tx.studentAcademicMovement.deleteMany({ where: { studentId: movement.studentId, reasonCode: 'REINSCRIPCION_SEMESTRAL' } })
+        result.affectedStudents += 1
+        result.deletedGroupAuditLogs += deletedGroupAuditLogs.count
+        result.deletedAuditLogs += deletedAuditLogs.count
+        result.deletedMovements += deletedMovements.count
+      }
+    })
+
+    return result
+  })
+
+  ipcMain.handle('admin:tests:resetPeriodGraduation', async (_event, payload) => {
+    requireRole(['ADMIN'], 'reiniciar pruebas de egreso')
+    const input = adminTestPeriodResetSchema.parse(payload)
+    const result = emptyTestResetResult()
+
+    await prisma.$transaction(async (tx) => {
+      const movements = await tx.studentAcademicMovement.findMany({
+        where: {
+          reasonCode: 'EGRESO_SEMESTRAL',
+          student: { enrollmentStatus: 'EGRESADO' },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      const seen = new Set<string>()
+
+      for (const movement of movements) {
+        if (seen.has(movement.studentId)) continue
+        seen.add(movement.studentId)
+        await restoreGroupAssignmentForReset(tx, movement.studentId, movement.previousGroupId)
+        await tx.student.update({
+          where: { id: movement.studentId },
+          data: {
+            schoolCycle: input.schoolCycle,
+            schoolPeriod: input.schoolPeriod,
+            semesterLevel: movement.previousSemesterLevel ?? 6,
+            enrollmentStatus: movement.previousEnrollmentStatus ?? 'ASIGNADO',
+            status: 'VALIDADO',
+          },
+        })
+        const deletedGroupAuditLogs = await tx.groupAssignmentAudit.deleteMany({ where: { studentId: movement.studentId } })
+        const deletedAuditLogs = await tx.auditLog.deleteMany({ where: { entityType: 'Student', entityId: movement.studentId, action: 'EGRESO_SEMESTRAL' } })
+        const deletedMovements = await tx.studentAcademicMovement.deleteMany({ where: { studentId: movement.studentId, reasonCode: 'EGRESO_SEMESTRAL' } })
+        result.affectedStudents += 1
+        result.deletedGroupAuditLogs += deletedGroupAuditLogs.count
+        result.deletedAuditLogs += deletedAuditLogs.count
+        result.deletedMovements += deletedMovements.count
+      }
+    })
+
+    return result
+  })
+
+  ipcMain.handle('admin:tests:clearControlEscolarHistory', async (_event, payload) => {
+    requireRole(['ADMIN'], 'limpiar historial de pruebas de control escolar')
+    const input = adminTestPeriodResetSchema.parse(payload)
+    const result = emptyTestResetResult()
+    const students = await prisma.student.findMany({
+      where: { schoolCycle: input.schoolCycle, schoolPeriod: input.schoolPeriod },
+      select: { id: true },
+    })
+    const studentIds = students.map((student) => student.id)
+    if (studentIds.length === 0) return result
+
+    await prisma.$transaction(async (tx) => {
+      const deletedGroupAuditLogs = await tx.groupAssignmentAudit.deleteMany({ where: { studentId: { in: studentIds } } })
+      const deletedMovements = await tx.studentAcademicMovement.deleteMany({ where: { studentId: { in: studentIds } } })
+      const deletedAuditLogs = await tx.auditLog.deleteMany({
+        where: {
+          OR: [
+            { entityType: 'Student', entityId: { in: studentIds } },
+            { entityType: 'GroupAssignment' },
+            { entityType: 'StudentAcademicMovement' },
+          ],
+        },
+      })
+      result.deletedGroupAuditLogs = deletedGroupAuditLogs.count
+      result.deletedMovements = deletedMovements.count
+      result.deletedAuditLogs = deletedAuditLogs.count
+    })
+
+    return result
   })
 
   ipcMain.handle('admissions:list', async (_event, rawFilters) => {

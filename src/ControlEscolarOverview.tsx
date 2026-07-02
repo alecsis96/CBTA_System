@@ -27,7 +27,7 @@ function targetSemesterForReinscription(student: StudentSummary) {
 }
 
 export function ControlEscolarOverview({
-  form, students, preRegistrations, admissions, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
+  form, students, preRegistrations, admissions, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, loading, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
 }: ControlEscolarProps) {
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas');
   const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos'>('alumnos');
@@ -1132,7 +1132,17 @@ export function ControlEscolarOverview({
                 <span className="status-tag">{filteredStudents.length} resultados</span>
               </div>
 
-              {formalStudents.length === 0 ? (
+              {loading ? (
+                <div className="inline-loading-state" role="status">
+                  <span className="loading-dot" aria-hidden="true" />
+                  <div>
+                    <strong>Cargando datos de Control Escolar</strong>
+                    <p>Si el internet esta lento, el sistema puede tardar unos segundos y despues usar la base local.</p>
+                  </div>
+                </div>
+              ) : null}
+
+              {!loading && formalStudents.length === 0 ? (
                 <DashboardEmptyState
                   title="Todavía no hay alumnos registrados"
                   description="Comienza agregando un nuevo alumno o abre Admisión para trabajar con la captura inicial."
@@ -1194,7 +1204,7 @@ export function ControlEscolarOverview({
                 </div>
               ) : null}
 
-              {formalStudents.length > 0 && filteredStudents.length === 0 ? (
+              {!loading && formalStudents.length > 0 && filteredStudents.length === 0 ? (
                 <DashboardEmptyState
                   title="Sin resultados para la búsqueda actual"
                   description="Ajusta matrícula, nombre, tutor o filtros para volver a mostrar alumnos." />

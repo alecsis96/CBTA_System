@@ -702,6 +702,21 @@ export const browserFallbackApi = {
       if (!updated) throw new Error('Usuario no encontrado.')
       return toPublicUser(updated)
     },
+    async resetStudentEnrollmentTest() {
+      return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+    },
+    async resetPeriodEnrollmentTests() {
+      return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+    },
+    async resetPeriodReinscriptionTests() {
+      return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+    },
+    async resetPeriodGraduationTests() {
+      return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+    },
+    async clearControlEscolarTestHistory() {
+      return { ok: true, affectedStudents: 0, deletedMovements: 0, deletedAuditLogs: 0, deletedGroupAuditLogs: 0, skipped: 0 }
+    },
   },
   students: {
     async list(filters?: {

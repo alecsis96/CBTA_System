@@ -17,6 +17,11 @@ contextBridge.exposeInMainWorld('cbta', {
     createUser: (input: unknown) => ipcRenderer.invoke('admin:users:create', input),
     updateUser: (userId: string, input: unknown) => ipcRenderer.invoke('admin:users:update', userId, input),
     resetUserPassword: (userId: string, input: unknown) => ipcRenderer.invoke('admin:users:resetPassword', userId, input),
+    resetStudentEnrollmentTest: (input: unknown) => ipcRenderer.invoke('admin:tests:resetStudentEnrollment', input),
+    resetPeriodEnrollmentTests: (input: unknown) => ipcRenderer.invoke('admin:tests:resetPeriodEnrollment', input),
+    resetPeriodReinscriptionTests: (input: unknown) => ipcRenderer.invoke('admin:tests:resetPeriodReinscription', input),
+    resetPeriodGraduationTests: (input: unknown) => ipcRenderer.invoke('admin:tests:resetPeriodGraduation', input),
+    clearControlEscolarTestHistory: (input: unknown) => ipcRenderer.invoke('admin:tests:clearControlEscolarHistory', input),
   },
   students: {
     list: (filters?: unknown) => ipcRenderer.invoke('students:list', filters),

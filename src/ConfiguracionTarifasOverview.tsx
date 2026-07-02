@@ -13,8 +13,10 @@ export function ConfiguracionTarifasOverview({
   savingTariffCode,
   savingRocConfig,
   savingUserId,
+  savingAdminTestAction,
   users,
   departments,
+  students,
   currentUserId,
   onUpdateTariff,
   onUpdateRocConfig,
@@ -22,13 +24,18 @@ export function ConfiguracionTarifasOverview({
   onCreateUser,
   onUpdateUser,
   onResetUserPassword,
+  onRunAdminTestReset,
 }: ConfiguracionTarifasProps) {
   const groupedConcepts = groupedSelectableConcepts(concepts)
   const [selectedGroupKey, setSelectedGroupKey] = useState(groupedConcepts[0]?.key ?? 'A000')
   const [rocInitialDraft, setRocInitialDraft] = useState(rocInitialNumber)
-  const [configTab, setConfigTab] = useState<'tarifas' | 'usuarios'>('tarifas')
+  const [configTab, setConfigTab] = useState<'tarifas' | 'usuarios' | 'pruebas'>('tarifas')
+  const [testResetConfirmation, setTestResetConfirmation] = useState('')
+  const [testResetStudentId, setTestResetStudentId] = useState('')
   const canManageUsers = currentRole === 'ADMIN'
   const canManageRocSequence = currentRole === 'ADMIN'
+  const canRunTestTools = currentRole === 'ADMIN'
+  const canRunGlobalReset = testResetConfirmation.trim().toUpperCase() === 'RESET'
 
   useEffect(() => {
     setRocInitialDraft(rocInitialNumber)
@@ -47,6 +54,12 @@ export function ConfiguracionTarifasOverview({
       setConfigTab('tarifas')
     }
   }, [canManageUsers, configTab])
+
+  useEffect(() => {
+    if (!testResetStudentId && students.length > 0) {
+      setTestResetStudentId(students[0].id)
+    }
+  }, [students, testResetStudentId])
 
   const activeGroup = groupedConcepts.find((group) => group.key === selectedGroupKey) ?? groupedConcepts[0] ?? null
 
@@ -69,6 +82,11 @@ export function ConfiguracionTarifasOverview({
             Usuarios y departamentos
           </button>
         ) : null}
+        {canRunTestTools ? (
+          <button className={configTab === 'pruebas' ? 'config-tab active' : 'config-tab'} onClick={() => setConfigTab('pruebas')} type="button">
+            Pruebas temporales
+          </button>
+        ) : null}
       </div>
 
       {canManageUsers && configTab === 'usuarios' ? (
@@ -81,6 +99,58 @@ export function ConfiguracionTarifasOverview({
           onResetUserPassword={onResetUserPassword}
           onUpdateUser={onUpdateUser}
         />
+      ) : canRunTestTools && configTab === 'pruebas' ? (
+        <article className="panel sub-panel">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">Herramientas temporales de prueba</p>
+              <h3>Reset de Control Escolar</h3>
+              <p className="compact-operational-line">Usa estos botones solo mientras validas inscripcion, reinscripcion, egreso y movimientos academicos.</p>
+            </div>
+            <span className="status-tag warning">Temporal</span>
+          </div>
+
+          <div className="temporary-tools-grid">
+            <Field label="Alumno para reset individual">
+              <select value={testResetStudentId} onChange={(event) => setTestResetStudentId(event.target.value)}>
+                {students.map((student) => (
+                  <option key={student.id} value={student.id}>
+                    {(student.officialEnrollmentNumber || student.enrollmentNumber) + ' - ' + student.fullName}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <button
+              className="secondary-button"
+              disabled={!testResetStudentId || savingAdminTestAction !== null}
+              onClick={() => void onRunAdminTestReset('student', { studentId: testResetStudentId })}
+              type="button"
+            >
+              {savingAdminTestAction === 'student' ? 'Revirtiendo...' : 'Reset alumno actual'}
+            </button>
+          </div>
+
+          <div className="temporary-tools-warning">
+            <strong>Confirmacion para resets globales</strong>
+            <p>Estas acciones eliminan movimientos y auditoria relacionados con pruebas. Escribe RESET para habilitarlas.</p>
+            <input value={testResetConfirmation} onChange={(event) => setTestResetConfirmation(event.target.value)} placeholder="RESET" />
+          </div>
+
+          <div className="temporary-tools-actions">
+            <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('enrollment')} type="button">
+              {savingAdminTestAction === 'enrollment' ? 'Revirtiendo...' : 'Reset inscripciones 2026-2027/1'}
+            </button>
+            <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('reinscription')} type="button">
+              {savingAdminTestAction === 'reinscription' ? 'Revirtiendo...' : 'Reset reinscripciones 2026-2027/1'}
+            </button>
+            <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('graduation')} type="button">
+              {savingAdminTestAction === 'graduation' ? 'Revirtiendo...' : 'Reset egresos'}
+            </button>
+            <button className="secondary-button danger-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('history')} type="button">
+              {savingAdminTestAction === 'history' ? 'Limpiando...' : 'Limpiar movimientos y auditoria'}
+            </button>
+          </div>
+        </article>
       ) : (
         <>
           {canManageRocSequence ? (
