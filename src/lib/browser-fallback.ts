@@ -71,7 +71,9 @@ const MATUTINO_SHIFT = 'MATUTINO'
 
 type BrowserUser = UserSummary & { password: string }
 type BrowserStudentDetail = StudentDetail & {
+  groupId: string | null
   groupLabel: string | null
+  groupAdvisorName: string | null
   shiftLabel: string | null
 }
 type BrowserGroup = {
@@ -514,6 +516,7 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     secondaryAverage: input.secondaryAverage,
     examRoom: input.examRoom,
     schoolCycle: input.schoolCycle,
+    schoolPeriod: input.schoolPeriod,
     semesterLevel: input.semesterLevel,
     academicStatus: input.academicStatus,
     guardianFullName: input.guardianFullName,
@@ -525,7 +528,9 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     documentationStatus: 'PENDIENTE',
     enrollmentStatus: input.validateNow ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
     statusLabel: input.validateNow ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
+    groupId: null,
     groupLabel: null,
+    groupAdvisorName: null,
     shiftLabel: null,
   }
 }
@@ -564,12 +569,15 @@ function toStudentSummary(student: BrowserStudentDetail): StudentSummary {
     admissionPaid: true,
     admissionPaymentStatus: 'PAGADO_PENDIENTE_CAPTURA',
     schoolCycle: student.schoolCycle,
+    schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: student.semesterLevel,
     academicStatus: student.academicStatus || null,
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus,
     statusLabel: student.statusLabel,
+    groupId: student.groupId,
     groupLabel: student.groupLabel,
+    groupAdvisorName: student.groupAdvisorName,
     shiftLabel: student.shiftLabel,
     dailyStatus,
     dailyStatusLabel,
@@ -578,8 +586,11 @@ function toStudentSummary(student: BrowserStudentDetail): StudentSummary {
 }
 
 function toSemesterLevel(value: number | string | null | undefined): SemesterLevel {
+  if (Number(value) === 2) return 2
   if (Number(value) === 3) return 3
+  if (Number(value) === 4) return 4
   if (Number(value) === 5) return 5
+  if (Number(value) === 6) return 6
   return 1
 }
 
@@ -800,7 +811,9 @@ export const browserFallbackApi = {
       const destination = groups.find((group) => group.id === input.toGroupId)
       students[studentIndex] = {
         ...target,
+        groupId: destination?.id ?? target.groupId,
         groupLabel: destination?.label ?? target.groupLabel,
+        groupAdvisorName: target.groupAdvisorName,
         shiftLabel: destination?.shift ?? target.shiftLabel ?? MATUTINO_SHIFT,
         enrollmentStatus: 'ASIGNADO',
         statusLabel: 'ASIGNADO',
@@ -838,7 +851,9 @@ export const browserFallbackApi = {
         ...target,
         enrollmentStatus: 'BAJA',
         statusLabel: 'BAJA',
+        groupId: null,
         groupLabel: null,
+        groupAdvisorName: null,
         shiftLabel: null,
       }
       saveStudents(students)
@@ -874,7 +889,9 @@ export const browserFallbackApi = {
         ...target,
         schoolCycle: input.schoolCycle,
         semesterLevel: input.semesterLevel,
+        groupId: input.toGroupId ?? null,
         groupLabel: input.toGroupId ?? null,
+        groupAdvisorName: target.groupAdvisorName,
         shiftLabel: input.toGroupId ? MATUTINO_SHIFT : null,
         enrollmentStatus: input.toGroupId ? 'ASIGNADO' : 'INSCRITO',
         statusLabel: input.toGroupId ? 'ASIGNADO' : 'INSCRITO',
@@ -904,6 +921,18 @@ export const browserFallbackApi = {
       return getStudentMovements()
         .filter((item) => (input?.studentId ? item.studentId === input.studentId : true))
         .slice(0, input?.limit ?? 100)
+    },
+    async formalizeEnrollment() {
+      throw new Error('La inscripcion formal requiere abrir la app de escritorio con SQLite.')
+    },
+    async reinscribeForPeriod() {
+      throw new Error('La reinscripcion semestral requiere abrir la app de escritorio con SQLite.')
+    },
+    async graduatePeriod() {
+      throw new Error('El egreso semestral requiere abrir la app de escritorio con SQLite.')
+    },
+    async importEnrollmentRoster() {
+      throw new Error('La importacion de matricula requiere abrir la app de escritorio con SQLite.')
     },
   },
   permissions: {
@@ -1325,6 +1354,9 @@ export const browserFallbackApi = {
       },
       async importAssignedRoster(_input: { schoolCycle: string; sourcePath?: string | null; rows: GroupRosterImportRow[] }): Promise<GroupRosterImportResult> {
         throw new Error('La importacion de grupos desde Excel solo esta disponible en la app de escritorio.')
+      },
+      async updateAdvisor() {
+        return { ok: true, groupId: 'browser', advisorName: null }
       },
       async exportAssignedRoster(): Promise<GroupRosterExportResult> {
         return { outputPath: 'browser-download', exportedCount: 0 }

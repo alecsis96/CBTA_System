@@ -21,7 +21,7 @@ type SessionUser = {
 let currentSession: SessionUser | null = null
 const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
 const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
-const semesterLevelSchema = z.union([z.literal(1), z.literal(3), z.literal(5)])
+const semesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
 const studentDailyStatusSchema = z.enum(['PRESENTE', 'PERMISO', 'AUSENTE'])
 const studentPermissionKindSchema = z.enum(['PERMISO_GENERAL', 'SALIDA_ANTICIPADA', 'DIA_COMPLETO', 'JUSTIFICANTE_MEDICO'])
 const studentPermissionStatusSchema = z.enum(['PROGRAMADO', 'ACTIVO', 'CERRADO', 'CANCELADO'])
@@ -175,6 +175,7 @@ const studentInputSchema = z.object({
   secondaryAverage: z.number().min(0).max(10).optional().nullable(),
   examRoom: z.string().trim().optional().nullable(),
   schoolCycle: z.string().min(1),
+  schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: semesterLevelSchema.default(1),
   academicStatus: z.string().trim().optional().nullable(),
   guardianFullName: z.string().min(1),
@@ -187,6 +188,7 @@ const studentInputSchema = z.object({
 
 const studentListFiltersSchema = z.object({
   schoolCycle: z.string().trim().optional(),
+  schoolPeriod: z.number().int().min(1).max(2).optional(),
   semesterLevel: z.union([semesterLevelSchema, z.literal('all')]).optional(),
   enrollmentStatus: z.string().trim().optional(),
   documentationStatus: z.string().trim().optional(),
@@ -210,6 +212,7 @@ const studentWithdrawalSchema = z.object({
 const studentGradeEnrollmentSchema = z.object({
   studentId: z.string().min(1),
   schoolCycle: z.string().trim().min(1),
+  schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: semesterLevelSchema,
   toGroupId: z.string().trim().min(1).nullable().optional(),
   reasonCode: z.string().trim().min(1),
@@ -221,6 +224,33 @@ const studentMovementListSchema = z.object({
   schoolCycle: z.string().trim().optional(),
   limit: z.number().int().min(1).max(100).optional(),
 }).optional()
+
+const enrollmentRosterImportSchema = z.object({
+  schoolCycle: z.string().trim().min(1),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(z.object({
+    sheetName: z.string().trim().min(1),
+    rowNumber: z.number().int().min(1),
+    enrollmentNumber: z.string().trim().min(1),
+    officialEnrollmentNumber: z.string().trim().nullable().optional(),
+    importKind: z.enum(['MATRICULA', 'FICHA']).optional(),
+    fullName: z.string().trim().min(1),
+    curp: z.string().trim().min(18).max(18),
+    sex: z.string().trim().nullable().optional(),
+    age: z.number().int().min(0).max(120).nullable().optional(),
+    groupLabel: z.string().trim().min(1),
+    career: z.string().trim().nullable().optional(),
+    semesterLevel: semesterLevelSchema,
+    previousSchool: z.string().trim().nullable().optional(),
+    locality: z.string().trim().nullable().optional(),
+    phone: z.string().trim().nullable().optional(),
+    email: z.string().trim().nullable().optional(),
+    motherTongue: z.string().trim().nullable().optional(),
+    guardianFullName: z.string().trim().nullable().optional(),
+    guardianPhone: z.string().trim().nullable().optional(),
+    secondaryAverage: z.number().min(0).max(10).nullable().optional(),
+  })).min(1),
+})
 
 const permissionListFiltersSchema = z
   .object({
@@ -242,6 +272,31 @@ const permissionCreateSchema = z.object({
 const permissionCancelSchema = z.object({
   permissionId: z.string().min(1),
   notes: z.string().trim().optional(),
+})
+
+const formalizeEnrollmentSchema = z.object({
+  studentId: z.string().min(1),
+  allowPendingDocuments: z.boolean().default(false),
+  notes: z.string().trim().optional(),
+})
+
+const reinscribeForPeriodSchema = z.object({
+  studentId: z.string().min(1),
+  targetSchoolCycle: z.string().trim().min(1),
+  targetPeriod: z.number().int().min(1).max(2).default(1),
+  targetSemesterLevel: semesterLevelSchema,
+  toGroupId: z.string().trim().min(1).nullable().optional(),
+  notes: z.string().trim().optional(),
+})
+
+const graduatePeriodSchema = z.object({
+  studentId: z.string().min(1).optional(),
+  studentIds: z.array(z.string().min(1)).optional(),
+  fromSchoolCycle: z.string().trim().min(1),
+  fromPeriod: z.number().int().min(1).max(2).optional(),
+  notes: z.string().trim().optional(),
+}).refine((input) => Boolean(input.studentId) || Boolean(input.studentIds?.length), {
+  message: 'Selecciona al menos un alumno para egresar.',
 })
 
 const dailyStatusSetSchema = z.object({
@@ -402,6 +457,11 @@ const manualReassignSchema = z.object({
   studentId: z.string().min(1),
   toGroupId: z.string().min(1),
   reason: z.string().trim().min(5),
+})
+
+const updateGroupAdvisorSchema = z.object({
+  groupId: z.string().min(1),
+  advisorName: z.string().trim().max(120).nullable().optional(),
 })
 
 const markNoShowSchema = z.object({
@@ -615,7 +675,7 @@ function deriveStudentDailyStatus(student: {
   dailyStatuses?: Array<{ status: string }>
   permissions?: Array<{ status: string; startsAt: Date; endsAt: Date; reason: string }>
 }, now = new Date()) {
-  const activePermission = student.permissions?.find((permission) => normalizePermissionStatus(permission, now) !== 'CANCELADO') ?? null
+  const activePermission = student.permissions?.find((permission) => normalizePermissionStatus(permission, now) === 'ACTIVO') ?? null
   if (activePermission) {
     return {
       dailyStatus: 'PERMISO' as const,
@@ -646,6 +706,8 @@ function enrollmentStatusLabel(enrollmentStatus: string | null | undefined) {
       return 'Ficha entregada'
     case 'INSCRITO':
       return 'Inscrito'
+    case 'BAJA':
+      return 'Baja'
     case 'BAJA_TEMPORAL':
       return 'Baja temporal'
     case 'BAJA_DEFINITIVA':
@@ -660,6 +722,8 @@ function enrollmentStatusLabel(enrollmentStatus: string | null | undefined) {
       return 'Asignado a grupo'
     case 'CONFIRMADO':
       return 'Inscrito'
+    case 'EGRESADO':
+      return 'Egresado'
     default:
       return 'Ficha entregada'
   }
@@ -684,6 +748,7 @@ function studentSummary(student: {
   municipality: string | null
   state: string | null
   schoolCycle: string
+  schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
   status: string
@@ -709,8 +774,10 @@ function studentSummary(student: {
     reason: string
   }>
   groupAssignment?: {
+    groupId: string
     group: {
       label: string
+      advisorName: string | null
       shift: string
     }
   } | null
@@ -731,6 +798,7 @@ function studentSummary(student: {
     admissionPaid: Boolean(student.admissionPayment) || Boolean(latestCashPayment),
     admissionPaymentStatus: latestCashPayment?.status ?? student.admissionPayment?.status ?? null,
     schoolCycle: student.schoolCycle,
+    schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? null,
     documentationStatus: student.documentationStatus,
@@ -743,7 +811,9 @@ function studentSummary(student: {
       .filter(Boolean)
       .join(', '),
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
+    groupId: student.groupAssignment?.groupId ?? null,
     groupLabel: student.groupAssignment?.group.label ?? null,
+    groupAdvisorName: student.groupAssignment?.group.advisorName ?? null,
     shiftLabel: student.groupAssignment?.group.shift ?? null,
     dailyStatus: dayStatus.dailyStatus,
     dailyStatusLabel: dayStatus.dailyStatusLabel,
@@ -776,6 +846,7 @@ function studentDetail(student: {
   secondaryAverage: unknown
   examRoom: string | null
   schoolCycle: string
+  schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
   status: string
@@ -787,6 +858,13 @@ function studentDetail(student: {
     phone: string
     secondaryPhone: string | null
     email: string | null
+  } | null
+  groupAssignment?: {
+    group: {
+      label: string
+      advisorName: string | null
+      shift: string
+    }
   } | null
 }) {
   return {
@@ -814,6 +892,7 @@ function studentDetail(student: {
     secondaryAverage: student.secondaryAverage == null ? null : Number(student.secondaryAverage),
     examRoom: student.examRoom ?? '',
     schoolCycle: student.schoolCycle,
+    schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? '',
     guardianFullName: student.guardian?.fullName ?? '',
@@ -825,6 +904,9 @@ function studentDetail(student: {
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus ?? 'INSCRITO',
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
+    groupLabel: student.groupAssignment?.group.label ?? null,
+    groupAdvisorName: student.groupAssignment?.group.advisorName ?? null,
+    shiftLabel: student.groupAssignment?.group.shift ?? null,
   }
 }
 
@@ -1313,6 +1395,26 @@ function buildRocStudentPayloadFields(student: ReceiptForTemplate['student']) {
   }
 }
 
+async function ensureStudentRequirementStatuses(tx: Pick<typeof prisma, 'enrollmentRequirement' | 'studentRequirementStatus'>, studentId: string) {
+  const requirements = await tx.enrollmentRequirement.findMany({ where: { isActive: true }, select: { id: true } })
+  for (const requirement of requirements) {
+    await tx.studentRequirementStatus.upsert({
+      where: { studentId_requirementId: { studentId, requirementId: requirement.id } },
+      update: {},
+      create: { studentId, requirementId: requirement.id },
+    })
+  }
+}
+
+function missingRequiredRequirementLabels(statuses: Array<{ isDelivered: boolean; missingJustification: string | null; deadlineAt: Date | null; requirement: { label: string; requiredOriginals: number; requiredCopies: number } }>) {
+  return statuses
+    .filter((item) => {
+      const required = item.requirement.requiredOriginals > 0 || item.requirement.requiredCopies > 0
+      return required && !item.isDelivered && (!item.missingJustification?.trim() || !item.deadlineAt)
+    })
+    .map((item) => item.requirement.label)
+}
+
 function summaryStudentInclude(referenceDate?: string | Date) {
   const dayStart = startOfLocalDay(referenceDate)
   const dayEnd = endOfLocalDay(referenceDate)
@@ -1486,7 +1588,7 @@ type ImportedGroupRow = {
   sheetName: string
   rowNumber: number
   groupLabel: string
-  semesterLevel?: 1 | 3 | 5 | null
+  semesterLevel?: 1 | 2 | 3 | 4 | 5 | 6 | null
   enrollmentNumber: string | null
   curp: string | null
 }
@@ -1579,15 +1681,39 @@ function normalizeImportedGroupLabel(value: string) {
   return normalized
 }
 
-function normalizeSemesterLevel(value: number | null | undefined): 1 | 3 | 5 {
-  if (value === 3 || value === 5) return value
+function normalizeSemesterLevel(value: number | null | undefined): 1 | 2 | 3 | 4 | 5 | 6 {
+  if (value === 2 || value === 3 || value === 4 || value === 5 || value === 6) return value
   return 1
 }
 
-function inferSemesterLevelFromGroupLabel(groupLabel: string | null | undefined): 1 | 3 | 5 {
+function inferSemesterLevelFromGroupLabel(groupLabel: string | null | undefined): 1 | 2 | 3 | 4 | 5 | 6 {
   const match = groupLabel?.trim().match(/^(\d+)/)
   if (!match) return 1
   return normalizeSemesterLevel(Number(match[1]))
+}
+
+function splitImportedFullName(fullName: string) {
+  const parts = fullName.trim().replace(/\s+/g, ' ').split(' ')
+  if (parts.length <= 1) {
+    return { firstName: fullName.trim(), paternalLastName: 'SIN APELLIDO', maternalLastName: 'SIN APELLIDO' }
+  }
+
+  if (parts.length === 2) {
+    return { firstName: parts[1], paternalLastName: parts[0], maternalLastName: 'SIN APELLIDO' }
+  }
+
+  return {
+    paternalLastName: parts[0],
+    maternalLastName: parts[1],
+    firstName: parts.slice(2).join(' '),
+  }
+}
+
+function normalizeImportedSex(value: string | null | undefined) {
+  const normalized = value?.trim().toUpperCase()
+  if (normalized === 'M') return 'MUJER'
+  if (normalized === 'H') return 'HOMBRE'
+  return normalized || null
 }
 
 function movementReasonLabel(type: keyof typeof movementReasonLabels, code: string) {
@@ -1608,7 +1734,7 @@ function buildGroupLabel(index: number) {
   return `1${String.fromCharCode(65 + index)}`
 }
 
-function buildAssignmentStats(groups: Array<{ id: string; label: string; capacity: number; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>) {
+function buildAssignmentStats(groups: Array<{ id: string; label: string; advisorName: string | null; capacity: number; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>) {
   return groups.map((group) => {
     const assigned = group.assignments.filter((item) => item.status !== 'NO_SHOW')
     const totals = {
@@ -1628,6 +1754,7 @@ function buildAssignmentStats(groups: Array<{ id: string; label: string; capacit
     return {
       groupId: group.id,
       label: group.label,
+      advisorName: group.advisorName,
       capacity: group.capacity,
       assignedCount: assigned.length,
       available: group.capacity - assigned.length,
@@ -2508,6 +2635,7 @@ export function registerIpcHandlers() {
     const students = await prisma.student.findMany({
       where: {
         ...(filters?.schoolCycle ? { schoolCycle: filters.schoolCycle.trim() } : {}),
+        ...(filters?.schoolPeriod ? { schoolPeriod: filters.schoolPeriod } : {}),
         ...(filters?.semesterLevel && filters.semesterLevel !== 'all' ? { semesterLevel: filters.semesterLevel } : {}),
         ...(filters?.enrollmentStatus && filters.enrollmentStatus !== 'all' ? { enrollmentStatus: filters.enrollmentStatus } : {}),
         ...(filters?.documentationStatus && filters.documentationStatus !== 'all' ? { documentationStatus: filters.documentationStatus } : {}),
@@ -2634,6 +2762,8 @@ export function registerIpcHandlers() {
     if (endsAt < startsAt) {
       throw new Error('La fecha final del permiso no puede ser menor que la inicial.')
     }
+
+    await prisma.$transaction((tx) => ensureStudentRequirementStatuses(tx, input.studentId))
 
     const student = await prisma.student.findUnique({
       where: { id: input.studentId },
@@ -2843,6 +2973,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('students:getRequirementChecklist', async (_event, studentId) => {
     requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'consultar checklist documental')
     const id = z.string().min(1).parse(studentId)
+    await prisma.$transaction((tx) => ensureStudentRequirementStatuses(tx, id))
     const student = await prisma.student.findUnique({
       where: { id },
       include: {
@@ -2906,6 +3037,81 @@ export function registerIpcHandlers() {
     return requirementChecklistSummary(student)
   })
 
+  ipcMain.handle('students:formalizeEnrollment', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'inscribir formalmente alumnos')
+    const input = formalizeEnrollmentSchema.parse(payload)
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      include: {
+        requirementStatuses: { include: { requirement: true } },
+        groupAssignment: { include: { group: true } },
+      },
+    })
+
+    if (!student) throw new Error('No se encontro el alumno para inscripcion.')
+    if (student.enrollmentStatus !== 'FICHA_ENTREGADA') {
+      throw new Error('Solo se pueden inscribir alumnos con ficha entregada.')
+    }
+
+    const missingRequired = missingRequiredRequirementLabels(student.requirementStatuses)
+    if (missingRequired.length > 0 && !input.allowPendingDocuments) {
+      throw new Error(`Faltan documentos obligatorios sin justificante/plazo: ${missingRequired.join(', ')}.`)
+    }
+
+    const nextEnrollmentStatus = student.groupAssignment ? 'ASIGNADO' : 'INSCRITO'
+    const nextDocumentationStatus = checklistStatusLabel(student.requirementStatuses)
+
+    await prisma.$transaction(async (tx) => {
+      const nextEnrollmentNumber = await buildStudentInternalFolio(tx)
+      await tx.student.update({
+        where: { id: student.id },
+        data: {
+          enrollmentNumber: nextEnrollmentNumber,
+          officialEnrollmentNumber: nextEnrollmentNumber,
+          schoolCycle: '2026-2027',
+          schoolPeriod: 1,
+          semesterLevel: 1,
+          enrollmentStatus: nextEnrollmentStatus,
+          documentationStatus: nextDocumentationStatus,
+          status: 'VALIDADO',
+          validatedAt: new Date(),
+          validatedBy: actor.displayName,
+        },
+      })
+      await tx.studentAcademicMovement.create({
+        data: {
+          studentId: student.id,
+          movementType: 'ALTA_GRADO',
+          reasonCode: 'INSCRIPCION_FORMAL',
+          reasonLabel: 'Inscripcion formal',
+          notes: normalizeOptional(input.notes),
+          previousSemesterLevel: student.semesterLevel,
+          nextSemesterLevel: student.semesterLevel,
+          previousGroupId: student.groupAssignment?.groupId ?? null,
+          previousGroupLabel: student.groupAssignment?.group.label ?? null,
+          nextGroupId: student.groupAssignment?.groupId ?? null,
+          nextGroupLabel: student.groupAssignment?.group.label ?? null,
+          previousEnrollmentStatus: student.enrollmentStatus,
+          nextEnrollmentStatus,
+          actorId: actor.id,
+          actorRole: actor.role,
+        },
+      })
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'Student',
+          entityId: student.id,
+          action: 'INSCRIPCION_FORMAL',
+          beforeJson: JSON.stringify({ enrollmentNumber: student.enrollmentNumber, enrollmentStatus: student.enrollmentStatus }),
+          afterJson: JSON.stringify({ enrollmentStatus: nextEnrollmentStatus }),
+        },
+      })
+    })
+
+    return loadStudentSummaryById(student.id)
+  })
+
   ipcMain.handle('students:create', async (_event, payload) => {
     const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'crear alumnos')
     const input = studentInputSchema.parse(payload)
@@ -2945,6 +3151,7 @@ export function registerIpcHandlers() {
           secondaryAverage: input.secondaryAverage ?? null,
           examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
+          schoolPeriod: input.schoolPeriod,
           semesterLevel: normalizeSemesterLevel(input.semesterLevel),
           academicStatus: normalizeOptional(input.academicStatus),
           documentationStatus: 'PENDIENTE',
@@ -2995,15 +3202,6 @@ export function registerIpcHandlers() {
     const id = z.string().min(1).parse(studentId)
     const input = studentInputSchema.parse(payload)
     const validated = input.validateNow
-    const paymentAnchor = await prisma.admissionPayment.findFirst({
-      where: { curp: input.curp.trim().toUpperCase() },
-      orderBy: { createdAt: 'desc' },
-    })
-
-    if (!paymentAnchor) {
-      throw new Error('Primero debes registrar el pago de ficha para este CURP.')
-    }
-
     const existing = await prisma.student.findUnique({
       where: { id },
       include: { guardian: true },
@@ -3012,6 +3210,11 @@ export function registerIpcHandlers() {
     if (!existing) {
       throw new Error('No se encontro el alumno para actualizar.')
     }
+
+    const paymentAnchor = await prisma.admissionPayment.findFirst({
+      where: { curp: input.curp.trim().toUpperCase() },
+      orderBy: { createdAt: 'desc' },
+    })
 
     const student = await prisma.$transaction(async (tx) => {
       const updatedStudent = await tx.student.update({
@@ -3039,13 +3242,14 @@ export function registerIpcHandlers() {
           secondaryAverage: input.secondaryAverage ?? null,
           examRoom: normalizeOptional(input.examRoom),
           schoolCycle: input.schoolCycle.trim(),
+          schoolPeriod: input.schoolPeriod,
           semesterLevel: normalizeSemesterLevel(input.semesterLevel),
           academicStatus: normalizeOptional(input.academicStatus),
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
           validatedAt: validated ? existing.validatedAt ?? new Date() : null,
           validatedBy: validated ? existing.validatedBy ?? 'CONTROL_ESCOLAR' : null,
-          admissionPaymentId: paymentAnchor.id,
+          ...(paymentAnchor ? { admissionPaymentId: paymentAnchor.id } : {}),
           guardian: {
             upsert: {
               create: {
@@ -3167,7 +3371,7 @@ export function registerIpcHandlers() {
       const nextEnrollmentStatus = targetGroup ? 'ASIGNADO' : 'INSCRITO'
       const nextStudent = await tx.student.update({
         where: { id: student.id },
-        data: { schoolCycle: input.schoolCycle.trim(), semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular' },
+        data: { schoolCycle: input.schoolCycle.trim(), schoolPeriod: input.schoolPeriod, semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular' },
         include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
       })
       await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'ALTA_GRADO', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: semesterLevel, previousGroupId: previousAssignment?.groupId ?? null, previousGroupLabel: previousAssignment?.group.label ?? null, nextGroupId: targetGroup?.id ?? null, nextGroupLabel: targetGroup?.label ?? null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus, actorId: actor.id, actorRole: actor.role } })
@@ -3175,6 +3379,130 @@ export function registerIpcHandlers() {
     })
 
     return studentSummary(updated)
+  })
+
+  ipcMain.handle('students:reinscribeForPeriod', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'reinscribir alumnos al periodo')
+    const input = reinscribeForPeriodSchema.parse(payload)
+    await prisma.$transaction((tx) => ensureStudentRequirementStatuses(tx, input.studentId))
+    const student = await prisma.student.findUnique({
+      where: { id: input.studentId },
+      include: {
+        requirementStatuses: { include: { requirement: true } },
+        groupAssignment: { include: { group: true } },
+        guardian: true,
+        admissionPayment: { select: { status: true } },
+        cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    })
+    if (!student) throw new Error('No se encontro el alumno para reinscripcion.')
+    if (['BAJA', 'BAJA_TEMPORAL', 'BAJA_DEFINITIVA', 'NO_SHOW', 'EGRESADO'].includes(student.enrollmentStatus)) {
+      throw new Error('El alumno no esta activo para reinscripcion.')
+    }
+
+    const missingRequired = missingRequiredRequirementLabels(student.requirementStatuses)
+    if (missingRequired.length > 0) {
+      throw new Error(`Faltan documentos obligatorios sin justificante/plazo: ${missingRequired.join(', ')}.`)
+    }
+
+    const targetGroup = input.toGroupId ? await prisma.intakeGroup.findUnique({ where: { id: input.toGroupId }, include: { assignments: { where: { status: { not: 'NO_SHOW' } } } } }) : null
+    if (targetGroup && targetGroup.assignments.length >= targetGroup.capacity) throw new Error(`El grupo destino ya alcanzo el cupo maximo de ${targetGroup.capacity}.`)
+    const semesterLevel = normalizeSemesterLevel(input.targetSemesterLevel)
+    const nextEnrollmentStatus = targetGroup ? 'ASIGNADO' : 'INSCRITO'
+    const nextDocumentationStatus = checklistStatusLabel(student.requirementStatuses)
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const previousAssignment = student.groupAssignment
+      if (!targetGroup && previousAssignment) {
+        await tx.studentGroupAssignment.delete({ where: { id: previousAssignment.id } })
+      }
+      if (targetGroup) {
+        if (previousAssignment) {
+          await tx.studentGroupAssignment.update({ where: { id: previousAssignment.id }, data: { groupId: targetGroup.id, status: 'ASIGNADO', updatedById: actor.id, reason: input.notes?.trim() || 'Reinscripcion semestral' } })
+        } else {
+          await tx.studentGroupAssignment.create({ data: { studentId: student.id, groupId: targetGroup.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: input.notes?.trim() || 'Reinscripcion semestral' } })
+        }
+      }
+      const nextStudent = await tx.student.update({
+        where: { id: student.id },
+        data: {
+          schoolCycle: input.targetSchoolCycle.trim(),
+          schoolPeriod: input.targetPeriod,
+          semesterLevel,
+          enrollmentStatus: nextEnrollmentStatus,
+          documentationStatus: nextDocumentationStatus,
+          status: 'VALIDADO',
+          academicStatus: student.academicStatus ?? 'Regular',
+        },
+        include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
+      })
+      await tx.studentAcademicMovement.create({
+        data: {
+          studentId: student.id,
+          movementType: 'REINSCRIPCION',
+          reasonCode: 'REINSCRIPCION_SEMESTRAL',
+          reasonLabel: 'Reinscripcion semestral',
+          notes: normalizeOptional(input.notes),
+          previousSemesterLevel: student.semesterLevel,
+          nextSemesterLevel: semesterLevel,
+          previousGroupId: previousAssignment?.groupId ?? null,
+          previousGroupLabel: previousAssignment?.group.label ?? null,
+          nextGroupId: targetGroup?.id ?? null,
+          nextGroupLabel: targetGroup?.label ?? null,
+          previousEnrollmentStatus: student.enrollmentStatus,
+          nextEnrollmentStatus,
+          actorId: actor.id,
+          actorRole: actor.role,
+        },
+      })
+      return nextStudent
+    })
+
+    return studentSummary(updated)
+  })
+
+  ipcMain.handle('students:graduatePeriod', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'egresar alumnos')
+    const input = graduatePeriodSchema.parse(payload)
+    const ids = Array.from(new Set([...(input.studentIds ?? []), ...(input.studentId ? [input.studentId] : [])]))
+    const students = await prisma.student.findMany({
+      where: {
+        id: { in: ids },
+        schoolCycle: input.fromSchoolCycle.trim(),
+        ...(input.fromPeriod ? { schoolPeriod: input.fromPeriod } : {}),
+      },
+      include: { groupAssignment: { include: { group: true } } },
+    })
+    if (students.length === 0) throw new Error('No se encontraron alumnos para egresar.')
+
+    await prisma.$transaction(async (tx) => {
+      for (const student of students) {
+        if (student.semesterLevel !== 6) continue
+        const previousAssignment = student.groupAssignment
+        await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'EGRESADO', status: 'VALIDADO' } })
+        await tx.studentAcademicMovement.create({
+          data: {
+            studentId: student.id,
+            movementType: 'EGRESO',
+            reasonCode: 'EGRESO_SEMESTRAL',
+            reasonLabel: 'Egreso semestral',
+            notes: normalizeOptional(input.notes),
+            previousSemesterLevel: student.semesterLevel,
+            nextSemesterLevel: student.semesterLevel,
+            previousGroupId: previousAssignment?.groupId ?? null,
+            previousGroupLabel: previousAssignment?.group.label ?? null,
+            nextGroupId: previousAssignment?.groupId ?? null,
+            nextGroupLabel: previousAssignment?.group.label ?? null,
+            previousEnrollmentStatus: student.enrollmentStatus,
+            nextEnrollmentStatus: 'EGRESADO',
+            actorId: actor.id,
+            actorRole: actor.role,
+          },
+        })
+      }
+    })
+
+    return { ok: true, graduatedCount: students.filter((student) => student.semesterLevel === 6).length }
   })
 
   ipcMain.handle('students:listMovements', async (_event, payload) => {
@@ -3190,6 +3518,193 @@ export function registerIpcHandlers() {
       take: input?.limit ?? 20,
     })
     return movements.map(academicMovementSummary)
+  })
+
+  ipcMain.handle('students:importEnrollmentRoster', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'importar matricula desde Excel')
+    const input = enrollmentRosterImportSchema.parse(payload)
+    const schoolCycle = input.schoolCycle.trim()
+    const issues: string[] = []
+    const dedupedRows = new Map<string, z.infer<typeof enrollmentRosterImportSchema>['rows'][number]>()
+
+    for (const row of input.rows) {
+      const key = row.curp.toUpperCase()
+      if (dedupedRows.has(key)) {
+        issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: CURP repetida; se conserva la ultima aparicion.`)
+      }
+      dedupedRows.set(key, { ...row, curp: key, enrollmentNumber: row.enrollmentNumber.trim(), groupLabel: row.groupLabel.trim().toUpperCase() })
+    }
+
+    const rows = Array.from(dedupedRows.values())
+    const groupKeys = Array.from(new Set(rows.map((row) => `${row.semesterLevel}:${row.groupLabel}`)))
+    const groupFilters = groupKeys.map((key) => {
+      const [semesterLevelText, label] = key.split(':')
+      return { semesterLevel: normalizeSemesterLevel(Number(semesterLevelText)), label }
+    })
+    const existingGroups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { label: true, semesterLevel: true },
+    })
+    const existingGroupKeys = new Set(existingGroups.map((group) => `${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`))
+
+    if (groupFilters.length > 0) {
+      await prisma.$transaction(
+        groupFilters.map(({ semesterLevel, label }) =>
+          prisma.intakeGroup.upsert({
+            where: { schoolCycle_semesterLevel_label_shift: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT } },
+            update: { isActive: true },
+            create: { schoolCycle, semesterLevel, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+          }),
+        ),
+      )
+    }
+
+    const groups = await prisma.intakeGroup.findMany({
+      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { id: true, label: true, semesterLevel: true },
+    })
+    const groupByKey = new Map(groups.map((group) => [`${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`, group]))
+
+    let createdCount = 0
+    let updatedCount = 0
+    let assignedCount = 0
+
+    for (const row of rows) {
+      const isFicha = row.importKind === 'FICHA'
+      const officialEnrollmentNumber = isFicha ? null : row.officialEnrollmentNumber ?? row.enrollmentNumber
+      const nextEnrollmentStatus = isFicha ? 'FICHA_ENTREGADA' : 'ASIGNADO'
+      const nextStudentStatus = isFicha ? 'CAPTURADO' : 'VALIDADO'
+      const group = groupByKey.get(`${row.semesterLevel}:${row.groupLabel}`)
+      if (!group) {
+        issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: no se pudo preparar el grupo ${row.groupLabel}.`)
+        continue
+      }
+
+      const names = splitImportedFullName(row.fullName)
+      const existingStudent = await prisma.student.findFirst({
+        where: {
+          OR: [
+            { curp: row.curp },
+            ...(officialEnrollmentNumber ? [{ officialEnrollmentNumber }] : []),
+          ],
+        },
+        include: { groupAssignment: { include: { group: true } } },
+      })
+
+      await prisma.$transaction(async (tx) => {
+        const student = existingStudent
+          ? await tx.student.update({
+            where: { id: existingStudent.id },
+            data: {
+              officialEnrollmentNumber,
+              firstName: names.firstName,
+              paternalLastName: names.paternalLastName,
+              maternalLastName: names.maternalLastName,
+              age: row.age ?? null,
+              sex: normalizeImportedSex(row.sex),
+              phone: normalizeOptional(row.phone ?? null),
+              email: normalizeOptional(row.email ?? null),
+              motherTongue: normalizeOptional(row.motherTongue ?? null),
+              locality: normalizeOptional(row.locality ?? null),
+              previousSchool: normalizeOptional(row.previousSchool ?? null),
+              secondaryAverage: row.secondaryAverage ?? null,
+              schoolCycle,
+              schoolPeriod: 1,
+              semesterLevel: row.semesterLevel,
+              academicStatus: row.career ? `Carrera ${row.career}` : existingStudent.academicStatus,
+              enrollmentStatus: nextEnrollmentStatus,
+              status: nextStudentStatus,
+              ...(isFicha ? {} : { validatedAt: new Date(), validatedBy: actor.displayName }),
+            },
+          })
+          : await tx.student.create({
+            data: {
+              enrollmentNumber: row.enrollmentNumber,
+              officialEnrollmentNumber,
+              curp: row.curp,
+              firstName: names.firstName,
+              paternalLastName: names.paternalLastName,
+              maternalLastName: names.maternalLastName,
+              age: row.age ?? null,
+              sex: normalizeImportedSex(row.sex),
+              phone: normalizeOptional(row.phone ?? null),
+              email: normalizeOptional(row.email ?? null),
+              motherTongue: normalizeOptional(row.motherTongue ?? null),
+              addressLine: 'PENDIENTE DE ACTUALIZAR',
+              locality: normalizeOptional(row.locality ?? null),
+              municipality: 'Yajalon',
+              state: 'Chiapas',
+              previousSchool: normalizeOptional(row.previousSchool ?? null),
+              secondaryAverage: row.secondaryAverage ?? null,
+              schoolCycle,
+              schoolPeriod: 1,
+              semesterLevel: row.semesterLevel,
+              academicStatus: row.career ? `Carrera ${row.career}` : 'Regular',
+              enrollmentStatus: nextEnrollmentStatus,
+              documentationStatus: 'PENDIENTE',
+              status: nextStudentStatus,
+              validatedAt: isFicha ? null : new Date(),
+              validatedBy: isFicha ? null : actor.displayName,
+              guardian: {
+                create: {
+                  fullName: normalizeOptional(row.guardianFullName ?? null) ?? 'PENDIENTE DE ACTUALIZAR',
+                  phone: normalizeOptional(row.guardianPhone ?? null) ?? 'PENDIENTE',
+                },
+              },
+            },
+          })
+
+        const existingAssignment = existingStudent?.groupAssignment ?? null
+        await ensureStudentRequirementStatuses(tx, student.id)
+        const assignment = existingAssignment
+          ? await tx.studentGroupAssignment.update({
+            where: { id: existingAssignment.id },
+            data: { groupId: group.id, status: 'ASIGNADO', updatedById: actor.id, reason: isFicha ? 'IMPORTACION_FICHAS_EXCEL' : 'IMPORTACION_MATRICULA_EXCEL' },
+          })
+          : await tx.studentGroupAssignment.create({
+            data: { studentId: student.id, groupId: group.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: isFicha ? 'IMPORTACION_FICHAS_EXCEL' : 'IMPORTACION_MATRICULA_EXCEL' },
+          })
+
+        await tx.groupAssignmentAudit.create({
+          data: {
+            assignmentId: assignment.id,
+            studentId: student.id,
+            beforeGroupId: existingAssignment?.groupId ?? null,
+            beforeGroupLabel: existingAssignment?.group.label ?? null,
+            afterGroupId: group.id,
+            afterGroupLabel: group.label,
+            actorId: actor.id,
+            actorRole: actor.role,
+            reason: isFicha ? 'IMPORTACION_FICHAS_EXCEL' : 'IMPORTACION_MATRICULA_EXCEL',
+          },
+        })
+      })
+
+      if (existingStudent) updatedCount += 1
+      else createdCount += 1
+      assignedCount += 1
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: actor.id,
+        entityType: 'Student',
+        entityId: schoolCycle,
+        action: 'IMPORTACION_MATRICULA_EXCEL',
+        afterJson: JSON.stringify({ sourcePath: input.sourcePath ?? null, createdCount, updatedCount, assignedCount }),
+      },
+    })
+
+    return {
+      ok: true,
+      sourcePath: input.sourcePath ?? null,
+      createdCount,
+      updatedCount,
+      assignedCount,
+      createdGroupCount: groupKeys.filter((key) => !existingGroupKeys.has(key)).length,
+      skippedCount: input.rows.length - rows.length,
+      issues: issues.slice(0, 12),
+    }
   })
 
   ipcMain.handle('concepts:listActive', async () => {
@@ -3883,9 +4398,20 @@ export function registerIpcHandlers() {
       include: { assignments: { include: { student: true } } },
     })
     return {
-      groups: groups.map((group) => ({ id: group.id, label: group.label, shift: group.shift, capacity: group.capacity })),
+      groups: groups.map((group) => ({ id: group.id, label: group.label, advisorName: group.advisorName, shift: group.shift, capacity: group.capacity })),
       stats: buildAssignmentStats(groups),
     }
+  })
+
+  ipcMain.handle('groups:updateAdvisor', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'actualizar asesor de grupo')
+    const input = updateGroupAdvisorSchema.parse(payload)
+    const updated = await prisma.intakeGroup.update({
+      where: { id: input.groupId },
+      data: { advisorName: normalizeOptional(input.advisorName ?? null) },
+      select: { id: true, advisorName: true },
+    })
+    return { ok: true, groupId: updated.id, advisorName: updated.advisorName }
   })
 
   ipcMain.handle('groups:stats', async (_event, payload) => {

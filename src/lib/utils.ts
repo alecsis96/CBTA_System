@@ -6,6 +6,29 @@ export const CONTROL_STUDENTS_PER_PAGE = 20
 export const RECEIPTS_PER_PAGE = 5
 export const INSCRIPTION_CONCEPT_CODE = 'B002'
 
+export const CAREER_LABELS_BY_CODE = {
+  TA: 'Tecnico agropecuario',
+  TO: 'Tecnico en ofimatica',
+  TDC: 'Tecnico en desarrollo comunitario',
+} as const
+
+export function getCareerCodeFromGroupLabel(groupLabel: string | null | undefined) {
+  const match = groupLabel?.trim().match(/-(TA|TO|TDC)$/)
+  return match?.[1] as keyof typeof CAREER_LABELS_BY_CODE | undefined
+}
+
+export function getCareerLabelFromGroupLabel(groupLabel: string | null | undefined) {
+  const code = getCareerCodeFromGroupLabel(groupLabel)
+  return code ? CAREER_LABELS_BY_CODE[code] : 'Sin carrera asignada'
+}
+
+export function formatGroupLabelWithoutCareer(groupLabel: string | null | undefined, semesterLevel?: number) {
+  if (!groupLabel) return 'Sin grupo'
+  const withoutCareer = groupLabel.trim().replace(/-(TA|TO|TDC)$/, '')
+  if (!semesterLevel) return withoutCareer || groupLabel
+  return withoutCareer.replace(String(semesterLevel), '') || withoutCareer || groupLabel
+}
+
 export const conceptGroupHeaders: Record<string, { code: string; name: string; description: string }> = {
   A000: {
     code: 'A000',
@@ -126,6 +149,11 @@ export function formatVisibleGroupLabel(groupLabel: string | null) {
 }
 
 export function formatPreferredEnrollment(student: StudentSummary) {
+  if (student.enrollmentStatus === 'FICHA_ENTREGADA' && student.enrollmentNumber.startsWith('FICHA-')) {
+    const folio = student.enrollmentNumber.split('-').pop()?.replace(/^0+/, '') || student.enrollmentNumber
+    return `Ficha ${folio}`
+  }
+
   return student.officialEnrollmentNumber?.trim() || student.enrollmentNumber
 }
 
@@ -133,6 +161,27 @@ export function dailyStatusClassName(status: StudentSummary['dailyStatus']) {
   if (status === 'PERMISO') return 'status-tag warning'
   if (status === 'AUSENTE') return 'status-tag danger'
   return 'status-tag success'
+}
+
+export function isWithdrawnEnrollmentStatus(status: string | null | undefined) {
+  return status === 'BAJA' || status === 'BAJA_TEMPORAL' || status === 'BAJA_DEFINITIVA' || status === 'NO_SHOW' || status === 'EGRESADO'
+}
+
+export function isActiveEnrollmentStatus(status: string | null | undefined) {
+  return status === 'INSCRITO' || status === 'ASIGNADO' || status === 'CONFIRMADO'
+}
+
+export function combinedStudentStatusLabel(student: Pick<StudentSummary, 'enrollmentStatus' | 'statusLabel' | 'dailyStatus' | 'dailyStatusLabel'>) {
+  if (isWithdrawnEnrollmentStatus(student.enrollmentStatus)) return student.statusLabel
+  if (!isActiveEnrollmentStatus(student.enrollmentStatus)) return student.statusLabel
+  if (student.dailyStatus === 'PERMISO' || student.dailyStatus === 'AUSENTE') return student.dailyStatusLabel
+  return 'Activo'
+}
+
+export function combinedStudentStatusClassName(student: Pick<StudentSummary, 'enrollmentStatus' | 'dailyStatus'>) {
+  if (isWithdrawnEnrollmentStatus(student.enrollmentStatus)) return 'status-tag danger'
+  if (!isActiveEnrollmentStatus(student.enrollmentStatus)) return 'status-tag warning'
+  return dailyStatusClassName(student.dailyStatus)
 }
 
 export function splitFullName(fullName: string) {

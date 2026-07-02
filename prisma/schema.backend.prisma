@@ -68,6 +68,7 @@ model Student {
   secondaryAverage  Decimal?
   examRoom          String?
   schoolCycle       String
+  schoolPeriod      Int            @default(1)
   semesterLevel     Int            @default(1)
   academicStatus    String?
   conductStatus     String         @default("REGULAR")
@@ -137,6 +138,7 @@ model IntakeGroup {
   schoolCycle String
   semesterLevel Int                   @default(1)
   label      String
+  advisorName String?
   shift      String                   @default("MATUTINO")
   capacity   Int                      @default(40)
   isActive   Boolean                  @default(true)

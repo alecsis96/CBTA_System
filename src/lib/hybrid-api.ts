@@ -84,6 +84,11 @@ function canUseRemoteNow() {
   return typeof navigator !== 'undefined' && navigator.onLine && isRemoteConfigured()
 }
 
+function shouldFallbackToLocal(error: unknown) {
+  if (!(error instanceof Error)) return false
+  return ['not_found', 'remote_database_unreachable', 'Failed to fetch'].some((message) => error.message.includes(message))
+}
+
 async function saveBase64Workbook(localApi: AppApi, base64: string, fileName: string) {
   if (localApi.files?.saveAndOpenWorkbook) {
     await localApi.files.saveAndOpenWorkbook({ fileName, base64 })
@@ -126,6 +131,8 @@ function printRemoteAssignedRoster(rows: Array<{ groupLabel: string; enrollmentN
 
 function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail {
   const guardian = (student.guardian as Record<string, unknown> | null) ?? null
+  const groupAssignment = (student.groupAssignment as Record<string, unknown> | null) ?? null
+  const group = (groupAssignment?.group as Record<string, unknown> | null) ?? null
   return {
     id: String(student.id ?? ''),
     enrollmentNumber: String(student.enrollmentNumber ?? ''),
@@ -151,6 +158,7 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
     secondaryAverage: typeof student.secondaryAverage === 'number' ? student.secondaryAverage : null,
     examRoom: String(student.examRoom ?? ''),
     schoolCycle: String(student.schoolCycle ?? ''),
+    schoolPeriod: Number(student.schoolPeriod ?? 1),
     semesterLevel: Number(student.semesterLevel ?? 1) as StudentDetail['semesterLevel'],
     academicStatus: String(student.academicStatus ?? ''),
     guardianFullName: String(guardian?.fullName ?? ''),
@@ -162,6 +170,9 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
     documentationStatus: String(student.documentationStatus ?? 'PENDIENTE'),
     enrollmentStatus: String(student.enrollmentStatus ?? 'INSCRITO'),
     statusLabel: String(student.enrollmentStatus ?? 'INSCRITO'),
+    groupLabel: typeof student.groupLabel === 'string' ? student.groupLabel : typeof group?.label === 'string' ? group.label : null,
+    groupAdvisorName: typeof student.groupAdvisorName === 'string' ? student.groupAdvisorName : typeof group?.advisorName === 'string' ? group.advisorName : null,
+    shiftLabel: typeof student.shiftLabel === 'string' ? student.shiftLabel : typeof group?.shift === 'string' ? group.shift : null,
   }
 }
 
@@ -183,6 +194,8 @@ function buildStudentListQuery(filters?: {
 }
 
 export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi {
+  let preferLocalStudentRoster = false
+
   return {
     ...localApi,
     appName: localApi.appName,
@@ -248,13 +261,24 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
     students: {
       ...localApi.students,
       list: async (filters) => {
+        if (preferLocalStudentRoster) {
+          return localApi.students.list(filters)
+        }
         if (canUseRemoteNow()) {
           const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
+          const localItems = await localApi.students.list(filters)
+          if (localItems.length > data.items.length) {
+            preferLocalStudentRoster = true
+            return localItems
+          }
           return data.items
         }
         return localApi.students.list(filters)
       },
       listValidated: async () => {
+        if (preferLocalStudentRoster) {
+          return localApi.students.listValidated()
+        }
         if (canUseRemoteNow()) {
           const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['listValidated']>> }>('/api/hybrid/students?validatedOnly=true', { method: 'GET' }, getActor)
           return data.items
@@ -263,8 +287,12 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
       },
       get: async (studentId: string) => {
         if (canUseRemoteNow()) {
-          const data = await remoteFetch<{ student: Record<string, unknown> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'GET' }, getActor)
-          return mapRemoteStudentDetail(data.student)
+          try {
+            const data = await remoteFetch<{ student: Record<string, unknown> }>('/api/hybrid/students/' + encodeURIComponent(studentId), { method: 'GET' }, getActor)
+            return mapRemoteStudentDetail(data.student)
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
         }
         return localApi.students.get(studentId)
       },
@@ -314,6 +342,14 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         }
         return localApi.students.enrollGrade(input)
       },
+      reinscribeForPeriod: async (input) => {
+        preferLocalStudentRoster = true
+        return localApi.students.reinscribeForPeriod(input)
+      },
+      graduatePeriod: async (input) => {
+        preferLocalStudentRoster = true
+        return localApi.students.graduatePeriod(input)
+      },
       listMovements: async (input) => {
         if (canUseRemoteNow()) {
           const params = new URLSearchParams()
@@ -325,6 +361,11 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           return data.items
         }
         return localApi.students.listMovements(input)
+      },
+      importEnrollmentRoster: async (input) => {
+        const result = await localApi.students.importEnrollmentRoster(input)
+        preferLocalStudentRoster = true
+        return result
       },
     },
     concepts: {

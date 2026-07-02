@@ -11,10 +11,14 @@ import type {
   ChargeConceptSummary,
   ConceptSuggestionUpdateInput,
   GroupAssignedRosterRow,
+  EnrollmentRosterImportResult,
+  EnrollmentRosterImportRow,
   SemesterLevel,
   StudentAcademicMovementSummary,
   StudentGradeEnrollmentInput,
   StudentGroupChangeInput,
+  StudentPeriodGraduationInput,
+  StudentPeriodReinscriptionInput,
   GroupRosterImportRow,
   GroupRosterImportResult,
   GroupRosterExportResult,
@@ -66,6 +70,7 @@ type CbtaApi = {
   students: {
     list: (filters?: {
       schoolCycle?: string
+      schoolPeriod?: number
       semesterLevel?: SemesterLevel | 'all'
       enrollmentStatus?: string
       documentationStatus?: string
@@ -81,7 +86,11 @@ type CbtaApi = {
     changeGroup: (input: StudentGroupChangeInput) => Promise<{ ok: boolean; assignmentId: string }>
     withdraw: (input: StudentWithdrawalInput) => Promise<{ ok: boolean; movementId: string }>
     enrollGrade: (input: StudentGradeEnrollmentInput) => Promise<StudentSummary>
+    reinscribeForPeriod: (input: StudentPeriodReinscriptionInput) => Promise<StudentSummary>
+    graduatePeriod: (input: StudentPeriodGraduationInput) => Promise<{ ok: boolean; graduatedCount: number }>
+    formalizeEnrollment: (input: { studentId: string; allowPendingDocuments?: boolean; notes?: string }) => Promise<StudentSummary>
     listMovements: (input?: { studentId?: string; schoolCycle?: string; limit?: number }) => Promise<StudentAcademicMovementSummary[]>
+    importEnrollmentRoster: (input: { schoolCycle: string; sourcePath?: string | null; rows: EnrollmentRosterImportRow[] }) => Promise<EnrollmentRosterImportResult>
   }
   permissions: {
     list: (filters?: { query?: string; status?: string; activeOn?: string }) => Promise<StudentPermissionSummary[]>
@@ -120,7 +129,7 @@ type CbtaApi = {
     }
   groups: {
     createForIntake: (input: { schoolCycle: string; semesterLevel?: SemesterLevel; labels: string[] }) => Promise<Array<{ id: string; label: string }>>
-    listForIntake: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ groups: Array<{ id: string; label: string; shift: string; capacity: number }>; stats: GroupStat[] }>
+    listForIntake: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ groups: Array<{ id: string; label: string; advisorName: string | null; shift: string; capacity: number }>; stats: GroupStat[] }>
     autoAssign: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; assignedCount: number; groupCount: number }>
     confirmAssignment: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; confirmed: number }>
     manualReassign: (input: { studentId: string; toGroupId: string; reason: string }) => Promise<{ ok: boolean; assignmentId: string }>
@@ -130,6 +139,7 @@ type CbtaApi = {
     previewRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupPreviewRow[]>
     listAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupAssignedRosterRow[]>
     importAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel; sourcePath?: string | null; rows: GroupRosterImportRow[] }) => Promise<GroupRosterImportResult>
+    updateAdvisor: (input: { groupId: string; advisorName?: string | null }) => Promise<{ ok: boolean; groupId: string; advisorName: string | null }>
     exportAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<GroupRosterExportResult>
     printAssignedRoster: (input: { schoolCycle: string; semesterLevel?: SemesterLevel }) => Promise<{ ok: boolean; mode: string; outputPath?: string }>
   }

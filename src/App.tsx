@@ -50,6 +50,7 @@ import type {
   RocReceiptSummary,
   GroupStat,
   StudentDailyStatusSetInput,
+  StudentDetail,
   StudentFormInput,
   StudentPermissionCancelInput,
   StudentPermissionCreateInput,
@@ -65,6 +66,7 @@ import { FloatingFeedbackToast } from './FloatingFeedbackToast'
 
 type Screen = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion'
 type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion' | 'sync'
+export type StudentAcademicContext = Pick<StudentDetail, 'enrollmentNumber' | 'schoolCycle' | 'schoolPeriod' | 'semesterLevel' | 'academicStatus' | 'enrollmentStatus' | 'documentationStatus' | 'groupLabel' | 'groupAdvisorName' | 'shiftLabel'>
 
 const CURRENT_DATE = new Date()
 
@@ -92,6 +94,7 @@ const initialForm: StudentFormInput = {
   secondaryAverage: null,
   examRoom: '',
   schoolCycle: '2026-2027',
+  schoolPeriod: 1,
   semesterLevel: 1,
   academicStatus: 'Regular',
   guardianFullName: '',
@@ -140,6 +143,7 @@ function App() {
   const [rocBatchYear, setRocBatchYear] = useState(CURRENT_DATE.getFullYear())
   const [conceptQuery, setConceptQuery] = useState('')
   const [form, setForm] = useState<StudentFormInput>(initialForm)
+  const [editingAcademicContext, setEditingAcademicContext] = useState<StudentAcademicContext | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savingReceipt, setSavingReceipt] = useState(false)
@@ -439,6 +443,7 @@ function App() {
 
       const wasEditing = editingStudentId !== null
       setEditingStudentId(null)
+      setEditingAcademicContext(null)
       setActiveAdmission(null)
       setForm(initialForm)
       setControlFeedback(
@@ -542,6 +547,18 @@ function App() {
       const { id, statusLabel: _statusLabel, ...studentForm } = student
       void _statusLabel
       setEditingStudentId(id)
+      setEditingAcademicContext({
+        enrollmentNumber: student.enrollmentNumber,
+        schoolCycle: student.schoolCycle,
+        schoolPeriod: student.schoolPeriod,
+        semesterLevel: student.semesterLevel,
+        academicStatus: student.academicStatus,
+        enrollmentStatus: student.enrollmentStatus,
+        documentationStatus: student.documentationStatus,
+        groupLabel: student.groupLabel,
+        groupAdvisorName: student.groupAdvisorName,
+        shiftLabel: student.shiftLabel,
+      })
       setForm(studentForm)
       setScreen('control-escolar')
       setTimeout(() => {
@@ -555,6 +572,7 @@ function App() {
 
   function handleCancelEdit() {
     setEditingStudentId(null)
+    setEditingAcademicContext(null)
     setForm(initialForm)
     setControlFeedback(null)
     void prepareNextInternalFolio()
@@ -1210,6 +1228,7 @@ function App() {
             recentAuditLogs={recentAuditLogs}
             captureQuery={captureQuery}
             activeAdmission={activeAdmission}
+            editingAcademicContext={editingAcademicContext}
             editingStudentId={editingStudentId}
             newlyCreatedStudentId={newlyCreatedStudentId}
             saving={saving}
@@ -1226,6 +1245,7 @@ function App() {
             onReloadData={loadData}
             onClearNewlyCreatedStudent={() => setNewlyCreatedStudentId(null)}
             groupsApi={appApi.groups}
+            studentsApi={appApi.students}
           />
         ) : screen === 'secretaria' ? (
           <SecretariaOverview
@@ -1395,6 +1415,7 @@ export type ControlEscolarProps = {
   recentAuditLogs: AuditLogSummary[]
   captureQuery: string
   activeAdmission: AdmissionSummary | null
+  editingAcademicContext: StudentAcademicContext | null
   editingStudentId: string | null
   newlyCreatedStudentId: string | null
   saving: boolean
@@ -1415,6 +1436,7 @@ export type ControlEscolarProps = {
   onReloadData: () => Promise<void>
   onClearNewlyCreatedStudent: () => void
   groupsApi: Window['cbta']['groups']
+  studentsApi: Window['cbta']['students']
 }
 
 export type IngresosProps = {

@@ -2,9 +2,12 @@ import { PanelSectionTitle, SurfaceCard } from '@/components/dashboard-kit'
 import { SearchInput } from '@/components/ui/SearchInput'
 import type { StudentFormInput } from '@/types/domain'
 
+type SemesterFilter = 'all' | '1' | '2' | '3' | '4' | '5' | '6'
+type OperationsTab = 'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos'
+
 type ControlEscolarToolbarProps = {
-  operationsTab: 'captura' | 'bandeja' | 'grupos' | 'inscripcion' | 'alumnos'
-  setOperationsTab: (value: 'captura' | 'bandeja' | 'grupos' | 'inscripcion' | 'alumnos') => void
+  operationsTab: OperationsTab
+  setOperationsTab: (value: OperationsTab) => void
   setCaptureTab: (value: 'fichas' | 'formulario') => void
   toolbarSearchPlaceholder: string
   toolbarSearchValue: string
@@ -14,13 +17,15 @@ type ControlEscolarToolbarProps = {
   activeFilterCount: number
   form: StudentFormInput
   onUpdateField: <K extends keyof StudentFormInput>(field: K, value: StudentFormInput[K]) => void
-  semesterFilter: 'all' | '1' | '3' | '5'
-  setSemesterFilter: (value: 'all' | '1' | '3' | '5') => void
+  semesterFilter: SemesterFilter
+  setSemesterFilter: (value: SemesterFilter) => void
   statusFilter: string
   setStatusFilter: (value: string) => void
   documentationFilter: string
   setDocumentationFilter: (value: string) => void
   uniqueDocumentationStatuses: string[]
+  isImportingEnrollmentRoster: boolean
+  onImportEnrollmentRoster: () => void
 }
 
 export function ControlEscolarToolbar({
@@ -42,6 +47,8 @@ export function ControlEscolarToolbar({
   documentationFilter,
   setDocumentationFilter,
   uniqueDocumentationStatuses,
+  isImportingEnrollmentRoster,
+  onImportEnrollmentRoster,
 }: ControlEscolarToolbarProps) {
   return (
     <SurfaceCard className="dashboard-search-panel control-toolbar-panel">
@@ -63,13 +70,11 @@ export function ControlEscolarToolbar({
             </button>
             <button
               className="secondary-button small-button"
-              onClick={() => {
-                setOperationsTab('captura')
-                setCaptureTab('fichas')
-              }}
+              disabled={isImportingEnrollmentRoster}
+              onClick={onImportEnrollmentRoster}
               type="button"
             >
-              Importar padrón
+              {isImportingEnrollmentRoster ? 'Importando...' : 'Importar padrón'}
             </button>
           </div>
         }
@@ -104,6 +109,13 @@ export function ControlEscolarToolbar({
           >
             Movimientos académicos
           </button>
+          <button
+            className={operationsTab === 'estadisticas' ? 'segmented-tab active' : 'segmented-tab'}
+            onClick={() => setOperationsTab('estadisticas')}
+            type="button"
+          >
+            Estadisticas
+          </button>
           {operationsTab === 'bandeja' ? (
             <button
               className="segmented-tab active"
@@ -118,7 +130,7 @@ export function ControlEscolarToolbar({
         <div className="control-toolbar-lower">
           <SearchInput
             aria-label="Buscar alumno"
-            disabled={operationsTab === 'bandeja' || operationsTab === 'grupos'}
+            disabled={operationsTab === 'bandeja' || operationsTab === 'grupos' || operationsTab === 'estadisticas'}
             placeholder={toolbarSearchPlaceholder}
             value={toolbarSearchValue}
             onChange={handleToolbarSearchChange}
@@ -142,29 +154,35 @@ export function ControlEscolarToolbar({
                   <span>Semestre</span>
                   <select
                     className="group-select"
-                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'bandeja'}
+                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'bandeja'}
                     value={semesterFilter}
-                    onChange={(event) => setSemesterFilter(event.target.value as 'all' | '1' | '3' | '5')}
+                    onChange={(event) => setSemesterFilter(event.target.value as SemesterFilter)}
                   >
                     <option value="all">Todos</option>
-                    <option value="1">1°</option>
-                    <option value="3">3°</option>
-                    <option value="5">5°</option>
+                    <option value="1">1ro</option>
+                    <option value="2">2do</option>
+                    <option value="3">3ro</option>
+                    <option value="4">4to</option>
+                    <option value="5">5to</option>
+                    <option value="6">6to</option>
                   </select>
                 </label>
                 <label className="control-inline-field">
-                  <span>Estatus</span>
+                  <span>Inscripción</span>
                   <select
                     className="group-select"
-                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'bandeja'}
+                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'bandeja'}
                     value={statusFilter}
                     onChange={(event) => setStatusFilter(event.target.value)}
                   >
                     <option value="all">Todos</option>
                     <option value="Ficha entregada">Ficha entregada</option>
                     <option value="Inscrito">Inscrito</option>
+                    <option value="Asignado a grupo">Asignado a grupo</option>
+                    <option value="Baja">Baja</option>
                     <option value="Baja temporal">Baja temporal</option>
                     <option value="Baja definitiva">Baja definitiva</option>
+                    <option value="No presentado">No presentado</option>
                     <option value="Portabilidad">Portabilidad</option>
                     <option value="Recursador">Recursador</option>
                   </select>
@@ -173,7 +191,7 @@ export function ControlEscolarToolbar({
                   <span>Documentación</span>
                   <select
                     className="group-select"
-                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'bandeja'}
+                    disabled={operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'bandeja'}
                     value={documentationFilter}
                     onChange={(event) => setDocumentationFilter(event.target.value)}
                   >

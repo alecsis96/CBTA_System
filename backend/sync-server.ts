@@ -54,6 +54,8 @@ const corsAllowedOrigins = (process.env.SYNC_CORS_ORIGINS ?? '*')
   .split(',')
   .map((item) => item.trim())
   .filter((item) => item.length > 0)
+let backendDatabaseReady = false
+let backendStartupError: string | null = null
 
 const allowedTypes = [
   'STUDENT_CREATE',
@@ -86,7 +88,7 @@ const remoteActorSchema = z.object({
 })
 
 const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
-const remoteSemesterLevelSchema = z.union([z.literal(1), z.literal(3), z.literal(5)])
+const remoteSemesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
 
 const remoteUserCreateSchema = z.object({
   username: z.string().trim().min(1),
@@ -161,6 +163,7 @@ const remoteStudentInputSchema = z.object({
   secondaryAverage: z.number().nullable().optional().default(null),
   examRoom: z.string().optional().default(''),
   schoolCycle: z.string().trim().min(1),
+  schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: remoteSemesterLevelSchema.default(1),
   academicStatus: z.string().optional().default(''),
   guardianFullName: z.string().trim().min(1),
@@ -173,6 +176,7 @@ const remoteStudentInputSchema = z.object({
 
 const remoteStudentListFiltersSchema = z.object({
   schoolCycle: z.string().trim().optional(),
+  schoolPeriod: z.number().int().min(1).max(2).optional(),
   semesterLevel: z.union([remoteSemesterLevelSchema, z.literal('all')]).optional(),
   enrollmentStatus: z.string().trim().optional(),
   documentationStatus: z.string().trim().optional(),
@@ -310,6 +314,8 @@ app.get('/', (_req: Request, res: Response) => {
 app.get('/healthz', async (_req: Request, res: Response) => {
   try {
     await prisma.$queryRaw`SELECT 1`
+    backendDatabaseReady = true
+    backendStartupError = null
     return res.status(200).json({
       ok: true,
       status: 'healthy',
@@ -317,11 +323,13 @@ app.get('/healthz', async (_req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     })
   } catch (error) {
-    return res.status(503).json({
+    backendDatabaseReady = false
+    backendStartupError = error instanceof Error ? error.message : 'db_unreachable'
+    return res.status(200).json({
       ok: false,
       status: 'degraded',
       database: 'unreachable',
-      error: error instanceof Error ? error.message : 'db_unreachable',
+      error: backendStartupError,
       timestamp: new Date().toISOString(),
     })
   }
@@ -577,9 +585,26 @@ app.get('/api/public/pre-registrations/:folio/voucher', async (req: Request, res
   })
 })
 
+function requireBackendDatabase(req: Request, res: Response, next: express.NextFunction) {
+  if (backendDatabaseReady) return next()
+  return res.status(503).json({
+    ok: false,
+    error: 'remote_database_unreachable',
+    message: 'La base remota de sincronizacion no esta disponible. La app local puede seguir trabajando sin conexion.',
+    detail: backendStartupError,
+  })
+}
+
 app.get('/api/hybrid/health', (_req: Request, res: Response) => {
-  return res.status(200).json({ ok: true, mode: 'hybrid-online' })
+  return res.status(backendDatabaseReady ? 200 : 503).json({
+    ok: backendDatabaseReady,
+    mode: backendDatabaseReady ? 'hybrid-online' : 'hybrid-degraded',
+    database: backendDatabaseReady ? 'reachable' : 'unreachable',
+    error: backendStartupError,
+  })
 })
+
+app.use(['/api/hybrid', '/api/sync', '/api/public'], requireBackendDatabase)
 
 app.get('/api/hybrid/admin/departments', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
@@ -1127,10 +1152,19 @@ app.post('/api/sync/op', async (req: Request, res: Response) => {
 })
 
 async function startServer() {
-  await ensureBackendBaseData()
+  try {
+    await ensureBackendBaseData()
+    backendDatabaseReady = true
+    backendStartupError = null
+  } catch (error) {
+    backendDatabaseReady = false
+    backendStartupError = error instanceof Error ? error.message : 'remote_database_unreachable'
+    console.warn('[sync-server] Remote database unavailable; starting in degraded offline mode.', error)
+  }
 
   app.listen(port, host, () => {
-    console.log(`[sync-server] listening on http://${host}:${port}`)
+    const mode = backendDatabaseReady ? 'online' : 'degraded-offline'
+    console.log(`[sync-server] listening on http://${host}:${port} (${mode})`)
   })
 }
 

@@ -1,5 +1,7 @@
 import type { FormEvent, MutableRefObject, ReactNode } from 'react'
-import type { AdmissionSummary, StudentFormInput } from '@/types/domain'
+import type { StudentAcademicContext } from '@/App'
+import type { AdmissionSummary, StudentFormInput, StudentRequirementChecklist } from '@/types/domain'
+import { formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel } from '@/lib/utils'
 
 type FieldRendererProps = {
   label: string
@@ -10,8 +12,13 @@ type FieldRendererProps = {
 
 type StudentCaptureFormPanelProps = {
   form: StudentFormInput
+  mode: 'captura' | 'edicion' | 'inscripcion' | 'reinscripcion'
   activeAdmission: AdmissionSummary | null
+  editingAcademicContext: StudentAcademicContext | null
   editingStudentId: string | null
+  enrollmentChecklist: StudentRequirementChecklist | null
+  savingEnrollmentChecklist: boolean
+  finalizingEnrollment: boolean
   saving: boolean
   feedback: string | null
   captureSectionRef: MutableRefObject<HTMLElement | null>
@@ -19,14 +26,21 @@ type StudentCaptureFormPanelProps = {
   FieldComponent: (props: FieldRendererProps) => JSX.Element
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>
   onUpdateField: <K extends keyof StudentFormInput>(field: K, value: StudentFormInput[K]) => void
+  onChecklistItemChange: (index: number, patch: Partial<StudentRequirementChecklist['items'][number]>) => void
+  onFinalizeEnrollment: () => Promise<void>
   onCancelEdit: () => void
   onBackToFichas?: () => void
 }
 
 export function StudentCaptureFormPanel({
   form,
+  mode,
   activeAdmission,
+  editingAcademicContext,
   editingStudentId,
+  enrollmentChecklist,
+  savingEnrollmentChecklist,
+  finalizingEnrollment,
   saving,
   feedback,
   captureSectionRef,
@@ -34,21 +48,50 @@ export function StudentCaptureFormPanel({
   FieldComponent,
   onSubmit,
   onUpdateField,
+  onChecklistItemChange,
+  onFinalizeEnrollment,
   onCancelEdit,
   onBackToFichas,
 }: StudentCaptureFormPanelProps) {
   const Field = FieldComponent
+  const isEnrollmentMode = mode === 'inscripcion'
+  const isReinscriptionMode = mode === 'reinscripcion'
+  const isFormalPeriodMode = isEnrollmentMode || isReinscriptionMode
+  const academicContext = editingAcademicContext ?? {
+    enrollmentNumber: form.enrollmentNumber,
+    schoolCycle: form.schoolCycle,
+    schoolPeriod: form.schoolPeriod,
+    semesterLevel: form.semesterLevel,
+    academicStatus: form.academicStatus,
+    enrollmentStatus: '',
+    documentationStatus: '',
+    groupLabel: null,
+    groupAdvisorName: null,
+    shiftLabel: null,
+  }
+  const displayAcademicContext = isReinscriptionMode
+    ? { ...academicContext, schoolCycle: form.schoolCycle, schoolPeriod: form.schoolPeriod, semesterLevel: form.semesterLevel }
+    : academicContext
+  const visibleGroup = formatGroupLabelWithoutCareer(displayAcademicContext.groupLabel, displayAcademicContext.semesterLevel)
+  const contextItems = [
+    ['Matricula / folio', displayAcademicContext.enrollmentNumber || 'Se asigna al guardar'],
+    ['Ciclo', `${displayAcademicContext.schoolCycle}/${displayAcademicContext.schoolPeriod ?? 1}`],
+    ['Grado', `${displayAcademicContext.semesterLevel}o semestre`],
+    ['Grupo', visibleGroup],
+    ['Carrera', getCareerLabelFromGroupLabel(displayAcademicContext.groupLabel)],
+    ['Estatus academico', displayAcademicContext.academicStatus || 'Sin dato'],
+  ]
 
   return (
     <section className="panel" ref={captureSectionRef}>
       <div className="section-header">
         <div>
           <p className="eyebrow">Control Escolar</p>
-          <h2>Captura y validacion del alumno</h2>
+          <h2>{isReinscriptionMode ? 'Reinscripcion semestral' : isEnrollmentMode ? 'Inscripcion formal' : 'Captura y validacion del alumno'}</h2>
         </div>
         <div className="button-row">
-          <span className="status-tag">{editingStudentId ? 'Edicion activa' : 'Captura real activa'}</span>
-          {onBackToFichas ? (
+          <span className="status-tag">{isReinscriptionMode ? 'Reinscripcion' : isEnrollmentMode ? 'Inscripcion' : editingStudentId ? 'Edicion activa' : 'Captura real activa'}</span>
+          {onBackToFichas && !isFormalPeriodMode ? (
             <button className="secondary-button small-button" onClick={onBackToFichas} type="button">
               Regresar a fichas
             </button>
@@ -60,30 +103,36 @@ export function StudentCaptureFormPanel({
         <p className="feedback-banner">
           Captura activa para folio {activeAdmission.folio} ({activeAdmission.curp})
         </p>
-      ) : (
+      ) : !editingStudentId && !isFormalPeriodMode ? (
         <p className="empty-state">Selecciona primero un pago desde la pestana "Captura de fichas".</p>
-      )}
+      ) : null}
 
-      <form className="student-form" onSubmit={(event) => void onSubmit(event)}>
+      <div className="academic-context-strip">
+        {contextItems.map(([label, value]) => (
+          <div className="academic-context-item" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+
+      <form
+        className="student-form compact-student-form"
+        onSubmit={(event) => {
+          if (isFormalPeriodMode) {
+            event.preventDefault()
+            void onFinalizeEnrollment()
+            return
+          }
+          void onSubmit(event)
+        }}
+      >
         <div className="form-grid">
-          <Field label="Folio interno">
-            <input placeholder="Se asigna automaticamente al guardar" readOnly value={form.enrollmentNumber} onChange={(event) => onUpdateField('enrollmentNumber', event.target.value)} />
-          </Field>
           <Field label="CURP" required>
             <input maxLength={18} value={form.curp} onChange={(event) => onUpdateField('curp', event.target.value.toUpperCase())} />
           </Field>
           <Field label="RFC opcional">
             <input value={form.rfc} onChange={(event) => onUpdateField('rfc', event.target.value.toUpperCase())} />
-          </Field>
-          <Field label="Ciclo escolar" required>
-            <input value={form.schoolCycle} onChange={(event) => onUpdateField('schoolCycle', event.target.value)} />
-          </Field>
-          <Field label="Semestre destino" required>
-            <select value={String(form.semesterLevel)} onChange={(event) => onUpdateField('semesterLevel', Number(event.target.value) as StudentFormInput['semesterLevel'])}>
-              <option value="1">1° semestre</option>
-              <option value="3">3° semestre</option>
-              <option value="5">5° semestre</option>
-            </select>
           </Field>
           <Field label="Nombre(s)" required>
             <input value={form.firstName} onChange={(event) => onUpdateField('firstName', event.target.value)} />
@@ -195,12 +244,11 @@ export function StudentCaptureFormPanel({
               onChange={(event) => onUpdateField('secondaryAverage', event.target.value ? Number(event.target.value) : null)}
             />
           </Field>
-          <Field label="Salon de examen">
-            <input value={form.examRoom} onChange={(event) => onUpdateField('examRoom', event.target.value)} />
-          </Field>
-          <Field label="Estatus academico">
-            <input value={form.academicStatus} onChange={(event) => onUpdateField('academicStatus', event.target.value)} />
-          </Field>
+          {!editingStudentId ? (
+            <Field label="Salon de examen">
+              <input value={form.examRoom} onChange={(event) => onUpdateField('examRoom', event.target.value)} />
+            </Field>
+          ) : null}
           <Field className="span-2" label="Tutor" required>
             <input value={form.guardianFullName} onChange={(event) => onUpdateField('guardianFullName', event.target.value)} />
           </Field>
@@ -230,22 +278,97 @@ export function StudentCaptureFormPanel({
           </Field>
         </div>
 
-        <label className="checkbox-row">
-          <input checked={form.validateNow} type="checkbox" onChange={(event) => onUpdateField('validateNow', event.target.checked)} />
-          Guardar alumno ya validado y listo para cobro
-        </label>
+        {!editingStudentId ? (
+          <label className="checkbox-row">
+            <input checked={form.validateNow} type="checkbox" onChange={(event) => onUpdateField('validateNow', event.target.checked)} />
+            Guardar alumno ya validado y listo para cobro
+          </label>
+        ) : null}
+
+        {isFormalPeriodMode ? (
+          <section className="embedded-checklist">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Documentacion</p>
+                <h3>{isReinscriptionMode ? 'Checklist de reinscripcion' : 'Checklist de inscripcion'}</h3>
+              </div>
+              <span className="status-tag">{enrollmentChecklist?.documentationStatus ?? 'Sin requisitos'}</span>
+            </div>
+            {enrollmentChecklist && enrollmentChecklist.items.length > 0 ? (
+              <>
+                <p className="table-summary">
+                  Pendientes: {enrollmentChecklist.items.filter((item) => !item.isDelivered).length} | Entregados: {enrollmentChecklist.items.filter((item) => item.isDelivered).length}
+                </p>
+                <div className="checklist-list">
+                  {enrollmentChecklist.items.map((item, index) => (
+                    <article className="checklist-item" key={item.requirementId}>
+                      <div className="checklist-item-header">
+                        <div>
+                          <strong>{item.label}</strong>
+                          <span>Req. {item.requiredOriginals} orig / {item.requiredCopies} copias</span>
+                        </div>
+                        <div className="checklist-toggle">
+                          <label>
+                            <input
+                              checked={item.isDelivered}
+                              name={`embedded-delivered-${item.requirementId}`}
+                              onChange={() => onChecklistItemChange(index, { isDelivered: true, missingJustification: '', deadlineAt: '' })}
+                              type="radio" />
+                            Entregado
+                          </label>
+                          <label>
+                            <input
+                              checked={!item.isDelivered}
+                              name={`embedded-delivered-${item.requirementId}`}
+                              onChange={() => onChecklistItemChange(index, { isDelivered: false })}
+                              type="radio" />
+                            No entrego
+                          </label>
+                        </div>
+                      </div>
+                      {!item.isDelivered ? (
+                        <div className="checklist-item-details">
+                          <label className="form-field">
+                            <span>Motivo</span>
+                            <input value={item.missingJustification} onChange={(event) => onChecklistItemChange(index, { missingJustification: event.target.value })} />
+                          </label>
+                          <label className="form-field">
+                            <span>Fecha compromiso</span>
+                            <input type="date" value={item.deadlineAt} onChange={(event) => onChecklistItemChange(index, { deadlineAt: event.target.value })} />
+                          </label>
+                          <label className="form-field">
+                            <span>Nota</span>
+                            <input value={item.notes} onChange={(event) => onChecklistItemChange(index, { notes: event.target.value })} />
+                          </label>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="empty-state">No hay requisitos documentales configurados para mostrar.</p>
+            )}
+          </section>
+        ) : null}
 
         {feedback ? <p className="feedback-banner">{feedback}</p> : null}
 
         <div className="form-actions control-actions">
           {editingStudentId ? (
             <button className="secondary-button" onClick={onCancelEdit} type="button">
-              Cancelar edicion
+              {isReinscriptionMode ? 'Cancelar reinscripcion' : isEnrollmentMode ? 'Cancelar inscripcion' : 'Cancelar edicion'}
             </button>
           ) : null}
-          <button className="primary-button" disabled={saving} type="submit">
-            {saving ? 'Guardando...' : editingStudentId ? 'Actualizar alumno' : 'Guardar alumno'}
-          </button>
+          {isFormalPeriodMode ? (
+            <button className="primary-button" disabled={saving || savingEnrollmentChecklist || finalizingEnrollment} onClick={() => void onFinalizeEnrollment()} type="button">
+              {finalizingEnrollment ? (isReinscriptionMode ? 'Reinscribiendo...' : 'Inscribiendo...') : isReinscriptionMode ? 'Reinscribir alumno' : 'Inscribir alumno'}
+            </button>
+          ) : (
+            <button className="primary-button" disabled={saving} type="submit">
+              {saving ? 'Guardando...' : editingStudentId ? 'Actualizar alumno' : 'Guardar alumno'}
+            </button>
+          )}
         </div>
       </form>
     </section>

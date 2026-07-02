@@ -192,7 +192,7 @@ function deriveStudentDailyStatus(student: {
   dailyStatuses?: Array<{ status: string }>
   permissions?: Array<{ status: string; startsAt: Date; endsAt: Date; reason: string }>
 }, now = new Date()) {
-  const activePermission = student.permissions?.find((permission) => normalizePermissionStatus(permission, now) !== 'CANCELADO') ?? null
+  const activePermission = student.permissions?.find((permission) => normalizePermissionStatus(permission, now) === 'ACTIVO') ?? null
   if (activePermission) {
     return {
       dailyStatus: 'PERMISO' as const,
@@ -225,6 +225,7 @@ function enrollmentStatusLabel(status: string) {
     NO_SHOW: 'No presentado',
     ASIGNADO: 'Asignado a grupo',
     CONFIRMADO: 'Inscrito',
+    EGRESADO: 'Egresado',
   }
   return labels[status] ?? status
 }
@@ -246,6 +247,7 @@ function studentSummary(student: {
   municipality: string | null
   state: string | null
   schoolCycle: string
+  schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
   documentationStatus: string
@@ -253,7 +255,7 @@ function studentSummary(student: {
   guardian?: { fullName: string; phone: string } | null
   admissionPayment?: { status: string } | null
   cashPayments?: Array<{ status: string }>
-  groupAssignment?: { group: { label: string; shift: string } } | null
+  groupAssignment?: { groupId: string; group: { label: string; advisorName: string | null; shift: string } } | null
   dailyStatuses?: Array<{ status: string }>
   permissions?: Array<{ status: string; startsAt: Date; endsAt: Date; reason: string }>
 }): StudentSummary {
@@ -277,12 +279,15 @@ function studentSummary(student: {
     admissionPaid: Boolean(student.admissionPayment) || Boolean(latestCashPayment),
     admissionPaymentStatus: latestCashPayment?.status ?? student.admissionPayment?.status ?? null,
     schoolCycle: student.schoolCycle,
+    schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? null,
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus,
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
+    groupId: student.groupAssignment?.groupId ?? null,
     groupLabel: student.groupAssignment?.group.label ?? null,
+    groupAdvisorName: student.groupAssignment?.group.advisorName ?? null,
     shiftLabel: student.groupAssignment?.group.shift ?? null,
     dailyStatus: dayStatus.dailyStatus,
     dailyStatusLabel: dayStatus.dailyStatusLabel,
@@ -697,7 +702,7 @@ type AssignmentSex = 'MUJER' | 'HOMBRE' | 'NO_ESPECIFICADO'
 type AssignmentBand = 'alto' | 'medio' | 'bajo'
 
 function normalizeSemesterLevel(value: number | null | undefined): SemesterLevel {
-  if (value === 3 || value === 5) return value
+  if (value === 2 || value === 3 || value === 4 || value === 5 || value === 6) return value
   return 1
 }
 
@@ -760,7 +765,7 @@ function buildProportionalTargets(capacities: number[], totalCount: number) {
   return base
 }
 
-function buildAssignmentStats(groups: Array<{ id: string; label: string; capacity: number; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>): GroupStat[] {
+function buildAssignmentStats(groups: Array<{ id: string; label: string; advisorName: string | null; capacity: number; assignments: Array<{ status: string; student: { sex: string | null; secondaryAverage: unknown } }> }>): GroupStat[] {
   return groups.map((group) => {
     const assigned = group.assignments.filter((item) => item.status !== 'NO_SHOW')
     const totals = {
@@ -780,6 +785,7 @@ function buildAssignmentStats(groups: Array<{ id: string; label: string; capacit
     return {
       groupId: group.id,
       label: group.label,
+      advisorName: group.advisorName,
       capacity: group.capacity,
       assignedCount: assigned.length,
       available: group.capacity - assigned.length,
@@ -1005,6 +1011,7 @@ function isMissingStudentStatusTableError(error: unknown) {
 
 export async function listStudents(validatedOnlyOrFilters: boolean | {
   schoolCycle?: string
+  schoolPeriod?: number
   semesterLevel?: SemesterLevel | 'all'
   enrollmentStatus?: string
   documentationStatus?: string
@@ -1016,6 +1023,7 @@ export async function listStudents(validatedOnlyOrFilters: boolean | {
   const where = {
     ...(validatedOnly ? { status: { in: ['VALIDADO', 'LISTO_PARA_COBRO', 'COBRADO'] } } : {}),
     ...(filters?.schoolCycle ? { schoolCycle: filters.schoolCycle.trim() } : {}),
+    ...(filters?.schoolPeriod ? { schoolPeriod: filters.schoolPeriod } : {}),
     ...(filters?.semesterLevel && filters.semesterLevel !== 'all' ? { semesterLevel: filters.semesterLevel } : {}),
     ...(filters?.enrollmentStatus && filters.enrollmentStatus !== 'all' ? { enrollmentStatus: filters.enrollmentStatus } : {}),
     ...(filters?.documentationStatus && filters.documentationStatus !== 'all' ? { documentationStatus: filters.documentationStatus } : {}),
@@ -1096,6 +1104,7 @@ export async function previewGroupStats(schoolCycle: string, semesterLevel: Seme
     id: `preview-${index + 1}`,
     groupId: `preview-${index + 1}`,
     label: buildGroupLabel(index),
+    advisorName: null,
     capacity: ASSIGNMENT_MAX_CAPACITY,
     assignedCount: 0,
     available: ASSIGNMENT_MAX_CAPACITY,
@@ -1484,6 +1493,7 @@ function studentMutationData(input: StudentFormInput, validated: boolean, paymen
     secondaryAverage: input.secondaryAverage ?? null,
     examRoom: normalizeOptional(input.examRoom),
     schoolCycle: input.schoolCycle.trim(),
+    schoolPeriod: input.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(input.semesterLevel),
     academicStatus: normalizeOptional(input.academicStatus),
     documentationStatus: 'PENDIENTE',

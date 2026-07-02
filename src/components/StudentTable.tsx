@@ -1,6 +1,7 @@
 import { Fragment } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import type { StudentSummary } from '@/types/domain'
+import { combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerCodeFromGroupLabel } from '@/lib/utils'
 
 type StudentTableProps = {
   paginatedStudents: StudentSummary[]
@@ -9,8 +10,6 @@ type StudentTableProps = {
   setExpandedStudentId: Dispatch<SetStateAction<string | null>>
   handleStartEditStudent: (studentId: string) => Promise<void>
   formatPreferredEnrollment: (student: StudentSummary) => string
-  formatVisibleGroupLabel: (groupLabel: string | null) => string
-  dailyStatusClassName: (status: StudentSummary['dailyStatus']) => string
 }
 
 export function StudentTable({
@@ -20,9 +19,17 @@ export function StudentTable({
   setExpandedStudentId,
   handleStartEditStudent,
   formatPreferredEnrollment,
-  formatVisibleGroupLabel,
-  dailyStatusClassName,
 }: StudentTableProps) {
+  function documentationClassName(status: string) {
+    return status === 'COMPLETA' ? 'status-tag success' : 'status-tag warning'
+  }
+
+  function enrollmentClassName(status: string) {
+    if (status === 'Inscrito' || status === 'Asignado a grupo') return 'status-tag success'
+    if (status === 'Baja' || status === 'Baja definitiva' || status === 'Egresado') return 'status-tag danger'
+    return 'status-tag warning'
+  }
+
   return (
     <div className="student-table-wrap">
       <table className="student-table control-directory-table">
@@ -31,12 +38,10 @@ export function StudentTable({
             <th>Matrícula</th>
             <th>Alumno</th>
             <th>Tutor</th>
-            <th>Tel. tutor</th>
             <th>Semestre</th>
             <th>Grupo</th>
-            <th>Estatus hoy</th>
-            <th>Documentación</th>
-            <th>Estatus</th>
+            <th>Carrera</th>
+            <th>Estado actual</th>
             <th>Acciones</th>
           </tr>
         </thead>
@@ -46,8 +51,9 @@ export function StudentTable({
             const expanded = expandedStudentId === student.id
             const guardianName = student.guardianFullName?.trim().length ? student.guardianFullName : 'Sin tutor capturado'
             const guardianPhone = student.guardianPhone?.trim().length ? student.guardianPhone : 'Sin teléfono de tutor'
-            const rfc = student.rfc?.trim().length ? student.rfc : 'Sin RFC'
-            void rfc
+            const studentPhone = student.phone?.trim().length ? student.phone : 'Sin teléfono'
+            const visibleGroup = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel)
+            const careerCode = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera'
 
             return (
               <Fragment key={student.id}>
@@ -63,19 +69,17 @@ export function StudentTable({
                   role="button"
                   tabIndex={0}
                 >
-                  <td>
+                  <td className="student-enrollment-cell">
                     <strong>{formatPreferredEnrollment(student)}</strong>
                   </td>
                   <td>{student.fullName}</td>
                   <td>{guardianName}</td>
-                  <td>{guardianPhone}</td>
                   <td>{student.semesterLevel}°</td>
-                  <td>{formatVisibleGroupLabel(student.groupLabel)}</td>
+                  <td>{visibleGroup}</td>
+                  <td>{careerCode}</td>
                   <td>
-                    <span className={dailyStatusClassName(student.dailyStatus)}>{student.dailyStatusLabel}</span>
+                    <span className={combinedStudentStatusClassName(student)}>{combinedStudentStatusLabel(student)}</span>
                   </td>
-                  <td>{student.documentationStatus}</td>
-                  <td>{student.statusLabel}</td>
                   <td className="student-actions-cell">
                     <button
                       className="secondary-button small-button"
@@ -93,19 +97,40 @@ export function StudentTable({
                 </tr>
                 {expanded ? (
                   <tr className="student-detail-row">
-                    <td colSpan={10}>
+                    <td colSpan={8}>
                       <div className="student-detail-grid">
+                        <div>
+                          <span className="detail-label">Documentación</span>
+                          <strong><span className={documentationClassName(student.documentationStatus)}>{student.documentationStatus}</span></strong>
+                        </div>
+                        <div>
+                          <span className="detail-label">Inscripción</span>
+                          <strong><span className={enrollmentClassName(student.statusLabel)}>{student.statusLabel}</span></strong>
+                        </div>
                         <div>
                           <span className="detail-label">CURP</span>
                           <strong>{student.curp}</strong>
                         </div>
                         <div>
-                          <span className="detail-label">Teléfono</span>
-                          <strong>{student.phone ?? 'Sin teléfono'}</strong>
+                          <span className="detail-label">Teléfono alumno</span>
+                          <strong>{studentPhone}</strong>
                         </div>
                         <div>
+                          <span className="detail-label">Teléfono tutor</span>
+                          <strong>{guardianPhone}</strong>
+                        </div>
+                        <div className="student-detail-wide">
                           <span className="detail-label">Domicilio</span>
                           <strong>{student.address ?? 'Sin domicilio'}</strong>
+                        </div>
+                        <div>
+                          <span className="detail-label">Ciclo / periodo</span>
+                          <strong>{student.schoolCycle}/{student.schoolPeriod}</strong>
+                        </div>
+                       
+                        <div>
+                          <span className="detail-label">Asesor</span>
+                          <strong>{student.groupAdvisorName ?? 'Pendiente'}</strong>
                         </div>
                         <div>
                           <span className="detail-label">Permiso activo</span>

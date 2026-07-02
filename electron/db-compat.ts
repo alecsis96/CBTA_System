@@ -45,6 +45,13 @@ export async function ensureLocalDbCompatibility() {
       console.info('[db] Added missing IntakeGroup.semesterLevel column to local SQLite database.')
     }
 
+    if (!intakeGroupColumns.has('advisorName')) {
+      await prisma.$executeRawUnsafe(
+        'ALTER TABLE "IntakeGroup" ADD COLUMN "advisorName" TEXT',
+      )
+      console.info('[db] Added missing IntakeGroup.advisorName column to local SQLite database.')
+    }
+
     const intakeGroupIndexes = await listTableIndexes(prisma, 'IntakeGroup')
     if (intakeGroupIndexes.has('IntakeGroup_schoolCycle_label_shift_key')) {
       await prisma.$executeRawUnsafe('DROP INDEX "IntakeGroup_schoolCycle_label_shift_key"')

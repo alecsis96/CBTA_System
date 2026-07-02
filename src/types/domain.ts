@@ -4,7 +4,7 @@ export type Metric = {
   note: string
 }
 
-export type SemesterLevel = 1 | 3 | 5
+export type SemesterLevel = 1 | 2 | 3 | 4 | 5 | 6
 
 export type StudentSummary = {
   id: string
@@ -24,12 +24,15 @@ export type StudentSummary = {
   admissionPaid: boolean
   admissionPaymentStatus: string | null
   schoolCycle: string
+  schoolPeriod: number
   semesterLevel: SemesterLevel
   academicStatus: string | null
   documentationStatus: string
   enrollmentStatus: string
   statusLabel: string
+  groupId: string | null
   groupLabel: string | null
+  groupAdvisorName: string | null
   shiftLabel: string | null
   dailyStatus: StudentDailyStatusCode
   dailyStatusLabel: string
@@ -41,6 +44,9 @@ export type StudentDetail = StudentFormInput & {
   documentationStatus: string
   enrollmentStatus: string
   statusLabel: string
+  groupLabel: string | null
+  groupAdvisorName: string | null
+  shiftLabel: string | null
 }
 
 export type ChargeConceptSummary = {
@@ -90,6 +96,7 @@ export type StudentFormInput = {
   secondaryAverage: number | null
   examRoom: string
   schoolCycle: string
+  schoolPeriod: number
   semesterLevel: SemesterLevel
   academicStatus: string
   guardianFullName: string
@@ -348,6 +355,40 @@ export type GroupRosterImportRow = {
   curp: string | null
 }
 
+export type EnrollmentRosterImportRow = {
+  sheetName: string
+  rowNumber: number
+  enrollmentNumber: string
+  officialEnrollmentNumber?: string | null
+  importKind?: 'MATRICULA' | 'FICHA'
+  fullName: string
+  curp: string
+  sex: string | null
+  age: number | null
+  groupLabel: string
+  career: string | null
+  semesterLevel: SemesterLevel
+  previousSchool?: string | null
+  locality?: string | null
+  phone?: string | null
+  email?: string | null
+  motherTongue?: string | null
+  guardianFullName?: string | null
+  guardianPhone?: string | null
+  secondaryAverage?: number | null
+}
+
+export type EnrollmentRosterImportResult = {
+  ok: boolean
+  sourcePath: string | null
+  createdCount: number
+  updatedCount: number
+  assignedCount: number
+  createdGroupCount: number
+  skippedCount: number
+  issues: string[]
+}
+
 export type StudentAcademicMovementSummary = {
   id: string
   studentId: string
@@ -384,9 +425,27 @@ export type StudentWithdrawalInput = {
 export type StudentGradeEnrollmentInput = {
   studentId: string
   schoolCycle: string
+  schoolPeriod?: number
   semesterLevel: SemesterLevel
   toGroupId?: string | null
   reasonCode: string
+  notes?: string
+}
+
+export type StudentPeriodReinscriptionInput = {
+  studentId: string
+  targetSchoolCycle: string
+  targetPeriod: number
+  targetSemesterLevel: SemesterLevel
+  toGroupId?: string | null
+  notes?: string
+}
+
+export type StudentPeriodGraduationInput = {
+  studentId?: string
+  studentIds?: string[]
+  fromSchoolCycle: string
+  fromPeriod?: number
   notes?: string
 }
 
@@ -496,6 +555,7 @@ export type AuthLoginInput = {
 export type GroupStat = {
   groupId: string
   label: string
+  advisorName: string | null
   capacity: number
   assignedCount: number
   available: number
