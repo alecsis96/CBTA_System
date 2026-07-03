@@ -42,7 +42,6 @@ export function StudentCaptureFormPanel({
   savingEnrollmentChecklist,
   finalizingEnrollment,
   saving,
-  feedback,
   captureSectionRef,
   relationshipOptions,
   FieldComponent,
@@ -351,8 +350,6 @@ export function StudentCaptureFormPanel({
             )}
           </section>
         ) : null}
-
-        {feedback ? <p className="feedback-banner">{feedback}</p> : null}
 
         <div className="form-actions control-actions">
           {editingStudentId ? (

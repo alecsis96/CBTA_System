@@ -1168,22 +1168,26 @@ function App() {
       <div className="auth-shell">
         <section className="auth-hero">
           <div className="auth-hero-copy">
-            <p className="auth-kicker">CBTA 44 Sistema</p>
-            <h1>Operación escolar y financiera en una sola ventanilla</h1>
+            <p className="auth-kicker">CBTA 44 SISTEMA</p>
+            <h1>Plataforma Integral CBTA 44</h1>
             <p>
-              Control Escolar e Ingresos Propios comparten el mismo seguimiento para inscripción,
-              pagos, grupos y ROC institucional.
+              Centraliza la operacion escolar, administrativa y financiera del plantel en un entorno modular,
+              seguro y preparado para crecer.
             </p>
           </div>
-          <div className="auth-hero-metrics">
-            <article>
-              <strong>Control Escolar</strong>
-              <span>Captura, grupos y seguimiento documental</span>
-            </article>
-            <article>
-              <strong>Ingresos Propios</strong>
-              <span>Pagos de inscripción, historial y ROC por lote</span>
-            </article>
+          <div className="auth-platform-visual" aria-hidden="true">
+            <span className="platform-node platform-node-main">44</span>
+            <span className="platform-node platform-node-a" />
+            <span className="platform-node platform-node-b" />
+            <span className="platform-node platform-node-c" />
+            <span className="platform-line platform-line-a" />
+            <span className="platform-line platform-line-b" />
+            <span className="platform-line platform-line-c" />
+          </div>
+          <div className="auth-capability-chips">
+            {['Roles por departamento', 'Expedientes', 'Cobros', 'Reportes', 'Procesos internos', 'Modo local', 'Sincronizacion'].map((item) => (
+              <span key={item}>{item}</span>
+            ))}
           </div>
         </section>
 
@@ -1191,7 +1195,7 @@ function App() {
           <div className="auth-card-header">
             <p className="eyebrow">Acceso institucional</p>
             <h2>Iniciar sesión</h2>
-            <p>Ingresa con tu usuario asignado para continuar con la operación del plantel.</p>
+            <p>Accede con tus credenciales institucionales para continuar según tu rol y permisos asignados.</p>
           </div>
           <label className="form-field">
             <span>Usuario</span>
@@ -1351,7 +1355,7 @@ function App() {
           />
         )}
 
-        <section className="panel">
+        <section className={isRecentActivityCollapsed ? 'panel recent-activity-panel collapsed' : 'panel recent-activity-panel'}>
           <div className="section-header">
             <div>
               <p className="eyebrow">Bitacora</p>
@@ -1410,6 +1414,7 @@ export type ConfiguracionTarifasProps = {
 
 export type FloatingFeedbackToastProps = {
   message: string
+  tone?: 'success' | 'warning' | 'error' | 'info'
   onClose: () => void
 }
 

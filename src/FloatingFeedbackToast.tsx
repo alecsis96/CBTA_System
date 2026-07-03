@@ -1,25 +1,36 @@
-import { FloatingFeedbackToastProps } from './App';
-import { extractOutputFileNameFromFeedback, normalizeFeedbackMessage } from '@/lib/utils';
+import type { FloatingFeedbackToastProps } from './App'
+import { extractOutputFileNameFromFeedback, normalizeFeedbackMessage } from '@/lib/utils'
 
-export function FloatingFeedbackToast({ message, onClose }: FloatingFeedbackToastProps) {
-  const isError = /(no se pudo|error|fall[oó])/i.test(message);
-  const fileName = extractOutputFileNameFromFeedback(message);
-  const title = isError
-    ? 'Hay que revisar esta operación'
-    : fileName
-      ? 'ROC mensual generado correctamente'
-      : 'Operación registrada';
+function inferFeedbackTone(message: string, tone?: FloatingFeedbackToastProps['tone']) {
+  if (tone) return tone
+  if (/(no se pudo|error|fall[oó]|invalid|inválid|400:|500:)/i.test(message)) return 'error'
+  if (/(revisa|pendiente|faltan|advertencia|aun no|aún no)/i.test(message)) return 'warning'
+  if (/(cancelad|leyendo|importando|abierto|selecciona primero)/i.test(message)) return 'info'
+  return 'success'
+}
+
+export function FloatingFeedbackToast({ message, tone, onClose }: FloatingFeedbackToastProps) {
+  const feedbackTone = inferFeedbackTone(message, tone)
+  const fileName = extractOutputFileNameFromFeedback(message)
+  const title = feedbackTone === 'error'
+    ? 'Hay que revisar esta operacion'
+    : feedbackTone === 'warning'
+      ? 'Atencion requerida'
+      : feedbackTone === 'info'
+        ? 'Aviso'
+        : fileName
+          ? 'ROC mensual generado correctamente'
+          : 'Operacion registrada'
+  const tagLabel = feedbackTone === 'error' ? 'Error' : feedbackTone === 'warning' ? 'Aviso' : feedbackTone === 'info' ? 'Info' : 'Listo'
 
   return (
-    <article className={isError ? 'feedback-toast feedback-toast-error' : 'feedback-toast'} role="status">
+    <article className={`feedback-toast feedback-toast-${feedbackTone}`} role={feedbackTone === 'error' ? 'alert' : 'status'}>
       <div className="feedback-card-header">
         <strong>{title}</strong>
         <div className="feedback-toast-actions">
-          <span className={isError ? 'status-tag status-tag-danger' : 'status-tag'}>
-            {isError ? 'Error' : 'Listo'}
-          </span>
-          <button aria-label="Cerrar notificación" className="toast-close-button" onClick={onClose} type="button">
-            ×
+          <span className={`status-tag feedback-status-${feedbackTone}`}>{tagLabel}</span>
+          <button aria-label="Cerrar notificacion" className="toast-close-button" onClick={onClose} type="button">
+            x
           </button>
         </div>
       </div>
@@ -31,5 +42,5 @@ export function FloatingFeedbackToast({ message, onClose }: FloatingFeedbackToas
         </div>
       ) : null}
     </article>
-  );
+  )
 }

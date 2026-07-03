@@ -33,7 +33,6 @@ export function IngresosPropiosOverview({
   lifeInsuranceAmount,
   showLifeInsuranceOption,
   conceptAmounts,
-  feedback,
   isOnline,
   rocBatchMonth,
   rocBatchYear,
@@ -105,6 +104,23 @@ export function IngresosPropiosOverview({
   const monthlyReceipts = allReceipts.filter((receipt) => belongsToSelectedMonth(receipt.issuedAt))
   const studentsWithoutPayments = students.filter((student) => !cashPayments.some((payment) => payment.studentId === student.id))
   const suggestedConcepts = paymentConcepts.filter((concept) => concept.isSuggested)
+  const todayKey = new Date().toDateString()
+  const todayPayments = cashPayments.filter((payment) => new Date(payment.createdAt).toDateString() === todayKey)
+  const todayTotal = todayPayments.reduce((sum, payment) => sum + payment.totalAmount, 0)
+  const selectedStudentPayments = selectedStudent ? cashPayments.filter((payment) => payment.studentId === selectedStudent.id) : []
+  const selectedStudentPaymentsToday = selectedStudentPayments.filter((payment) => new Date(payment.createdAt).toDateString() === todayKey)
+  const recentReceipt = receipts.find((receipt) => Date.now() - new Date(receipt.issuedAt).getTime() < 1000 * 60 * 60 * 24 * 7)
+  const selectedCodes = selectedConcepts.map((concept) => concept.code)
+  const duplicateConceptCount = selectedCodes.length - new Set(selectedCodes).size
+  const selectedConceptWarnings = [
+    recentReceipt ? `ROC reciente: ${recentReceipt.rocNumber} (${new Date(recentReceipt.issuedAt).toLocaleDateString('es-MX')}).` : null,
+    selectedStudentPaymentsToday.length > 0 ? `Alumno ya tiene ${selectedStudentPaymentsToday.length} cobro(s) registrado(s) hoy.` : null,
+    includeLifeInsurance && selectedStudentPayments.some((payment) => payment.conceptLabels.some((label) => label.toLowerCase().includes('seguro'))) ? 'Seguro registrado previamente para este alumno.' : null,
+    duplicateConceptCount > 0 ? 'Hay conceptos duplicados en el resumen.' : null,
+  ].filter((warning): warning is string => Boolean(warning))
+  const latestStudentPayments = [...selectedStudentPayments]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 5)
   const totalReceiptPages = Math.max(1, Math.ceil(receipts.length / RECEIPTS_PER_PAGE))
   const paginatedReceipts = receipts.slice((receiptPage - 1) * RECEIPTS_PER_PAGE, receiptPage * RECEIPTS_PER_PAGE)
   const latestReceiptId = receipts[0]?.id ?? null
@@ -153,6 +169,11 @@ export function IngresosPropiosOverview({
     { label: 'ROC generados', value: cashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length, helper: 'Mensuales' },
     { label: 'Pendientes ROC', value: pendingPayments.length, helper: 'Por consolidar', tone: pendingPayments.length > 0 ? 'warning' : 'default' },
     { label: 'Alumnos sin cobro', value: studentsWithoutPayments.length, helper: 'En padrón' },
+    { label: 'Cobros del dia', value: todayPayments.length, helper: 'Jornada actual' },
+    { label: 'Recaudado hoy', value: formatCurrency(todayTotal), helper: 'Caja diaria' },
+    { label: 'Cobros pendientes', value: pendingPayments.length, helper: 'Sin ROC mensual', tone: pendingPayments.length > 0 ? 'warning' : 'default' },
+    // TODO: conectar cuando exista un campo de impresion/reimpresion del ROC.
+    { label: 'ROC sin imprimir', value: 0, helper: 'Pendiente de conectar' },
   ]
 
   useEffect(() => {
@@ -293,7 +314,7 @@ export function IngresosPropiosOverview({
         actions={<StatusBadge tone={isOnline ? 'success' : 'warning'}>{isOnline ? 'Online' : 'Offline'}</StatusBadge>}
       />
 
-      <SurfaceCard className="dashboard-search-panel">
+      <SurfaceCard className="dashboard-search-panel ingresos-operations-panel">
         <div className="operations-toolbar">
           <div className="segmented-tabs">
             <button className={operationsTab === 'caja' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('caja')} type="button">
@@ -317,16 +338,13 @@ export function IngresosPropiosOverview({
         </div>
       </SurfaceCard>
 
-      {feedback ? <p className="feedback-banner">{feedback}</p> : null}
-
       {operationsTab === 'caja' ? (
         <article className="cash-dashboard-grid">
           <div className="cash-column-search">
-            <SurfaceCard className="dashboard-search-panel">
+            <SurfaceCard className="dashboard-search-panel cash-compact-panel">
               <PanelSectionTitle
                 eyebrow="Caja"
                 title="Buscar alumno"
-                subtitle="Localiza al alumno por folio, nombre o CURP para iniciar el cobro."
               />
               <SearchInput
                 ref={studentSearchRef}
@@ -376,7 +394,11 @@ export function IngresosPropiosOverview({
                             <td>{highlightMatch(student.fullName, studentQuery)}</td>
                             <td>{student.semesterLevel}°</td>
                             <td>{formatVisibleGroupLabel(student.groupLabel)}</td>
-                            <td>{cashPayments.some((payment) => payment.studentId === student.id) ? 'Con cobros' : 'Sin cobro'}</td>
+                            <td>
+                              <span className={cashPayments.some((payment) => payment.studentId === student.id) ? 'status-tag success mini-status-tag' : 'status-tag warning mini-status-tag'}>
+                                {cashPayments.some((payment) => payment.studentId === student.id) ? 'Con cobros' : 'Sin cobro'}
+                              </span>
+                            </td>
                           </tr>
                         ))
                       )}
@@ -427,7 +449,6 @@ export function IngresosPropiosOverview({
               <PanelSectionTitle
                 eyebrow="Conceptos"
                 title="Claves y conceptos de cobro"
-                subtitle="Edita la cuota si hace falta y agrega las claves al resumen."
                 action={<StatusBadge>{filteredPaymentConcepts.length} claves</StatusBadge>}
               />
               <div className="cash-toolbar">
@@ -445,10 +466,6 @@ export function IngresosPropiosOverview({
                 </Field>
               </div>
 
-              <p className="table-summary compact-operational-line">
-                Selecciona las claves manualmente. La selección se limpia al cambiar de alumno.
-              </p>
-
               {showLifeInsuranceOption ? (
                 <label className="checkbox-field compact-insurance-row">
                   <input checked={includeLifeInsurance} onChange={(event) => onToggleLifeInsurance(event.target.checked)} type="checkbox" />
@@ -458,59 +475,44 @@ export function IngresosPropiosOverview({
                 </label>
               ) : null}
 
-              <div className="student-table-wrap compact-keys-wrap">
-                <table className="student-table compact-keys-table">
-                  <thead>
-                    <tr>
-                      <th>Clave</th>
-                      <th>Concepto</th>
-                      <th>Cuota</th>
-                     
-                      <th>Acción</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredPaymentConcepts.length === 0 ? (
-                      <tr>
-                        <td colSpan={5}>
-                          <p className="empty-state compact-empty-state">No hay claves que coincidan con la búsqueda actual.</p>
-                        </td>
-                      </tr>
-                    ) : null}
-                    {filteredPaymentConcepts.map((concept) => {
-                      const active = selectedConcepts.some((item) => item.code === concept.code)
-                      return (
-                        <tr className={active ? 'student-row active concept-added-row' : 'student-row'} key={concept.code}>
-                          <td>
-                            <strong>{concept.code}</strong>
-                            {concept.isSuggested ? (
-                              <div>
-                                <small>Sugerida</small>
-                              </div>
-                            ) : null}
-                          </td>
-                          <td>{concept.name}</td>
-                          <td>
-                            <input
-                              className="table-input compact-amount-input"
-                              min="0"
-                              step="0.01"
-                              type="number"
-                              value={conceptAmounts[concept.code] ?? concept.amount}
-                              onChange={(event) => onUpdateConceptAmount(concept.code, Number(event.target.value || 0))}
-                            />
-                          </td>
-                          
-                          <td>
-                            <button className={active ? 'primary-button small-button' : 'secondary-button small-button'} onClick={() => onToggleConcept(concept)} type="button">
-                              {active ? 'Quitar' : 'Agregar'}
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+              <div className="concept-selector-list compact-keys-wrap" role="list">
+                {filteredPaymentConcepts.length === 0 ? (
+                  <p className="empty-state compact-empty-state">No hay claves que coincidan con la busqueda actual.</p>
+                ) : null}
+                {filteredPaymentConcepts.map((concept) => {
+                  const active = selectedConcepts.some((item) => item.code === concept.code)
+                  return (
+                    <article className={active ? 'concept-selector-item selected' : 'concept-selector-item'} key={concept.code} role="listitem">
+                      <div className="concept-selector-main">
+                        <div className="concept-selector-code">
+                          <strong>{concept.code}</strong>
+                          {concept.isSuggested ? <span>Sugerida</span> : null}
+                        </div>
+                        <p>{concept.name}</p>
+                      </div>
+                      <div className="concept-selector-controls">
+                        <label>
+                          <span>Cuota</span>
+                          <input
+                            className="table-input compact-amount-input"
+                            min="0"
+                            step="0.01"
+                            type="number"
+                            value={conceptAmounts[concept.code] ?? concept.amount}
+                            onChange={(event) => onUpdateConceptAmount(concept.code, Number(event.target.value || 0))}
+                          />
+                        </label>
+                        <button
+                          className={active ? 'secondary-button small-button concept-remove-button' : 'primary-button small-button concept-add-button'}
+                          onClick={() => onToggleConcept(concept)}
+                          type="button"
+                        >
+                          {active ? 'Quitar' : 'Agregar'}
+                        </button>
+                      </div>
+                    </article>
+                  )
+                })}
               </div>
             </SurfaceCard>
           </div>
@@ -545,6 +547,23 @@ export function IngresosPropiosOverview({
                         </div>
                       ))}
                     </div>
+                    <div className="cash-cart-lines">
+                      <div>
+                        <span>Conceptos</span>
+                        <strong>{selectedConceptLabels.length}</strong>
+                      </div>
+                      <div>
+                        <span>Subtotal</span>
+                        <strong>{formatCurrency(total)}</strong>
+                      </div>
+                    </div>
+                    {selectedConceptWarnings.length > 0 ? (
+                      <div className="cash-warning-list" role="status">
+                        {selectedConceptWarnings.map((warning) => (
+                          <span key={warning}>{warning}</span>
+                        ))}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <DashboardEmptyState
@@ -582,13 +601,31 @@ export function IngresosPropiosOverview({
               </SurfaceCard>
 
               <details className="receipt-history receipt-history-panel">
-                <summary>Historial del alumno ({selectedStudent ? receipts.length : 0})</summary>
+                <summary>Historial del alumno ({selectedStudent ? latestStudentPayments.length + receipts.length : 0})</summary>
                 {!selectedStudent ? (
                   <p className="empty-state">Selecciona un alumno para consultar su historial.</p>
-                ) : receipts.length === 0 ? (
+                ) : latestStudentPayments.length === 0 && receipts.length === 0 ? (
                   <p className="empty-state">Este alumno aún no tiene ROC registrados.</p>
                 ) : (
-                  paginatedReceipts.map((receipt) => (
+                  <>
+                    {latestStudentPayments.length > 0 ? (
+                      <div className="student-payment-history">
+                        <span className="detail-label">Ultimos pagos</span>
+                        {latestStudentPayments.map((payment) => (
+                          <article key={payment.id}>
+                            <div>
+                              <strong>{new Date(payment.createdAt).toLocaleString('es-MX')}</strong>
+                              <span>{payment.conceptLabels.join(' | ')}</span>
+                            </div>
+                            <div>
+                              <strong>{formatCurrency(payment.totalAmount)}</strong>
+                              <span>{payment.status === 'ROC_GENERADO' ? 'Con ROC' : 'Pendiente ROC'}</span>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : null}
+                    {paginatedReceipts.map((receipt) => (
                     <article className="history-card compact" key={receipt.id}>
                       <strong>{receipt.rocNumber}</strong>
                       <span>{new Date(receipt.issuedAt).toLocaleString('es-MX')}</span>
@@ -620,7 +657,8 @@ export function IngresosPropiosOverview({
                         </div>
                       </div>
                     </article>
-                  ))
+                    ))}
+                  </>
                 )}
               </details>
             </div>

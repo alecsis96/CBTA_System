@@ -20,22 +20,12 @@ export function StudentTable({
   handleStartEditStudent,
   formatPreferredEnrollment,
 }: StudentTableProps) {
-  function documentationClassName(status: string) {
-    return status === 'COMPLETA' ? 'status-tag success' : 'status-tag warning'
-  }
-
-  function enrollmentClassName(status: string) {
-    if (status === 'Inscrito' || status === 'Asignado a grupo') return 'status-tag success'
-    if (status === 'Baja' || status === 'Baja definitiva' || status === 'Egresado') return 'status-tag danger'
-    return 'status-tag warning'
-  }
-
   return (
-    <div className="student-table-wrap">
+    <div className="student-table-wrap control-directory-wrap">
       <table className="student-table control-directory-table">
         <thead>
           <tr>
-            <th>Matrícula</th>
+            <th>Matricula</th>
             <th>Alumno</th>
             <th>Tutor</th>
             <th>Semestre</th>
@@ -49,16 +39,30 @@ export function StudentTable({
           {paginatedStudents.map((student) => {
             const active = editingStudentId === student.id
             const expanded = expandedStudentId === student.id
-            const guardianName = student.guardianFullName?.trim().length ? student.guardianFullName : 'Sin tutor capturado'
-            const guardianPhone = student.guardianPhone?.trim().length ? student.guardianPhone : 'Sin teléfono de tutor'
-            const studentPhone = student.phone?.trim().length ? student.phone : 'Sin teléfono'
+            const hasGuardian = Boolean(student.guardianFullName?.trim())
+            const hasGuardianPhone = Boolean(student.guardianPhone?.trim())
+            const hasStudentPhone = Boolean(student.phone?.trim())
+            const hasAdvisor = Boolean(student.groupAdvisorName?.trim())
+            const hasPermission = Boolean(student.activePermissionSummary?.trim())
+            const documentationPending = student.documentationStatus !== 'COMPLETA'
+            const guardianName = hasGuardian ? student.guardianFullName : 'Sin tutor capturado'
+            const guardianPhone = hasGuardianPhone ? student.guardianPhone : 'Sin telefono de tutor'
+            const studentPhone = hasStudentPhone ? student.phone : 'Sin telefono'
             const visibleGroup = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel)
             const careerCode = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera'
+            const criticalBadges = [
+              documentationPending ? 'Documentos pendientes' : null,
+              !hasAdvisor ? 'Sin asesor' : null,
+              !hasPermission ? 'Sin permiso activo' : null,
+              !hasGuardian ? 'Sin tutor' : null,
+              (!hasStudentPhone && !hasGuardianPhone) ? 'Sin telefono' : null,
+            ].filter((item): item is string => Boolean(item)).slice(0, 3)
 
             return (
               <Fragment key={student.id}>
                 <tr
-                  className={active ? 'student-row active' : 'student-row'}
+                  aria-expanded={expanded}
+                  className={expanded ? 'student-row expanded' : active ? 'student-row active' : 'student-row'}
                   onClick={() => setExpandedStudentId(expanded ? null : student.id)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
@@ -82,7 +86,7 @@ export function StudentTable({
                   </td>
                   <td className="student-actions-cell">
                     <button
-                      className="secondary-button small-button"
+                      className="secondary-button mini-button"
                       onClick={(event) => {
                         event.stopPropagation()
                         event.preventDefault()
@@ -91,50 +95,43 @@ export function StudentTable({
                       }}
                       type="button"
                     >
-                      Revisar
+                      Editar
+                    </button>
+                    <button
+                      className="tertiary-button mini-button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        event.preventDefault()
+                        setExpandedStudentId(expanded ? null : student.id)
+                      }}
+                      type="button"
+                    >
+                      {expanded ? 'Cerrar' : 'Mas'}
                     </button>
                   </td>
                 </tr>
                 {expanded ? (
                   <tr className="student-detail-row">
                     <td colSpan={8}>
-                      <div className="student-detail-grid">
-                        <div>
-                          <span className="detail-label">Documentación</span>
-                          <strong><span className={documentationClassName(student.documentationStatus)}>{student.documentationStatus}</span></strong>
+                      <div className="student-detail-panel">
+                        <div className="student-detail-status-row">
+                          {criticalBadges.map((badge) => (
+                            <span className={badge === 'Sin permiso activo' ? 'status-tag' : 'status-tag warning'} key={badge}>{badge}</span>
+                          ))}
                         </div>
-                        <div>
-                          <span className="detail-label">Inscripción</span>
-                          <strong><span className={enrollmentClassName(student.statusLabel)}>{student.statusLabel}</span></strong>
+
+                        <div className="student-detail-summary">
+                          <p>
+                            <strong>CURP:</strong> {student.curp} · <strong>Ciclo:</strong> {student.schoolCycle}/{student.schoolPeriod} · <strong>Grupo:</strong> {student.semesterLevel}° {visibleGroup} · <strong>Asesor:</strong> {student.groupAdvisorName ?? 'Pendiente'}
+                          </p>
+                          <p>
+                            <strong>Tutor:</strong> {guardianName} · <strong>Alumno:</strong> {studentPhone} · <strong>Domicilio:</strong> {student.address ?? 'Sin domicilio'} · <strong>Permiso:</strong> {student.activePermissionSummary ?? 'Sin permiso activo'}
+                          </p>
                         </div>
-                        <div>
-                          <span className="detail-label">CURP</span>
-                          <strong>{student.curp}</strong>
-                        </div>
-                        <div>
-                          <span className="detail-label">Teléfono alumno</span>
-                          <strong>{studentPhone}</strong>
-                        </div>
-                        <div>
-                          <span className="detail-label">Teléfono tutor</span>
-                          <strong>{guardianPhone}</strong>
-                        </div>
-                        <div className="student-detail-wide">
-                          <span className="detail-label">Domicilio</span>
-                          <strong>{student.address ?? 'Sin domicilio'}</strong>
-                        </div>
-                        <div>
-                          <span className="detail-label">Ciclo / periodo</span>
-                          <strong>{student.schoolCycle}/{student.schoolPeriod}</strong>
-                        </div>
-                       
-                        <div>
-                          <span className="detail-label">Asesor</span>
-                          <strong>{student.groupAdvisorName ?? 'Pendiente'}</strong>
-                        </div>
-                        <div>
-                          <span className="detail-label">Permiso activo</span>
-                          <strong>{student.activePermissionSummary ?? 'Sin permiso activo'}</strong>
+
+                        <div className="student-detail-actions">
+                          <button className="secondary-button mini-button" onClick={() => void handleStartEditStudent(student.id)} type="button">Editar alumno</button>
+                          <button className="secondary-button mini-button" disabled title="TODO: conectar vista de expediente" type="button">Ver expediente</button>
                         </div>
                       </div>
                     </td>

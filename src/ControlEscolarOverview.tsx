@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { ControlEscolarProps } from './App';
-import { CONTROL_STUDENTS_PER_PAGE, getOutputFileName, formatPreferredEnrollment, formatVisibleGroupLabel, relationshipOptions, combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel } from '@/lib/utils';
+import { CONTROL_STUDENTS_PER_PAGE, getOutputFileName, formatPreferredEnrollment, formatVisibleGroupLabel, relationshipOptions, combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel, getCareerCodeFromGroupLabel } from '@/lib/utils';
 import { pickRosterWorkbookFile, parseRosterWorkbook } from '@/lib/roster-import';
 import { pickEnrollmentWorkbookFile, parseEnrollmentWorkbook } from '@/lib/enrollment-import';
 import { groupSexBalanceLabel, groupBandBalanceLabel } from '@/lib/group-stats';
@@ -11,6 +11,7 @@ import { AdmissionCaptureTable, PreRegistrationInboxPanel } from './components/c
 import { StudentCaptureFormPanel } from './components/control-escolar/student-capture-form-panel';
 import { type DashboardMetric, ModuleHero, ModuleBarCompact, DashboardEmptyState } from './components/dashboard-kit';
 import { StudentTable } from './components/StudentTable';
+import { FloatingFeedbackToast } from './FloatingFeedbackToast';
 import type { GroupStat, GroupPreviewRow, StudentRequirementChecklist, StudentSummary, AdmissionSummary, SaveStudentRequirementChecklistInput } from './types/domain';
 
 const TARGET_SCHOOL_CYCLE = '2026-2027';
@@ -37,6 +38,10 @@ export function ControlEscolarOverview({
   const [semesterFilter, setSemesterFilter] = useState<'all' | '1' | '2' | '3' | '4' | '5' | '6'>('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [documentationFilter, setDocumentationFilter] = useState('all');
+  const [quickOperationalFilter, setQuickOperationalFilter] = useState('all');
+  const [groupFilter, setGroupFilter] = useState('all');
+  const [careerFilter, setCareerFilter] = useState('all');
+  const [cycleFilter, setCycleFilter] = useState('all');
   const [studentPage, setStudentPage] = useState(1);
   const [expandedStudentId, setExpandedStudentId] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
@@ -63,6 +68,7 @@ export function ControlEscolarOverview({
   const [isImportingEnrollmentRoster, setIsImportingEnrollmentRoster] = useState(false);
   const [preparingEnrollmentStudentId, setPreparingEnrollmentStudentId] = useState<string | null>(null);
   const [advisorDrafts, setAdvisorDrafts] = useState<Record<string, string>>({});
+  const [editingAdvisorGroupId, setEditingAdvisorGroupId] = useState<string | null>(null);
   const [savingAdvisorGroup, setSavingAdvisorGroup] = useState<string | null>(null);
   const [isChecklistModalOpen, setIsChecklistModalOpen] = useState(false);
   const [inscriptionQuery, setInscriptionQuery] = useState('');
@@ -71,6 +77,10 @@ export function ControlEscolarOverview({
     () => Array.from(new Set(students.map((student) => student.documentationStatus).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
     [students]
   );
+  function handleUserChangeOperationsTab(value: typeof operationsTab) {
+    setChecklistFeedback(null);
+    setOperationsTab(value);
+  }
   const normalizedStudentQuery = studentQuery.trim().toLowerCase();
   const formalStudents = students.filter((student) => student.enrollmentStatus !== 'FICHA_ENTREGADA' && student.enrollmentStatus !== 'EGRESADO');
   const fichaStudents = students.filter((student) => student.enrollmentStatus === 'FICHA_ENTREGADA');
@@ -93,8 +103,24 @@ export function ControlEscolarOverview({
     const matchesSemester = semesterFilter === 'all' || String(student.semesterLevel) === semesterFilter;
     const matchesStatus = statusFilter === 'all' || student.statusLabel === statusFilter;
     const matchesDocumentation = documentationFilter === 'all' || student.documentationStatus === documentationFilter;
+    const studentGroup = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel);
+    const studentCareer = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera';
+    const matchesGroup = groupFilter === 'all' || studentGroup === groupFilter;
+    const matchesCareer = careerFilter === 'all' || studentCareer === careerFilter;
+    const matchesCycle = cycleFilter === 'all' || student.schoolCycle === cycleFilter;
+    const matchesQuickFilter =
+      quickOperationalFilter === 'all' ||
+      (quickOperationalFilter === 'docs-pending' && student.documentationStatus !== 'COMPLETA') ||
+      (quickOperationalFilter === 'missing-tutor' && !student.guardianFullName?.trim()) ||
+      (quickOperationalFilter === 'missing-phone' && !student.phone?.trim() && !student.guardianPhone?.trim()) ||
+      (quickOperationalFilter === 'missing-advisor' && !student.groupAdvisorName?.trim()) ||
+      (quickOperationalFilter === 'without-group' && !student.groupLabel) ||
+      (quickOperationalFilter === 'with-ficha' && student.enrollmentStatus === 'FICHA_ENTREGADA') ||
+      (quickOperationalFilter === 'pending-inscription' && (student.enrollmentStatus === 'FICHA_ENTREGADA' || targetSemesterForReinscription(student) !== null)) ||
+      (quickOperationalFilter === 'reinscribed' && student.schoolCycle === TARGET_SCHOOL_CYCLE && student.schoolPeriod === TARGET_SCHOOL_PERIOD && [3, 5].includes(student.semesterLevel)) ||
+      (quickOperationalFilter === 'active-permission' && Boolean(student.activePermissionSummary?.trim()));
 
-    return matchesQuery && matchesSemester && matchesStatus && matchesDocumentation;
+    return matchesQuery && matchesSemester && matchesStatus && matchesDocumentation && matchesGroup && matchesCareer && matchesCycle && matchesQuickFilter;
   };
 
   const filteredStudents = formalStudents.filter((student) => matchesDirectoryFilters(student, normalizedStudentQuery));
@@ -106,7 +132,7 @@ export function ControlEscolarOverview({
 
   useEffect(() => {
     setStudentPage(1);
-  }, [normalizedStudentQuery, semesterFilter, statusFilter, documentationFilter]);
+  }, [normalizedStudentQuery, semesterFilter, statusFilter, documentationFilter, quickOperationalFilter, groupFilter, careerFilter, cycleFilter]);
 
   useEffect(() => {
     if (studentPage > totalStudentPages) {
@@ -130,6 +156,12 @@ export function ControlEscolarOverview({
       onClearNewlyCreatedStudent();
     }
   }, [newlyCreatedStudentId, onClearNewlyCreatedStudent]);
+
+  useEffect(() => {
+    if (!checklistFeedback) return;
+    const timer = window.setTimeout(() => setChecklistFeedback(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [checklistFeedback]);
 
   const selectedPreRegistration = preRegistrations.find((item) => item.id === selectedPreRegistrationId) ?? preRegistrations[0] ?? null;
 
@@ -183,7 +215,7 @@ export function ControlEscolarOverview({
 
   useEffect(() => {
     setInscriptionPage(1);
-  }, [normalizedInscriptionQuery, semesterFilter, statusFilter, documentationFilter]);
+  }, [normalizedInscriptionQuery, semesterFilter, statusFilter, documentationFilter, quickOperationalFilter, groupFilter, careerFilter, cycleFilter]);
 
   useEffect(() => {
     if (inscriptionPage > totalInscriptionPages) {
@@ -417,6 +449,7 @@ export function ControlEscolarOverview({
     try {
       await groupsApi.updateAdvisor({ groupId, advisorName: advisorDrafts[groupId] ?? '' });
       setChecklistFeedback('Asesor de grupo actualizado.');
+      setEditingAdvisorGroupId(null);
       await refreshGroupStats();
       await onReloadData();
     } catch (error) {
@@ -562,7 +595,14 @@ export function ControlEscolarOverview({
       : operationsTab === 'inscripcion'
         ? 'Buscar por matrícula, nombre o CURP'
         : 'Buscar por matrícula, nombre o CURP';
-  const activeFilterCount = Number(semesterFilter !== 'all') + Number(statusFilter !== 'all') + Number(documentationFilter !== 'all');
+  const activeFilterCount =
+    Number(quickOperationalFilter !== 'all') +
+    Number(semesterFilter !== 'all') +
+    Number(groupFilter !== 'all') +
+    Number(careerFilter !== 'all') +
+    Number(cycleFilter !== 'all') +
+    Number(statusFilter !== 'all') +
+    Number(documentationFilter !== 'all');
 
   function handleToolbarSearchChange(value: string) {
     if (operationsTab === 'captura') {
@@ -579,6 +619,47 @@ export function ControlEscolarOverview({
   const docsPendingCount = formalStudents.filter((student) => student.documentationStatus !== 'COMPLETA').length;
   const withoutGroupCount = formalStudents.filter((student) => !student.groupLabel).length;
   const inscriptionPendingCount = fichaStudents.length + pendingReinscriptionStudents.length;
+  const filterSourceStudents = operationsTab === 'inscripcion' ? [...fichaStudents, ...pendingReinscriptionStudents, ...pendingGraduationStudents] : students;
+  const quickFilterOptions = [
+    { value: 'all', label: 'Todos', count: filterSourceStudents.length },
+    { value: 'docs-pending', label: 'Docs pendientes', count: filterSourceStudents.filter((student) => student.documentationStatus !== 'COMPLETA').length },
+    { value: 'missing-tutor', label: 'Sin tutor', count: filterSourceStudents.filter((student) => !student.guardianFullName?.trim()).length },
+    { value: 'missing-phone', label: 'Sin telefono', count: filterSourceStudents.filter((student) => !student.phone?.trim() && !student.guardianPhone?.trim()).length },
+    { value: 'missing-advisor', label: 'Sin asesor', count: filterSourceStudents.filter((student) => !student.groupAdvisorName?.trim()).length },
+    { value: 'without-group', label: 'Sin grupo', count: filterSourceStudents.filter((student) => !student.groupLabel).length },
+    { value: 'with-ficha', label: 'Con ficha', count: filterSourceStudents.filter((student) => student.enrollmentStatus === 'FICHA_ENTREGADA').length },
+    { value: 'pending-inscription', label: 'Pendientes inscripcion', count: filterSourceStudents.filter((student) => student.enrollmentStatus === 'FICHA_ENTREGADA' || targetSemesterForReinscription(student) !== null).length },
+    { value: 'reinscribed', label: 'Reinscritos', count: filterSourceStudents.filter((student) => student.schoolCycle === TARGET_SCHOOL_CYCLE && student.schoolPeriod === TARGET_SCHOOL_PERIOD && [3, 5].includes(student.semesterLevel)).length },
+    { value: 'active-permission', label: 'Permiso activo', count: filterSourceStudents.filter((student) => Boolean(student.activePermissionSummary?.trim())).length },
+  ];
+  const groupFilterOptions = Array.from(
+    filterSourceStudents.reduce((map, student) => {
+      const value = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel);
+      map.set(value, (map.get(value) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>()),
+  ).map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value));
+  const careerFilterOptions = Array.from(
+    filterSourceStudents.reduce((map, student) => {
+      const value = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera';
+      map.set(value, (map.get(value) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>()),
+  ).map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value));
+  const cycleFilterOptions = Array.from(
+    filterSourceStudents.reduce((map, student) => {
+      map.set(student.schoolCycle, (map.get(student.schoolCycle) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>()),
+  ).map(([value, count]) => ({ value, count })).sort((left, right) => right.value.localeCompare(left.value));
+  const hasToolbarFilters =
+    quickOperationalFilter !== 'all' ||
+    semesterFilter !== 'all' ||
+    groupFilter !== 'all' ||
+    careerFilter !== 'all' ||
+    cycleFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    documentationFilter !== 'all';
   const inscriptionMetrics = [
     { label: `Inscritos ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}`, value: targetPeriodStudents.length, helper: 'Alumnos activos' },
     { label: 'Faltantes', value: inscriptionPendingCount, helper: 'Por inscribir o reinscribir', tone: inscriptionPendingCount > 0 ? 'warning' : 'default' },
@@ -591,6 +672,15 @@ export function ControlEscolarOverview({
     count: formalStudents.filter((student) => student.semesterLevel === semester).length,
   }));
   const activeSemesterStats = semesterStats.filter((item) => item.count > 0);
+  const targetReinscribedCount = targetPeriodStudents.filter((student) => [3, 5].includes(student.semesterLevel)).length;
+  const statisticsSummaryMetrics = [
+    { label: 'Total alumnos', value: formalStudents.length, helper: 'Inscritos formales' },
+    ...activeSemesterStats.map((item) => ({ label: `${item.semester} semestre`, value: item.count, helper: 'Alumnos' })),
+    { label: 'Con ficha', value: fichaStudents.length, helper: 'Nuevo ingreso' },
+    { label: 'Pendientes inscripción', value: inscriptionPendingCount, helper: 'Fichas y reinscripción', tone: inscriptionPendingCount > 0 ? 'warning' : undefined },
+    { label: 'Reinscritos', value: targetReinscribedCount, helper: `${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}` },
+    { label: 'Docs pendientes', value: docsPendingCount, helper: 'Por revisar', tone: docsPendingCount > 0 ? 'warning' : undefined },
+  ];
   const fichaStatsByGroup = Array.from(
     fichaStudents.reduce((map, student) => {
       const key = student.groupLabel ?? 'Sin grupo';
@@ -638,13 +728,20 @@ export function ControlEscolarOverview({
   ];
   const controlMetrics: DashboardMetric[] = [
     { label: 'Total plantel', value: formalStudents.length, helper: 'Alumnos inscritos' },
-    { label: 'Grupos', value: groupCount, helper: 'Con alumnos' },
+    { label: 'Grupos con alumnos', value: groupCount, helper: 'Activos' },
+    { label: 'Con ficha', value: fichaStudents.length, helper: 'Nuevo ingreso' },
+    { label: 'Pendientes inscripcion', value: inscriptionPendingCount, helper: 'Inscribir/reinscribir', tone: inscriptionPendingCount > 0 ? 'warning' : 'default' },
+    { label: 'Reinscritos', value: targetReinscribedCount, helper: `${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}` },
+    { label: 'Permisos activos', value: students.filter((student) => Boolean(student.activePermissionSummary)).length, helper: 'Secretaria' },
     { label: 'Docs pendientes', value: docsPendingCount, helper: 'Requieren revisión' },
     { label: 'Sin grupo', value: withoutGroupCount, helper: 'Ajuste académico', tone: withoutGroupCount > 0 ? 'warning' : 'default' },
   ];
 
   return (
     <section className="module-dashboard">
+      {checklistFeedback ? (
+        <FloatingFeedbackToast message={checklistFeedback} onClose={() => setChecklistFeedback(null)} />
+      ) : null}
       <ModuleBarCompact
         eyebrow="Control Escolar"
         title="Padrón y expedientes"
@@ -653,7 +750,7 @@ export function ControlEscolarOverview({
         <div className="dashboard-module-main">
           <ControlEscolarToolbar
             operationsTab={operationsTab}
-            setOperationsTab={setOperationsTab}
+            setOperationsTab={handleUserChangeOperationsTab}
             setCaptureTab={(nextTab) => {
               if (nextTab === 'formulario') {
                 setStudentFormMode('captura');
@@ -666,6 +763,28 @@ export function ControlEscolarOverview({
             showFilters={showFilters}
             setShowFilters={setShowFilters}
             activeFilterCount={activeFilterCount}
+            quickOperationalFilter={quickOperationalFilter}
+            setQuickOperationalFilter={setQuickOperationalFilter}
+            quickFilterOptions={quickFilterOptions}
+            groupFilter={groupFilter}
+            setGroupFilter={setGroupFilter}
+            groupFilterOptions={groupFilterOptions}
+            careerFilter={careerFilter}
+            setCareerFilter={setCareerFilter}
+            careerFilterOptions={careerFilterOptions}
+            cycleFilter={cycleFilter}
+            setCycleFilter={setCycleFilter}
+            cycleFilterOptions={cycleFilterOptions}
+            hasToolbarFilters={hasToolbarFilters}
+            onClearToolbarFilters={() => {
+              setQuickOperationalFilter('all');
+              setSemesterFilter('all');
+              setGroupFilter('all');
+              setCareerFilter('all');
+              setCycleFilter('all');
+              setStatusFilter('all');
+              setDocumentationFilter('all');
+            }}
             form={form}
             onUpdateField={onUpdateField}
             semesterFilter={semesterFilter}
@@ -678,7 +797,6 @@ export function ControlEscolarOverview({
             isImportingEnrollmentRoster={isImportingEnrollmentRoster}
             onImportEnrollmentRoster={() => void handleImportEnrollmentRoster()} />
 
-          {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
           {importIssues.length > 0 ? (
             <div className="feedback-banner">
               <strong>Avisos de importacion</strong>
@@ -773,7 +891,6 @@ export function ControlEscolarOverview({
                 <button className="secondary-button small-button" hidden={academicMovementTab !== 'movimientos'} onClick={() => void handlePrintAssignedRoster()} type="button">Imprimir listado</button>
               </div>
               <p className="table-summary" hidden={academicMovementTab !== 'movimientos'}>La importación acepta el Excel exportado por este listado o cualquier archivo con columnas Grupo y CURP o folio interno.</p>
-              {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
               {isPreviewStats && academicMovementTab === 'asignacion' ? <p className="table-summary">Previsualización calculada sin guardar cambios.</p> : null}
               <div className="student-table-wrap" hidden={academicMovementTab !== 'asignacion'}>
                 <table className="student-table"><thead><tr><th>Grupo</th><th>Asignados</th><th>Cupo</th><th>Alto</th><th>Medio</th><th>Bajo</th><th>H</th><th>M</th><th>Balance sexo</th><th>Balance promedio</th></tr></thead><tbody>
@@ -919,24 +1036,24 @@ export function ControlEscolarOverview({
                 <span className="status-tag">{formalStudents.length} alumnos</span>
               </div>
 
-              <div className="metric-strip">
-                {activeSemesterStats.length === 0 ? (
+              <div className="metric-strip statistics-metric-strip">
+                {statisticsSummaryMetrics.length === 0 ? (
                   <div className="metric-chip">
                     <span className="metric-chip-label">Sin datos</span>
                     <strong className="metric-chip-value">0</strong>
                     <span className="metric-chip-helper">Alumnos</span>
                   </div>
-                ) : activeSemesterStats.map((item) => (
-                  <div className="metric-chip" key={item.semester}>
-                    <span className="metric-chip-label">{item.semester} semestre</span>
-                    <strong className="metric-chip-value">{item.count}</strong>
-                    <span className="metric-chip-helper">Alumnos</span>
+                ) : statisticsSummaryMetrics.map((item) => (
+                  <div className={item.tone === 'warning' ? 'metric-chip warning' : 'metric-chip'} key={item.label}>
+                    <span className="metric-chip-label">{item.label}</span>
+                    <strong className="metric-chip-value">{item.value}</strong>
+                    <span className="metric-chip-helper">{item.helper}</span>
                   </div>
                 ))}
               </div>
 
-              <div className="student-table-wrap">
-                <table className="student-table">
+              <div className="student-table-wrap statistics-table-wrap">
+                <table className="student-table statistics-table">
                   <thead>
                     <tr>
                       <th>Carrera</th>
@@ -957,20 +1074,53 @@ export function ControlEscolarOverview({
                         <td>{group.total}</td>
                         <td>
                           {group.groupId ? (
-                            <div className="button-row">
-                              <input
-                                value={advisorDrafts[group.groupId] ?? group.advisor}
-                                onChange={(event) => setAdvisorDrafts((current) => ({ ...current, [group.groupId]: event.target.value }))}
-                              />
-                              <button
-                                className="secondary-button small-button"
-                                disabled={savingAdvisorGroup === group.groupId}
-                                onClick={() => void handleSaveAdvisor(group.groupId)}
-                                type="button"
-                              >
-                                {savingAdvisorGroup === group.groupId ? 'Guardando...' : 'Guardar'}
-                              </button>
-                            </div>
+                            editingAdvisorGroupId === group.groupId ? (
+                              <div className="advisor-edit-row">
+                                <input
+                                  className="advisor-input"
+                                  value={advisorDrafts[group.groupId] ?? group.advisor}
+                                  onChange={(event) => setAdvisorDrafts((current) => ({ ...current, [group.groupId]: event.target.value }))}
+                                  autoFocus
+                                />
+                                <button
+                                  className="secondary-button mini-button"
+                                  disabled={savingAdvisorGroup === group.groupId}
+                                  onClick={() => void handleSaveAdvisor(group.groupId)}
+                                  type="button"
+                                >
+                                  {savingAdvisorGroup === group.groupId ? '...' : 'Guardar'}
+                                </button>
+                                <button
+                                  className="tertiary-button mini-button"
+                                  disabled={savingAdvisorGroup === group.groupId}
+                                  onClick={() => {
+                                    setAdvisorDrafts((current) => {
+                                      const next = { ...current };
+                                      delete next[group.groupId];
+                                      return next;
+                                    });
+                                    setEditingAdvisorGroupId(null);
+                                  }}
+                                  type="button"
+                                >
+                                  Cancelar
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="advisor-read-row">
+                                <span className="advisor-name">{group.advisor}</span>
+                                <button
+                                  className="tertiary-button mini-button"
+                                  onClick={() => {
+                                    setAdvisorDrafts((current) => ({ ...current, [group.groupId]: group.advisor }));
+                                    setEditingAdvisorGroupId(group.groupId);
+                                  }}
+                                  type="button"
+                                >
+                                  Editar
+                                </button>
+                              </div>
+                            )
                           ) : group.advisor}
                         </td>
                         <td>{group.schoolCycle}</td>
@@ -1030,7 +1180,6 @@ export function ControlEscolarOverview({
                   </div>
                 ))}
               </div>
-              {checklistFeedback ? <p className="feedback-banner">{checklistFeedback}</p> : null}
               <div className="student-table-wrap">
                 <table className="student-table table-inscripcion-ce">
                   <thead>
@@ -1127,7 +1276,6 @@ export function ControlEscolarOverview({
                 <div>
                   <p className="eyebrow">Control Escolar</p>
                   <h2 className="compact-header">Alumnos filtrados</h2>
-                  <p className="compact-operational-line">La lista queda al frente para buscar, validar y abrir la ficha del alumno con menos rodeos.</p>
                 </div>
                 <span className="status-tag">{filteredStudents.length} resultados</span>
               </div>
