@@ -6,6 +6,7 @@ export type SyncOperationType =
   | 'CASH_PAYMENT_CREATE'
   | 'CONCEPT_TARIFF_UPDATE'
   | 'CONCEPT_SUGGESTED_UPDATE'
+  | 'ENROLLMENT_ROSTER_IMPORT'
 
 export type SyncOperation = {
   id: string
@@ -42,6 +43,7 @@ export function countPendingSyncOpsByType() {
     CASH_PAYMENT_CREATE: 0,
     CONCEPT_TARIFF_UPDATE: 0,
     CONCEPT_SUGGESTED_UPDATE: 0,
+    ENROLLMENT_ROSTER_IMPORT: 0,
   }
 
   for (const operation of listPendingSyncOps()) {

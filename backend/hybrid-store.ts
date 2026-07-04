@@ -15,6 +15,8 @@ import type {
   GroupRosterImportResult,
   GroupRosterImportRow,
   GroupStat,
+  EnrollmentRosterImportResult,
+  EnrollmentRosterImportRow,
   RocCancelInput,
   RocConfigSummary,
   RocConfigUpdateInput,
@@ -950,6 +952,50 @@ function normalizeImportedGroupLabel(value: string) {
   return normalized
 }
 
+function splitImportedFullName(fullName: string) {
+  const parts = fullName.trim().replace(/\s+/g, ' ').split(' ')
+  if (parts.length <= 1) {
+    return { firstName: fullName.trim(), paternalLastName: 'SIN APELLIDO', maternalLastName: 'SIN APELLIDO' }
+  }
+
+  if (parts.length === 2) {
+    return { firstName: parts[1], paternalLastName: parts[0], maternalLastName: 'SIN APELLIDO' }
+  }
+
+  return {
+    paternalLastName: parts[0],
+    maternalLastName: parts[1],
+    firstName: parts.slice(2).join(' '),
+  }
+}
+
+function normalizeImportedSex(value: string | null | undefined) {
+  const normalized = value?.trim().toUpperCase()
+  if (normalized === 'M') return 'MUJER'
+  if (normalized === 'H') return 'HOMBRE'
+  return normalized || null
+}
+
+async function ensureStudentRequirementStatuses(
+  tx: Pick<Prisma.TransactionClient, 'enrollmentRequirement' | 'studentRequirementStatus'>,
+  studentId: string,
+) {
+  const requirements = await tx.enrollmentRequirement.findMany({
+    where: { isActive: true },
+    select: { id: true },
+  })
+
+  await Promise.all(
+    requirements.map((requirement) =>
+      tx.studentRequirementStatus.upsert({
+        where: { studentId_requirementId: { studentId, requirementId: requirement.id } },
+        update: {},
+        create: { studentId, requirementId: requirement.id },
+      }),
+    ),
+  )
+}
+
 function extractEnrollmentSequenceKey(value: string | null | undefined) {
   const normalized = (value ?? '').trim()
   if (!normalized) return null
@@ -1348,6 +1394,201 @@ export async function importAssignedRosterRows(schoolCycle: string, rows: GroupR
     createdGroupCount: groupKeys.filter((key) => !existingGroupKeys.has(key)).length,
     skippedCount: 0,
     unmatchedCount,
+    issues: issues.slice(0, 12),
+  }
+}
+
+export async function importEnrollmentRosterRows(schoolCycle: string, rows: EnrollmentRosterImportRow[], sourcePath: string | null | undefined, actor: RemoteActor): Promise<EnrollmentRosterImportResult> {
+  const normalizedCycle = schoolCycle.trim()
+  const issues: string[] = []
+  const dedupedRows = new Map<string, EnrollmentRosterImportRow>()
+
+  for (const row of rows) {
+    const key = row.curp.toUpperCase()
+    if (dedupedRows.has(key)) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: CURP repetida; se conserva la ultima aparicion.`)
+    }
+    dedupedRows.set(key, {
+      ...row,
+      curp: key,
+      enrollmentNumber: row.enrollmentNumber.trim(),
+      groupLabel: row.groupLabel.trim().toUpperCase(),
+    })
+  }
+
+  const uniqueRows = Array.from(dedupedRows.values())
+  const groupKeys = Array.from(new Set(uniqueRows.map((row) => `${row.semesterLevel}:${row.groupLabel}`)))
+  const groupFilters = groupKeys.map((key) => {
+    const [semesterLevelText, label] = key.split(':')
+    return { semesterLevel: normalizeSemesterLevel(Number(semesterLevelText)), label }
+  })
+
+  const existingGroups = groupFilters.length > 0
+    ? await prisma.intakeGroup.findMany({
+      where: { schoolCycle: normalizedCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { label: true, semesterLevel: true },
+    })
+    : []
+  const existingGroupKeys = new Set(existingGroups.map((group) => `${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`))
+
+  if (groupFilters.length > 0) {
+    await prisma.$transaction(
+      groupFilters.map(({ semesterLevel, label }) =>
+        prisma.intakeGroup.upsert({
+          where: { schoolCycle_semesterLevel_label_shift: { schoolCycle: normalizedCycle, semesterLevel, label, shift: MATUTINO_SHIFT } },
+          update: { isActive: true },
+          create: { schoolCycle: normalizedCycle, semesterLevel, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+        }),
+      ),
+    )
+  }
+
+  const groups = groupFilters.length > 0
+    ? await prisma.intakeGroup.findMany({
+      where: { schoolCycle: normalizedCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+      select: { id: true, label: true, semesterLevel: true },
+    })
+    : []
+  const groupByKey = new Map(groups.map((group) => [`${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`, group]))
+
+  let createdCount = 0
+  let updatedCount = 0
+  let assignedCount = 0
+
+  for (const row of uniqueRows) {
+    const isFicha = row.importKind === 'FICHA'
+    const officialEnrollmentNumber = isFicha ? null : row.officialEnrollmentNumber ?? row.enrollmentNumber
+    const nextEnrollmentStatus = isFicha ? 'FICHA_ENTREGADA' : 'ASIGNADO'
+    const nextStudentStatus = isFicha ? 'CAPTURADO' : 'VALIDADO'
+    const group = groupByKey.get(`${row.semesterLevel}:${row.groupLabel}`)
+    if (!group) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: no se pudo preparar el grupo ${row.groupLabel}.`)
+      continue
+    }
+
+    const names = splitImportedFullName(row.fullName)
+    const existingStudent = await prisma.student.findFirst({
+      where: {
+        OR: [
+          { curp: row.curp },
+          ...(officialEnrollmentNumber ? [{ officialEnrollmentNumber }] : []),
+        ],
+      },
+      include: { groupAssignment: { include: { group: true } } },
+    })
+
+    await prisma.$transaction(async (tx) => {
+      const student = existingStudent
+        ? await tx.student.update({
+          where: { id: existingStudent.id },
+          data: {
+            officialEnrollmentNumber,
+            firstName: names.firstName,
+            paternalLastName: names.paternalLastName,
+            maternalLastName: names.maternalLastName,
+            age: row.age ?? null,
+            sex: normalizeImportedSex(row.sex),
+            phone: normalizeOptional(row.phone ?? null),
+            email: normalizeOptional(row.email ?? null),
+            motherTongue: normalizeOptional(row.motherTongue ?? null),
+            locality: normalizeOptional(row.locality ?? null),
+            previousSchool: normalizeOptional(row.previousSchool ?? null),
+            secondaryAverage: row.secondaryAverage ?? null,
+            schoolCycle: normalizedCycle,
+            schoolPeriod: 1,
+            semesterLevel: row.semesterLevel,
+            academicStatus: row.career ? `Carrera ${row.career}` : existingStudent.academicStatus,
+            enrollmentStatus: nextEnrollmentStatus,
+            status: nextStudentStatus,
+            ...(isFicha ? {} : { validatedAt: new Date(), validatedBy: actor.displayName }),
+          },
+        })
+        : await tx.student.create({
+          data: {
+            enrollmentNumber: row.enrollmentNumber,
+            officialEnrollmentNumber,
+            curp: row.curp,
+            firstName: names.firstName,
+            paternalLastName: names.paternalLastName,
+            maternalLastName: names.maternalLastName,
+            age: row.age ?? null,
+            sex: normalizeImportedSex(row.sex),
+            phone: normalizeOptional(row.phone ?? null),
+            email: normalizeOptional(row.email ?? null),
+            motherTongue: normalizeOptional(row.motherTongue ?? null),
+            addressLine: 'PENDIENTE DE ACTUALIZAR',
+            locality: normalizeOptional(row.locality ?? null),
+            municipality: 'Yajalon',
+            state: 'Chiapas',
+            previousSchool: normalizeOptional(row.previousSchool ?? null),
+            secondaryAverage: row.secondaryAverage ?? null,
+            schoolCycle: normalizedCycle,
+            schoolPeriod: 1,
+            semesterLevel: row.semesterLevel,
+            academicStatus: row.career ? `Carrera ${row.career}` : 'Regular',
+            enrollmentStatus: nextEnrollmentStatus,
+            documentationStatus: 'PENDIENTE',
+            status: nextStudentStatus,
+            validatedAt: isFicha ? null : new Date(),
+            validatedBy: isFicha ? null : actor.displayName,
+            guardian: {
+              create: {
+                fullName: normalizeOptional(row.guardianFullName ?? null) ?? 'PENDIENTE DE ACTUALIZAR',
+                phone: normalizeOptional(row.guardianPhone ?? null) ?? 'PENDIENTE',
+              },
+            },
+          },
+        })
+
+      const existingAssignment = existingStudent?.groupAssignment ?? null
+      await ensureStudentRequirementStatuses(tx, student.id)
+      const assignment = existingAssignment
+        ? await tx.studentGroupAssignment.update({
+          where: { id: existingAssignment.id },
+          data: { groupId: group.id, status: 'ASIGNADO', updatedById: actor.id, reason: isFicha ? 'REMOTE_IMPORTACION_FICHAS_EXCEL' : 'REMOTE_IMPORTACION_MATRICULA_EXCEL' },
+        })
+        : await tx.studentGroupAssignment.create({
+          data: { studentId: student.id, groupId: group.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: isFicha ? 'REMOTE_IMPORTACION_FICHAS_EXCEL' : 'REMOTE_IMPORTACION_MATRICULA_EXCEL' },
+        })
+
+      await tx.groupAssignmentAudit.create({
+        data: {
+          assignmentId: assignment.id,
+          studentId: student.id,
+          beforeGroupId: existingAssignment?.groupId ?? null,
+          beforeGroupLabel: existingAssignment?.group.label ?? null,
+          afterGroupId: group.id,
+          afterGroupLabel: group.label,
+          actorId: actor.id,
+          actorRole: actor.role,
+          reason: isFicha ? 'REMOTE_IMPORTACION_FICHAS_EXCEL' : 'REMOTE_IMPORTACION_MATRICULA_EXCEL',
+        },
+      })
+    })
+
+    if (existingStudent) updatedCount += 1
+    else createdCount += 1
+    assignedCount += 1
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: actor.id,
+      entityType: 'Student',
+      entityId: normalizedCycle,
+      action: 'REMOTE_IMPORTACION_MATRICULA_EXCEL',
+      afterJson: JSON.stringify({ sourcePath: sourcePath ?? null, createdCount, updatedCount, assignedCount }),
+    },
+  })
+
+  return {
+    ok: true,
+    sourcePath: sourcePath ?? null,
+    createdCount,
+    updatedCount,
+    assignedCount,
+    createdGroupCount: groupKeys.filter((key) => !existingGroupKeys.has(key)).length,
+    skippedCount: rows.length - uniqueRows.length,
     issues: issues.slice(0, 12),
   }
 }

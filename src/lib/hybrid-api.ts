@@ -432,8 +432,27 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         return localApi.students.listMovements(input)
       },
       importEnrollmentRoster: async (input) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ result: Awaited<ReturnType<AppApi['students']['importEnrollmentRoster']>> }>(
+              '/api/hybrid/students/import-enrollment-roster',
+              { method: 'POST', body: JSON.stringify(input) },
+              getActor,
+            )
+            preferLocalStudentRoster = false
+            return data.result
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
+        }
         const result = await localApi.students.importEnrollmentRoster(input)
         preferLocalStudentRoster = true
+        addPendingSyncOp({
+          type: 'ENROLLMENT_ROSTER_IMPORT',
+          entityId: input.schoolCycle,
+          payload: input as unknown as Record<string, unknown>,
+          deviceId: getDeviceId(),
+        })
         return result
       },
     },

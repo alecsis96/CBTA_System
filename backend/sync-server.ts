@@ -21,6 +21,7 @@ import {
   getNextInternalFolioPreview,
   getStudent,
   importAssignedRosterRows,
+  importEnrollmentRosterRows,
   listDepartments,
   listConcepts,
   listPayments,
@@ -65,6 +66,7 @@ const allowedTypes = [
   'CASH_PAYMENT_CREATE',
   'CONCEPT_TARIFF_UPDATE',
   'CONCEPT_SUGGESTED_UPDATE',
+  'ENROLLMENT_ROSTER_IMPORT',
 ] as const
 
 const syncOperationSchema = z.object({
@@ -136,6 +138,33 @@ const remoteGroupImportSchema = z.object({
     semesterLevel: remoteSemesterLevelSchema.nullable().optional(),
     enrollmentNumber: z.string().trim().nullable(),
     curp: z.string().trim().nullable(),
+  })).min(1),
+})
+
+const remoteEnrollmentRosterImportSchema = z.object({
+  schoolCycle: z.string().trim().min(1),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(z.object({
+    sheetName: z.string().trim().min(1),
+    rowNumber: z.number().int().min(1),
+    enrollmentNumber: z.string().trim().min(1),
+    officialEnrollmentNumber: z.string().trim().nullable().optional(),
+    importKind: z.enum(['MATRICULA', 'FICHA']).optional(),
+    fullName: z.string().trim().min(1),
+    curp: z.string().trim().min(18).max(18),
+    sex: z.string().trim().nullable().default(null),
+    age: z.number().int().min(0).max(120).nullable().default(null),
+    groupLabel: z.string().trim().min(1),
+    career: z.string().trim().nullable().default(null),
+    semesterLevel: remoteSemesterLevelSchema,
+    previousSchool: z.string().trim().nullable().optional(),
+    locality: z.string().trim().nullable().optional(),
+    phone: z.string().trim().nullable().optional(),
+    email: z.string().trim().nullable().optional(),
+    motherTongue: z.string().trim().nullable().optional(),
+    guardianFullName: z.string().trim().nullable().optional(),
+    guardianPhone: z.string().trim().nullable().optional(),
+    secondaryAverage: z.number().min(0).max(10).nullable().optional(),
   })).min(1),
 })
 
@@ -681,6 +710,21 @@ app.get('/api/hybrid/students/next-folio-preview', async (req: Request, res: Res
   return res.status(200).json({ ok: true, nextFolio })
 })
 
+app.post('/api/hybrid/students/import-enrollment-roster', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteEnrollmentRosterImportSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
+  try {
+    const result = await importEnrollmentRosterRows(parsed.data.schoolCycle, parsed.data.rows, parsed.data.sourcePath, actor)
+    recordOperation(buildServerOperation('ENROLLMENT_ROSTER_IMPORT', parsed.data.schoolCycle, req.header('x-device-id') ?? 'remote-api', parsed.data as unknown as Record<string, unknown>))
+    return res.status(200).json({ ok: true, result })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'enrollment_roster_import_failed' })
+  }
+})
+
 app.get('/api/hybrid/students/:id', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
@@ -1095,6 +1139,12 @@ async function applySyncOperation(operation: z.infer<typeof syncOperationSchema>
 
   if (operation.type === 'CONCEPT_SUGGESTED_UPDATE') {
     await updateConceptSuggested(remoteSuggestedInputSchema.parse(operation.payload), actor)
+    return
+  }
+
+  if (operation.type === 'ENROLLMENT_ROSTER_IMPORT') {
+    const payload = remoteEnrollmentRosterImportSchema.parse(operation.payload)
+    await importEnrollmentRosterRows(payload.schoolCycle, payload.rows, payload.sourcePath, actor)
   }
 }
 

@@ -51,7 +51,7 @@ export type SyncStatusSnapshot = {
   lastSyncError: string | null
   lastSyncErrorState: SyncErrorState | null
   pendingTotal: number
-  pendingByType: Record<'STUDENT_CREATE' | 'STUDENT_UPDATE' | 'RECEIPT_CREATE' | 'RECEIPT_REPRINT' | 'CASH_PAYMENT_CREATE' | 'CONCEPT_TARIFF_UPDATE' | 'CONCEPT_SUGGESTED_UPDATE', number>
+  pendingByType: Record<'STUDENT_CREATE' | 'STUDENT_UPDATE' | 'RECEIPT_CREATE' | 'RECEIPT_REPRINT' | 'CASH_PAYMENT_CREATE' | 'CONCEPT_TARIFF_UPDATE' | 'CONCEPT_SUGGESTED_UPDATE' | 'ENROLLMENT_ROSTER_IMPORT', number>
 }
 
 function markSyncSuccess() {
