@@ -1272,7 +1272,7 @@ async function startServer() {
   } catch (error) {
     backendDatabaseReady = false
     backendStartupError = error instanceof Error ? error.message : 'remote_database_unreachable'
-    console.warn('[sync-server] Remote database unavailable; starting in degraded offline mode.', error)
+    console.warn(`[sync-server] Remote database unavailable; starting in degraded offline mode. ${backendStartupError}`)
   }
 
   app.listen(port, host, () => {

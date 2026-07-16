@@ -30,14 +30,17 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(EMPTY_SYNC_STATUS)
   const [syncing, setSyncing] = useState(false)
   const autoSyncTimerRef = useRef<number | null>(null)
+  const syncingRef = useRef(false)
+  const didInitialOnlineSyncRef = useRef(false)
 
   const refreshSyncStatus = useCallback(() => {
     setSyncStatus(getSyncStatusSnapshot())
   }, [])
 
   const handleSyncNow = useCallback(async () => {
-    if (syncing) return
+    if (syncingRef.current) return
 
+    syncingRef.current = true
     setSyncing(true)
     try {
       const result = await syncAll()
@@ -53,9 +56,10 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
       onSyncError?.(message)
       throw error
     } finally {
+      syncingRef.current = false
       setSyncing(false)
     }
-  }, [syncing, refreshSyncStatus, onSyncSuccess, onSyncError])
+  }, [refreshSyncStatus, onSyncSuccess, onSyncError])
 
   // Monitor online/offline status
   useEffect(() => {
@@ -64,6 +68,7 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
     }
 
     function onOffline() {
+      didInitialOnlineSyncRef.current = false
       setIsOnline(false)
     }
 
@@ -83,12 +88,13 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
 
   // Auto-sync when coming online
   useEffect(() => {
-    if (!isOnline || syncing) {
+    if (!isOnline || didInitialOnlineSyncRef.current) {
       return
     }
 
+    didInitialOnlineSyncRef.current = true
     void handleSyncNow()
-  }, [isOnline, syncing, handleSyncNow])
+  }, [isOnline, handleSyncNow])
 
   // Periodic auto-sync
   useEffect(() => {
@@ -97,7 +103,7 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
     }
 
     autoSyncTimerRef.current = window.setInterval(() => {
-      if (navigator.onLine && !syncing) {
+      if (navigator.onLine && !syncingRef.current) {
         void handleSyncNow()
       }
     }, autoSyncInterval)
@@ -107,7 +113,7 @@ export function useSync({ autoSyncInterval = 30000, onSyncSuccess, onSyncError }
         window.clearInterval(autoSyncTimerRef.current)
       }
     }
-  }, [autoSyncInterval, syncing, handleSyncNow])
+  }, [autoSyncInterval, handleSyncNow])
 
   return {
     isOnline,

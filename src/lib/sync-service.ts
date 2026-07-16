@@ -43,8 +43,10 @@ const LAST_PULL_AT_KEY = 'cbta-sync-last-pull-at'
 const LAST_SUCCESS_AT_KEY = 'cbta-sync-last-success-at'
 const LAST_ERROR_KEY = 'cbta-sync-last-error'
 const LAST_ERROR_STATE_KEY = 'cbta-sync-last-error-state'
+const REMOTE_COOLDOWN_UNTIL_KEY = 'cbta-sync-remote-cooldown-until'
 const MAX_RETRIES = 3
 const BACKOFF_BASE_MS = 400
+const REMOTE_COOLDOWN_MS = 5 * 60 * 1000
 
 export type SyncStatusSnapshot = {
   lastSuccessfulSyncAt: string | null
@@ -58,6 +60,7 @@ function markSyncSuccess() {
   window.localStorage.setItem(LAST_SUCCESS_AT_KEY, new Date().toISOString())
   window.localStorage.removeItem(LAST_ERROR_KEY)
   window.localStorage.removeItem(LAST_ERROR_STATE_KEY)
+  window.localStorage.removeItem(REMOTE_COOLDOWN_UNTIL_KEY)
 }
 
 function markSyncError(message: string, retryable: boolean, code: SyncErrorState['code']) {
@@ -78,6 +81,27 @@ function parseSyncErrorState(raw: string | null) {
   } catch {
     return null
   }
+}
+
+function getRemoteCooldownRemainingMs() {
+  const saved = window.localStorage.getItem(REMOTE_COOLDOWN_UNTIL_KEY)
+  if (!saved) return 0
+  const timestamp = new Date(saved)
+  if (Number.isNaN(timestamp.getTime())) return 0
+  return Math.max(0, timestamp.getTime() - Date.now())
+}
+
+function markRemoteCooldown() {
+  window.localStorage.setItem(REMOTE_COOLDOWN_UNTIL_KEY, new Date(Date.now() + REMOTE_COOLDOWN_MS).toISOString())
+}
+
+function remoteCooldownMessage() {
+  const minutes = Math.max(1, Math.ceil(getRemoteCooldownRemainingMs() / 60000))
+  return `El servidor central no esta disponible. Se reintentara automaticamente en ${minutes} min.`
+}
+
+function isRemoteUnavailableStatus(status: number) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504
 }
 
 function sleep(ms: number) {
@@ -145,8 +169,14 @@ export async function syncNow(): Promise<SyncResult> {
   const pending = listPendingSyncOps()
 
   if (pending.length === 0) {
-    markSyncSuccess()
     return { sent: 0, failed: 0, message: 'No hay cambios pendientes por sincronizar.' }
+  }
+
+  const cooldownRemaining = getRemoteCooldownRemainingMs()
+  if (cooldownRemaining > 0) {
+    const message = remoteCooldownMessage()
+    markSyncError(message, true, 'REMOTE_ERROR')
+    return { sent: 0, failed: pending.length, message }
   }
 
   if (!navigator.onLine) {
@@ -196,11 +226,15 @@ export async function syncNow(): Promise<SyncResult> {
       }
 
       if (!response.ok) {
+        if (isRemoteUnavailableStatus(response.status)) {
+          markRemoteCooldown()
+        }
         continue
       }
 
       successIds.push(operation.id)
     } catch {
+      markRemoteCooldown()
       // network/transient errors are left in queue
     }
   }
@@ -230,6 +264,13 @@ export async function syncNow(): Promise<SyncResult> {
 }
 
 export async function pullNow(): Promise<PullResult> {
+  const cooldownRemaining = getRemoteCooldownRemainingMs()
+  if (cooldownRemaining > 0) {
+    const message = remoteCooldownMessage()
+    markSyncError(message, true, 'REMOTE_ERROR')
+    return { pulled: 0, items: [], message }
+  }
+
   if (!navigator.onLine) {
     markSyncError('Sin internet. No se pudo consultar cambios remotos.', true, 'OFFLINE')
     return { pulled: 0, items: [], message: 'Sin internet. No se pudo consultar cambios remotos.' }
@@ -266,6 +307,9 @@ export async function pullNow(): Promise<PullResult> {
     )
 
     if (!response.ok) {
+      if (isRemoteUnavailableStatus(response.status)) {
+        markRemoteCooldown()
+      }
       markSyncError('No se pudo consultar cambios remotos.', true, 'REMOTE_ERROR')
       return { pulled: 0, items: [], message: 'No se pudo consultar cambios remotos.' }
     }
@@ -299,6 +343,7 @@ export async function pullNow(): Promise<PullResult> {
             : 'Sin cambios remotos nuevos.',
     }
   } catch {
+    markRemoteCooldown()
     markSyncError('No se pudo consultar cambios remotos.', true, 'UNKNOWN')
     return { pulled: 0, items: [], message: 'No se pudo consultar cambios remotos.' }
   }
@@ -306,6 +351,16 @@ export async function pullNow(): Promise<PullResult> {
 
 export async function syncAll(): Promise<SyncAllResult> {
   const pushResult = await syncNow()
+  if (getRemoteCooldownRemainingMs() > 0) {
+    return {
+      sent: pushResult.sent,
+      failed: pushResult.failed,
+      pulled: 0,
+      items: [],
+      message: pushResult.message,
+    }
+  }
+
   const pullResult = await pullNow()
 
   return {
