@@ -288,11 +288,6 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         if (canUseRemoteNow()) {
           try {
             const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
-            const localItems = await localApi.students.list(filters)
-            if (localItems.length > data.items.length) {
-              preferLocalStudentRoster = true
-              return localItems
-            }
             return data.items
           } catch (error) {
             if (!shouldFallbackToLocal(error)) throw error
