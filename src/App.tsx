@@ -301,36 +301,45 @@ function App() {
       const canManageControl = role === 'ADMIN' || role === 'CONTROL_ESCOLAR' || role === 'INSCRIPCION_AUX'
       const canManageIngresos = role === 'ADMIN' || role === 'INGRESOS_PROPIOS'
       const canManageSecretaria = role === 'ADMIN' || role === 'SECRETARIA'
+      const safeLoad = async <T,>(label: string, promise: Promise<T>, fallback: T): Promise<T> => {
+        try {
+          return await promise
+        } catch (error) {
+          console.warn(`[loadData] ${label}`, error)
+          return fallback
+        }
+      }
       const receiptsAllPromise =
-        canManageIngresos && typeof appApi.receipts.listAll === 'function' ? appApi.receipts.listAll() : Promise.resolve([])
+        canManageIngresos && typeof appApi.receipts.listAll === 'function' ? safeLoad('receipts.listAll', appApi.receipts.listAll(), []) : Promise.resolve([])
       const cashPaymentsPromise =
-        canManageIngresos && typeof appApi.payments?.list === 'function' ? appApi.payments.list() : Promise.resolve([])
+        canManageIngresos && typeof appApi.payments?.list === 'function' ? safeLoad('payments.list', appApi.payments.list(), []) : Promise.resolve([])
       const admissionsPromise =
-        canManageControl && typeof appApi.admissions?.list === 'function' ? appApi.admissions.list() : Promise.resolve([])
+        canManageControl && typeof appApi.admissions?.list === 'function' ? safeLoad('admissions.list', appApi.admissions.list(), []) : Promise.resolve([])
       const rocConfigPromise =
         canManageIngresos && typeof appApi.receipts.getConfig === 'function'
-          ? appApi.receipts.getConfig()
+          ? safeLoad('receipts.getConfig', appApi.receipts.getConfig(),
+            { initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' })
             .catch(() => ({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' }))
           : Promise.resolve({ initialRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null, nextSuggestedRocNumber: 'DGETAYCM-ROC-0001' })
       const adminUsersPromise =
         sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listUsers === 'function'
-          ? appApi.admin.listUsers()
+          ? safeLoad('admin.listUsers', appApi.admin.listUsers(), [])
           : Promise.resolve([])
       const departmentsPromise =
         sessionForAdmin?.role === 'ADMIN' && typeof appApi.admin?.listDepartments === 'function'
-          ? appApi.admin.listDepartments()
+          ? safeLoad('admin.listDepartments', appApi.admin.listDepartments(), [])
           : Promise.resolve([])
       const permissionsPromise =
         canManageSecretaria && typeof appApi.permissions?.list === 'function'
-          ? appApi.permissions.list()
+          ? safeLoad('permissions.list', appApi.permissions.list(), [])
           : Promise.resolve([])
 
       const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments, permissions] = await Promise.all([
-        appApi.students.list(),
-        canManageControl && typeof appApi.preRegistrations?.list === 'function' ? appApi.preRegistrations.list() : Promise.resolve([]),
-        typeof appApi.students.listValidated === 'function' ? appApi.students.listValidated() : Promise.resolve([]),
-        canManageIngresos && typeof appApi.concepts?.listActive === 'function' ? appApi.concepts.listActive() : Promise.resolve([]),
-        appApi.audit.listRecent(),
+        safeLoad('students.list', appApi.students.list(), []),
+        canManageControl && typeof appApi.preRegistrations?.list === 'function' ? safeLoad('preRegistrations.list', appApi.preRegistrations.list(), []) : Promise.resolve([]),
+        typeof appApi.students.listValidated === 'function' ? safeLoad('students.listValidated', appApi.students.listValidated(), []) : Promise.resolve([]),
+        canManageIngresos && typeof appApi.concepts?.listActive === 'function' ? safeLoad('concepts.listActive', appApi.concepts.listActive(), []) : Promise.resolve([]),
+        safeLoad('audit.listRecent', appApi.audit.listRecent(), []),
         receiptsAllPromise,
         cashPaymentsPromise,
         admissionsPromise,
