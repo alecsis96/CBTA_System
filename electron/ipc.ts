@@ -35,6 +35,9 @@ const saveWorkbookSchema = z.object({
   fileName: z.string().trim().min(1),
   base64: z.string().min(1),
 })
+const externalUrlSchema = z.string().url().refine((value) => ['https:', 'http:'].includes(new URL(value).protocol), {
+  message: 'Solo se pueden abrir enlaces http o https.',
+})
 
 const adminUserCreateSchema = z.object({
   username: z.string().trim().min(1),
@@ -2181,6 +2184,12 @@ async function restoreGroupAssignmentForReset(
 }
 
 export function registerIpcHandlers() {
+  ipcMain.handle('app:openExternal', async (_event, url) => {
+    const parsedUrl = externalUrlSchema.parse(url)
+    await shell.openExternal(parsedUrl)
+    return { ok: true }
+  })
+
   ipcMain.handle('files:saveAndOpenWorkbook', async (_event, payload) => {
     const input = saveWorkbookSchema.parse(payload)
     const fileName = safeWorkbookFileName(input.fileName)

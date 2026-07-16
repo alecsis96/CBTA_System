@@ -5,9 +5,11 @@ import {
   type PreRegistrationStatusUpdate,
 } from '@/components/control-escolar/panels'
 import { AppHeader } from '@/components/app-header'
+import { UpdateNotice } from '@/components/update-notice'
 import { amountToWords } from '@/lib/formatters'
 import { addPendingSyncOp, getDeviceId } from '@/lib/sync-queue'
 import { getSyncStatusSnapshot, syncAll, type SyncStatusSnapshot } from '@/lib/sync-service'
+import { checkForAppUpdate, CURRENT_APP_VERSION, type UpdateCheckResult } from '@/lib/update-service'
 import { useAuth, useSync, useFeedback, useRocNumber } from '@/lib/hooks'
 import {
   relationshipOptions,
@@ -151,6 +153,8 @@ function App() {
   const [savingTariffCode, setSavingTariffCode] = useState<string | null>(null)
   const [savingUserId, setSavingUserId] = useState<string | null>(null)
   const [savingAdminTestAction, setSavingAdminTestAction] = useState<string | null>(null)
+  const [checkingForUpdates, setCheckingForUpdates] = useState(false)
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateCheckResult | null>(null)
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null)
   const [newlyCreatedStudentId, setNewlyCreatedStudentId] = useState<string | null>(null)
   const [isRecentActivityCollapsed, setIsRecentActivityCollapsed] = useState(false)
@@ -245,6 +249,7 @@ function App() {
   useEffect(() => {
     if (authSession && !authLoading) {
       void loadData(authSession)
+      void handleCheckForUpdates(false)
     }
   }, [authSession, authLoading])
 
@@ -856,6 +861,42 @@ function App() {
     }
   }
 
+  async function handleCheckForUpdates(showFeedback = true) {
+    if (checkingForUpdates) return
+    setCheckingForUpdates(true)
+    try {
+      const result = await checkForAppUpdate()
+      if (result.updateAvailable) {
+        setAvailableUpdate(result)
+        if (showFeedback) {
+          setSyncFeedback(`Actualizacion disponible: version ${result.latest?.version}.`)
+        }
+      } else if (showFeedback) {
+        setSyncFeedback(`El sistema ya esta actualizado (version ${CURRENT_APP_VERSION}).`)
+      }
+    } catch (error) {
+      if (showFeedback) {
+        setSyncFeedback(error instanceof Error ? error.message : 'No se pudo buscar actualizaciones.')
+      }
+    } finally {
+      setCheckingForUpdates(false)
+    }
+  }
+
+  async function handleDownloadUpdate() {
+    if (!availableUpdate?.downloadUrl) {
+      setSyncFeedback('La actualizacion no tiene enlace de descarga para este equipo.')
+      return
+    }
+
+    if (localApi.app?.openExternal) {
+      await localApi.app.openExternal(availableUpdate.downloadUrl)
+      return
+    }
+
+    window.open(availableUpdate.downloadUrl, '_blank', 'noopener,noreferrer')
+  }
+
   async function handleAdminControlEscolarTestReset(action: string, input?: { studentId?: string; schoolCycle?: string; schoolPeriod?: number }) {
     const periodInput = {
       schoolCycle: input?.schoolCycle ?? '2026-2027',
@@ -1244,9 +1285,19 @@ function App() {
           isOnline={isOnline}
           syncStatus={syncStatus}
           syncing={syncing}
+          checkingForUpdates={checkingForUpdates}
           onSyncNow={() => void performSyncNow()}
+          onCheckForUpdates={() => void handleCheckForUpdates(true)}
           onLogout={() => void handleLogout()}
         />
+
+        {availableUpdate?.updateAvailable ? (
+          <UpdateNotice
+            update={availableUpdate}
+            onDismiss={() => setAvailableUpdate(null)}
+            onDownload={() => void handleDownloadUpdate()}
+          />
+        ) : null}
 
         {isBrowserMode ? (
           <p className="feedback-banner">

@@ -3,6 +3,9 @@ import { ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('cbta', {
   appName: 'CBTA 44 Sistema',
+  app: {
+    openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+  },
   files: {
     saveAndOpenWorkbook: (input: unknown) => ipcRenderer.invoke('files:saveAndOpenWorkbook', input),
   },

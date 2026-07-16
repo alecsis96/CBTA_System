@@ -52,6 +52,9 @@ import type { DepartmentSummary, UserCreateInput, UserResetPasswordInput, UserSu
 
 type CbtaApi = {
   appName: string
+  app?: {
+    openExternal: (url: string) => Promise<{ ok: boolean }>
+  }
   files?: {
     saveAndOpenWorkbook: (input: { fileName: string; base64: string }) => Promise<{ outputPath: string }>
   }

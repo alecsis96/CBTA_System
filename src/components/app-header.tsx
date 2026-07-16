@@ -14,7 +14,9 @@ type AppHeaderProps = {
   isOnline: boolean
   syncStatus: SyncStatusSnapshot
   syncing: boolean
+  checkingForUpdates?: boolean
   onSyncNow: () => void
+  onCheckForUpdates?: () => void
   onLogout: () => void
 }
 
@@ -26,7 +28,9 @@ export function AppHeader({
   isOnline,
   syncStatus,
   syncing,
+  checkingForUpdates = false,
   onSyncNow,
+  onCheckForUpdates,
   onLogout,
 }: AppHeaderProps) {
   const lastSyncLabel = syncStatus.lastSuccessfulSyncAt
@@ -67,6 +71,11 @@ export function AppHeader({
         <button className="secondary-button small-button" disabled={syncing} onClick={onSyncNow} type="button">
           {syncing ? 'Sync...' : 'Sync'}
         </button>
+        {onCheckForUpdates ? (
+          <button className="secondary-button small-button" disabled={checkingForUpdates} onClick={onCheckForUpdates} type="button">
+            {checkingForUpdates ? 'Buscando...' : 'Actualizar'}
+          </button>
+        ) : null}
 
         <div className="app-header-session-compact">
           <div className="app-header-avatar">{authSession.displayName.slice(0, 2).toUpperCase()}</div>

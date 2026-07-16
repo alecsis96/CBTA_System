@@ -617,6 +617,12 @@ function getBrowserGroups(schoolCycle: string, semesterLevel: SemesterLevel): Br
 
 export const browserFallbackApi = {
   appName: 'CBTA 44 Sistema (Browser Mode)',
+  app: {
+    async openExternal(url: string) {
+      window.open(url, '_blank', 'noopener,noreferrer')
+      return { ok: true }
+    },
+  },
   auth: {
     async login(input: AuthLoginInput) {
       const username = input.username.trim().toLowerCase()
