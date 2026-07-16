@@ -1421,7 +1421,7 @@ export async function importAssignedRosterRows(schoolCycle: string, rows: GroupR
       await tx.student.update({ where: { id: student.id }, data: { enrollmentStatus: 'ASIGNADO', semesterLevel: row.semesterLevel } })
       await tx.groupAssignmentAudit.create({ data: { assignmentId: assignment.id, studentId: student.id, beforeGroupId: existingAssignment?.groupId ?? null, beforeGroupLabel: existingAssignment?.group.label ?? null, afterGroupId: targetGroup.id, afterGroupLabel: targetGroup.label, actorId: actor.id, actorRole: actor.role, reason: 'REMOTE_IMPORTACION_EXCEL' } })
       await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'CAMBIO_GRUPO', reasonCode: 'IMPORTACION_EXCEL', reasonLabel: 'Importacion masiva de grupos', notes: sourcePath ?? null, previousSemesterLevel: student.semesterLevel, nextSemesterLevel: row.semesterLevel, previousGroupId: existingAssignment?.groupId ?? null, previousGroupLabel: existingAssignment?.group.label ?? null, nextGroupId: targetGroup.id, nextGroupLabel: targetGroup.label, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus: 'ASIGNADO', actorId: actor.id, actorRole: actor.role } })
-    })
+    }, { maxWait: 30_000, timeout: 120_000 })
     importedCount += 1
   }
 
@@ -1603,7 +1603,7 @@ export async function importEnrollmentRosterRows(schoolCycle: string, rows: Enro
           reason: isFicha ? 'REMOTE_IMPORTACION_FICHAS_EXCEL' : 'REMOTE_IMPORTACION_MATRICULA_EXCEL',
         },
       })
-    })
+    }, { maxWait: 30_000, timeout: 120_000 })
 
     if (existingStudent) updatedCount += 1
     else createdCount += 1
