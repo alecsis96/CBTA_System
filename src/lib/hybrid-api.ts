@@ -407,6 +407,48 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         }
         return localApi.students.enrollGrade(input)
       },
+      getRequirementChecklist: async (studentId) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ checklist: Awaited<ReturnType<AppApi['students']['getRequirementChecklist']>> }>(
+              `/api/hybrid/students/${encodeURIComponent(studentId)}/requirements`,
+              { method: 'GET' },
+              getActor,
+            )
+            return data.checklist
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
+        }
+        return localApi.students.getRequirementChecklist(studentId)
+      },
+      saveRequirementChecklist: async (studentId, input) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ checklist: Awaited<ReturnType<AppApi['students']['saveRequirementChecklist']>> }>(
+              `/api/hybrid/students/${encodeURIComponent(studentId)}/requirements`,
+              { method: 'PUT', body: JSON.stringify(input) },
+              getActor,
+            )
+            return data.checklist
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
+        }
+        return localApi.students.saveRequirementChecklist(studentId, input)
+      },
+      formalizeEnrollment: async (input) => {
+        if (!canUseRemoteNow()) {
+          throw new Error('Para inscribir y asignar matricula necesitas conexion con la base central. Guarda los datos y vuelve a intentar cuando haya internet.')
+        }
+        const data = await remoteFetch<{ student: Awaited<ReturnType<AppApi['students']['formalizeEnrollment']>> }>(
+          '/api/hybrid/students/formalize-enrollment',
+          { method: 'POST', body: JSON.stringify(input) },
+          getActor,
+        )
+        preferLocalStudentRoster = false
+        return data.student
+      },
       reinscribeForPeriod: async (input) => {
         preferLocalStudentRoster = true
         return localApi.students.reinscribeForPeriod(input)

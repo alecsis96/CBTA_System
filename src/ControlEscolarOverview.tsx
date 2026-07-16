@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { ControlEscolarProps } from './App';
 import { CONTROL_STUDENTS_PER_PAGE, getOutputFileName, formatPreferredEnrollment, formatVisibleGroupLabel, relationshipOptions, combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel, getCareerCodeFromGroupLabel } from '@/lib/utils';
 import { pickRosterWorkbookFile, parseRosterWorkbook } from '@/lib/roster-import';
@@ -369,6 +370,68 @@ export function ControlEscolarOverview({
     setChecklistFeedback(`Listado exportado (${result.exportedCount} alumnos): ${result.outputPath}`);
   }
 
+  async function handleExportInscribedStudents() {
+    const rows = filteredStudents.map((student) => ({
+      Matricula: formatPreferredEnrollment(student),
+      CURP: student.curp,
+      Alumno: student.fullName,
+      Semestre: `${student.semesterLevel} semestre`,
+      Grupo: formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel) || 'Sin grupo',
+      Carrera: getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera',
+      'Ciclo/periodo': `${student.schoolCycle}/${student.schoolPeriod ?? 1}`,
+      Tutor: student.guardianFullName ?? 'Pendiente',
+      'Telefono tutor': student.guardianPhone ?? 'Pendiente',
+      'Telefono alumno': student.phone ?? 'Sin telefono',
+      Documentacion: student.documentationStatus,
+      Inscripcion: student.statusLabel,
+      'Asesor grupo': student.groupAdvisorName ?? 'Pendiente',
+      Domicilio: student.address,
+    }));
+
+    if (rows.length === 0) {
+      setChecklistFeedback('No hay alumnos inscritos para exportar con los filtros actuales.');
+      return;
+    }
+
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet['!cols'] = [
+      { wch: 18 },
+      { wch: 22 },
+      { wch: 42 },
+      { wch: 14 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 16 },
+      { wch: 32 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 28 },
+      { wch: 45 },
+    ];
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Inscritos');
+    const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' }) as string;
+    const fileName = `alumnos-inscritos-${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+    if (window.cbta?.files?.saveAndOpenWorkbook) {
+      await window.cbta.files.saveAndOpenWorkbook({ fileName, base64 });
+    } else {
+      const binary = window.atob(base64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    setChecklistFeedback(`Excel de inscritos exportado: ${rows.length} alumnos. Archivo: ${fileName}`);
+  }
+
   async function handlePrintAssignedRoster() {
     if (!groupsApi?.printAssignedRoster) return;
     await groupsApi.printAssignedRoster({ schoolCycle: form.schoolCycle });
@@ -380,7 +443,7 @@ export function ControlEscolarOverview({
     setPreparingEnrollmentStudentId(student.id);
     try {
       await onEditStudent(student.id);
-      const checklist = await window.cbta?.students?.getRequirementChecklist?.(student.id);
+      const checklist = await studentsApi?.getRequirementChecklist?.(student.id);
       if (checklist) {
         setSelectedChecklistStudentId(student.id);
         setRequirementChecklist(checklist);
@@ -408,7 +471,7 @@ export function ControlEscolarOverview({
       onUpdateField('schoolCycle', TARGET_SCHOOL_CYCLE);
       onUpdateField('schoolPeriod', TARGET_SCHOOL_PERIOD);
       onUpdateField('semesterLevel', targetSemester);
-      const checklist = await window.cbta?.students?.getRequirementChecklist?.(student.id);
+      const checklist = await studentsApi?.getRequirementChecklist?.(student.id);
       if (checklist) {
         setSelectedChecklistStudentId(student.id);
         setRequirementChecklist(checklist);
@@ -460,8 +523,8 @@ export function ControlEscolarOverview({
   }
 
   async function handleLoadRequirementChecklist(studentId: string) {
-    if (!window.cbta?.students?.getRequirementChecklist) return;
-    const checklist = await window.cbta.students.getRequirementChecklist(studentId);
+    if (!studentsApi?.getRequirementChecklist) return;
+    const checklist = await studentsApi.getRequirementChecklist(studentId);
     setSelectedChecklistStudentId(studentId);
     setRequirementChecklist(checklist);
     setChecklistFeedback(null);
@@ -495,7 +558,7 @@ export function ControlEscolarOverview({
   }
 
   async function handleSaveRequirementChecklist() {
-    if (!window.cbta?.students?.saveRequirementChecklist || !selectedChecklistStudentId || !requirementChecklist) return;
+    if (!studentsApi?.saveRequirementChecklist || !selectedChecklistStudentId || !requirementChecklist) return;
     setSavingChecklist(true);
     try {
       const payload: SaveStudentRequirementChecklistInput = {
@@ -507,7 +570,7 @@ export function ControlEscolarOverview({
           notes: item.notes,
         })),
       };
-      const saved = await window.cbta.students.saveRequirementChecklist(selectedChecklistStudentId, payload);
+      const saved = await studentsApi.saveRequirementChecklist(selectedChecklistStudentId, payload);
       setRequirementChecklist(saved);
       setChecklistFeedback('Checklist documental guardado correctamente.');
       await onReloadData();
@@ -518,7 +581,7 @@ export function ControlEscolarOverview({
   }
 
   async function handleFinalizeEnrollment() {
-    if (!editingStudentId || !studentsApi?.update || !window.cbta?.students?.saveRequirementChecklist || !requirementChecklist) return;
+    if (!editingStudentId || !studentsApi?.update || !studentsApi?.saveRequirementChecklist || !requirementChecklist) return;
     setFinalizingEnrollment(true);
     setChecklistFeedback(null);
     try {
@@ -540,7 +603,7 @@ export function ControlEscolarOverview({
           notes: item.notes,
         })),
       };
-      const savedChecklist = await window.cbta.students.saveRequirementChecklist(editingStudentId, payload);
+      const savedChecklist = await studentsApi.saveRequirementChecklist(editingStudentId, payload);
       setRequirementChecklist(savedChecklist);
       const targetSemester = form.semesterLevel === 2 ? 3 : form.semesterLevel === 4 ? 5 : form.semesterLevel;
       const updated = studentFormMode === 'reinscripcion'
@@ -1277,7 +1340,12 @@ export function ControlEscolarOverview({
                   <p className="eyebrow">Control Escolar</p>
                   <h2 className="compact-header">Alumnos filtrados</h2>
                 </div>
-                <span className="status-tag">{filteredStudents.length} resultados</span>
+                <div className="button-row">
+                  <button className="secondary-button small-button" onClick={() => void handleExportInscribedStudents()} type="button">
+                    Exportar inscritos
+                  </button>
+                  <span className="status-tag">{filteredStudents.length} resultados</span>
+                </div>
               </div>
 
               {loading ? (

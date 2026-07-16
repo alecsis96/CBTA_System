@@ -22,11 +22,13 @@ import type {
   RocConfigUpdateInput,
   RocMonthlyExportInput,
   RocReceiptSummary,
+  SaveStudentRequirementChecklistInput,
   SemesterLevel,
   StudentAcademicMovementSummary,
   StudentFormInput,
   StudentGradeEnrollmentInput,
   StudentGroupChangeInput,
+  StudentRequirementChecklist,
   StudentSummary,
   StudentWithdrawalInput,
   TariffUpdateInput,
@@ -976,6 +978,43 @@ function normalizeImportedSex(value: string | null | undefined) {
   return normalized || null
 }
 
+function checklistStatusLabel(items: Array<{ isDelivered: boolean; deadlineAt: Date | null }>) {
+  if (items.length === 0) return 'PENDIENTE'
+  if (items.every((item) => item.isDelivered)) return 'COMPLETA'
+  if (items.some((item) => item.deadlineAt && item.deadlineAt.getTime() < Date.now() && !item.isDelivered)) return 'VENCIDA'
+  return 'PENDIENTE'
+}
+
+function missingRequiredRequirementLabels(statuses: Array<{ isDelivered: boolean; missingJustification: string | null; deadlineAt: Date | null; requirement: { label: string; requiredOriginals: number; requiredCopies: number } }>) {
+  return statuses
+    .filter((item) => {
+      const required = item.requirement.requiredOriginals > 0 || item.requirement.requiredCopies > 0
+      return required && !item.isDelivered && (!item.missingJustification?.trim() || !item.deadlineAt)
+    })
+    .map((item) => item.requirement.label)
+}
+
+function requirementChecklistSummary(student: { id: string; firstName: string; paternalLastName: string; maternalLastName: string; documentationStatus: string; requirementStatuses: Array<{ isDelivered: boolean; missingJustification: string | null; deadlineAt: Date | null; notes: string | null; requirement: { id: string; code: string; label: string; requiredOriginals: number; requiredCopies: number; sortOrder: number } }> }): StudentRequirementChecklist {
+  return {
+    studentId: student.id,
+    studentName: `${student.firstName} ${student.paternalLastName} ${student.maternalLastName}`.trim(),
+    documentationStatus: student.documentationStatus,
+    items: student.requirementStatuses
+      .sort((left, right) => left.requirement.sortOrder - right.requirement.sortOrder)
+      .map((item) => ({
+        requirementId: item.requirement.id,
+        code: item.requirement.code,
+        label: item.requirement.label,
+        requiredOriginals: item.requirement.requiredOriginals,
+        requiredCopies: item.requirement.requiredCopies,
+        isDelivered: item.isDelivered,
+        missingJustification: item.missingJustification ?? '',
+        deadlineAt: item.deadlineAt ? item.deadlineAt.toISOString().slice(0, 10) : '',
+        notes: item.notes ?? '',
+      })),
+  }
+}
+
 async function ensureStudentRequirementStatuses(
   tx: Pick<Prisma.TransactionClient, 'enrollmentRequirement' | 'studentRequirementStatus'>,
   studentId: string,
@@ -1701,6 +1740,156 @@ export async function getNextInternalFolioPreview() {
   const counter = await prisma.sequenceCounter.findUnique({ where: { scope: 'STUDENT_INTERNAL_FOLIO' } })
   const nextValue = (counter?.lastValue ?? 0) + 1
   return `${INTERNAL_FOLIO_PREFIX}${String(nextValue).padStart(4, '0')}`
+}
+
+export async function getStudentRequirementChecklist(studentId: string): Promise<StudentRequirementChecklist> {
+  await prisma.$transaction((tx) => ensureStudentRequirementStatuses(tx, studentId))
+  const student = await prisma.student.findUnique({
+    where: { id: studentId },
+    include: {
+      requirementStatuses: {
+        include: { requirement: true },
+      },
+    },
+  })
+
+  if (!student) throw new Error('No se encontro el alumno para checklist.')
+  return requirementChecklistSummary(student)
+}
+
+export async function saveStudentRequirementChecklist(studentId: string, input: SaveStudentRequirementChecklistInput, actor: RemoteActor): Promise<StudentRequirementChecklist> {
+  const student = await prisma.$transaction(async (tx) => {
+    await ensureStudentRequirementStatuses(tx, studentId)
+    for (const item of input.items) {
+      await tx.studentRequirementStatus.upsert({
+        where: { studentId_requirementId: { studentId, requirementId: item.requirementId } },
+        update: {
+          isDelivered: item.isDelivered,
+          missingJustification: normalizeOptional(item.missingJustification),
+          deadlineAt: item.deadlineAt ? new Date(item.deadlineAt) : null,
+          notes: normalizeOptional(item.notes),
+          reviewedAt: new Date(),
+          reviewedBy: actor.displayName,
+        },
+        create: {
+          studentId,
+          requirementId: item.requirementId,
+          isDelivered: item.isDelivered,
+          missingJustification: normalizeOptional(item.missingJustification),
+          deadlineAt: item.deadlineAt ? new Date(item.deadlineAt) : null,
+          notes: normalizeOptional(item.notes),
+          reviewedAt: new Date(),
+          reviewedBy: actor.displayName,
+        },
+      })
+    }
+
+    const refreshed = await tx.student.findUnique({
+      where: { id: studentId },
+      include: {
+        requirementStatuses: {
+          include: { requirement: true },
+        },
+      },
+    })
+
+    if (!refreshed) throw new Error('No se encontro el alumno despues de guardar el checklist.')
+    await tx.student.update({
+      where: { id: studentId },
+      data: { documentationStatus: checklistStatusLabel(refreshed.requirementStatuses) },
+    })
+
+    return tx.student.findUnique({
+      where: { id: studentId },
+      include: {
+        requirementStatuses: {
+          include: { requirement: true },
+        },
+      },
+    })
+  })
+
+  if (!student) throw new Error('No se pudo reconstruir el checklist documental.')
+  return requirementChecklistSummary(student)
+}
+
+export async function formalizeStudentEnrollment(input: { studentId: string; allowPendingDocuments?: boolean; notes?: string }, actor: RemoteActor): Promise<StudentSummary> {
+  const student = await prisma.student.findUnique({
+    where: { id: input.studentId },
+    include: {
+      requirementStatuses: { include: { requirement: true } },
+      groupAssignment: { include: { group: true } },
+    },
+  })
+
+  if (!student) throw new Error('No se encontro el alumno para inscripcion.')
+  if (student.enrollmentStatus !== 'FICHA_ENTREGADA') {
+    throw new Error('Solo se pueden inscribir alumnos con ficha entregada.')
+  }
+
+  const missingRequired = missingRequiredRequirementLabels(student.requirementStatuses)
+  if (missingRequired.length > 0 && !input.allowPendingDocuments) {
+    throw new Error(`Faltan documentos obligatorios sin justificante/plazo: ${missingRequired.join(', ')}.`)
+  }
+
+  const nextEnrollmentStatus = student.groupAssignment ? 'ASIGNADO' : 'INSCRITO'
+  const nextDocumentationStatus = checklistStatusLabel(student.requirementStatuses)
+
+  await prisma.$transaction(async (tx) => {
+    const nextEnrollmentNumber = await buildStudentInternalFolio(tx)
+    await tx.student.update({
+      where: { id: student.id },
+      data: {
+        enrollmentNumber: nextEnrollmentNumber,
+        officialEnrollmentNumber: nextEnrollmentNumber,
+        schoolCycle: '2026-2027',
+        schoolPeriod: 1,
+        semesterLevel: 1,
+        enrollmentStatus: nextEnrollmentStatus,
+        documentationStatus: nextDocumentationStatus,
+        status: 'VALIDADO',
+        validatedAt: new Date(),
+        validatedBy: actor.displayName,
+      },
+    })
+    await tx.studentAcademicMovement.create({
+      data: {
+        studentId: student.id,
+        movementType: 'ALTA_GRADO',
+        reasonCode: 'INSCRIPCION_FORMAL',
+        reasonLabel: 'Inscripcion formal',
+        notes: normalizeOptional(input.notes),
+        previousSemesterLevel: student.semesterLevel,
+        nextSemesterLevel: student.semesterLevel,
+        previousGroupId: student.groupAssignment?.groupId ?? null,
+        previousGroupLabel: student.groupAssignment?.group.label ?? null,
+        nextGroupId: student.groupAssignment?.groupId ?? null,
+        nextGroupLabel: student.groupAssignment?.group.label ?? null,
+        previousEnrollmentStatus: student.enrollmentStatus,
+        nextEnrollmentStatus,
+        actorId: actor.id,
+        actorRole: actor.role,
+      },
+    })
+    await tx.auditLog.create({
+      data: {
+        userId: actor.id,
+        entityType: 'Student',
+        entityId: student.id,
+        action: 'REMOTE_INSCRIPCION_FORMAL',
+        beforeJson: JSON.stringify({ enrollmentNumber: student.enrollmentNumber, enrollmentStatus: student.enrollmentStatus }),
+        afterJson: JSON.stringify({ enrollmentStatus: nextEnrollmentStatus, officialEnrollmentNumber: nextEnrollmentNumber }),
+      },
+    })
+  })
+
+  const updated = await prisma.student.findUnique({
+    where: { id: student.id },
+    include: summaryStudentInclude(),
+  })
+
+  if (!updated) throw new Error('No se pudo cargar el alumno despues de inscribirlo.')
+  return studentSummary(updated)
 }
 
 async function ensurePaymentAnchor(curp: string) {

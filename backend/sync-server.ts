@@ -15,10 +15,12 @@ import {
   enrollStudentGrade,
   exportMonthlyReceipts,
   exportAssignedRoster,
+  formalizeStudentEnrollment,
   generateBatch,
   getRocConfig,
   getNextRocNumberSuggestion,
   getNextInternalFolioPreview,
+  getStudentRequirementChecklist,
   getStudent,
   importAssignedRosterRows,
   importEnrollmentRosterRows,
@@ -38,6 +40,7 @@ import {
   previewGroupRoster,
   previewGroupStats,
   resetUserPassword,
+  saveStudentRequirementChecklist,
   withdrawStudent,
   updateRocConfig,
   updateConceptSuggested,
@@ -233,6 +236,22 @@ const remoteStudentGradeEnrollmentSchema = z.object({
   toGroupId: z.string().trim().min(1).nullable().optional(),
   reasonCode: z.string().trim().min(1),
   notes: z.string().trim().optional(),
+})
+
+const remoteFormalizeEnrollmentSchema = z.object({
+  studentId: z.string().trim().min(1),
+  allowPendingDocuments: z.boolean().optional(),
+  notes: z.string().trim().optional(),
+})
+
+const remoteSaveRequirementChecklistSchema = z.object({
+  items: z.array(z.object({
+    requirementId: z.string().trim().min(1),
+    isDelivered: z.boolean(),
+    missingJustification: z.string().trim().optional(),
+    deadlineAt: z.string().trim().optional(),
+    notes: z.string().trim().optional(),
+  })),
 })
 
 const remoteStudentMovementListSchema = z.object({
@@ -722,6 +741,50 @@ app.post('/api/hybrid/students/import-enrollment-roster', async (req: Request, r
     return res.status(200).json({ ok: true, result })
   } catch (error) {
     return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'enrollment_roster_import_failed' })
+  }
+})
+
+app.post('/api/hybrid/students/formalize-enrollment', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteFormalizeEnrollmentSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
+  try {
+    const student = await formalizeStudentEnrollment(parsed.data, actor)
+    recordOperation(buildServerOperation('STUDENT_UPDATE', student.id, req.header('x-device-id') ?? 'remote-api', { studentId: student.id }))
+    return res.status(200).json({ ok: true, student })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'formalize_failed' })
+  }
+})
+
+app.get('/api/hybrid/students/:id/requirements', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  try {
+    const checklist = await getStudentRequirementChecklist(studentId)
+    return res.status(200).json({ ok: true, checklist })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'requirements_failed' })
+  }
+})
+
+app.put('/api/hybrid/students/:id/requirements', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const parsed = remoteSaveRequirementChecklistSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
+  const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  try {
+    const checklist = await saveStudentRequirementChecklist(studentId, parsed.data, actor)
+    recordOperation(buildServerOperation('STUDENT_UPDATE', studentId, req.header('x-device-id') ?? 'remote-api', { studentId }))
+    return res.status(200).json({ ok: true, checklist })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'requirements_save_failed' })
   }
 })
 
