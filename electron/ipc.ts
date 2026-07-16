@@ -9,7 +9,7 @@ import { exportOfficialRocTemplateBatch, openOfficialRocTemplate, type RocTempla
 import { getGeneratedRocsDir } from './runtime-paths'
 import { buildPasswordHash, verifyPassword } from '../shared/auth-password'
 
-type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
+type AppRole = 'CONTROL_ESCOLAR' | 'INSCRIPCION_AUX' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
 
 type SessionUser = {
   id: string
@@ -20,7 +20,7 @@ type SessionUser = {
 
 let currentSession: SessionUser | null = null
 const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
-const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
+const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
 const semesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
 const studentDailyStatusSchema = z.enum(['PRESENTE', 'PERMISO', 'AUSENTE'])
 const studentPermissionKindSchema = z.enum(['PERMISO_GENERAL', 'SALIDA_ANTICIPADA', 'DIA_COMPLETO', 'JUSTIFICANTE_MEDICO'])
@@ -2202,7 +2202,7 @@ export function registerIpcHandlers() {
       throw new Error('Credenciales invalidas.')
     }
 
-    if (!['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'].includes(user.role)) {
+    if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'].includes(user.role)) {
       throw new Error('El usuario tiene un rol no soportado por la aplicacion.')
     }
 
@@ -3283,7 +3283,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:getRequirementChecklist', async (_event, studentId) => {
-    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'consultar checklist documental')
+    requireRole(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'], 'consultar checklist documental')
     const id = z.string().min(1).parse(studentId)
     await prisma.$transaction((tx) => ensureStudentRequirementStatuses(tx, id))
     const student = await prisma.student.findUnique({
@@ -3300,7 +3300,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:saveRequirementChecklist', async (_event, studentId, payload) => {
-    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'guardar checklist documental')
+    const actor = requireRole(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'], 'guardar checklist documental')
     const id = z.string().min(1).parse(studentId)
     const input = saveRequirementChecklistSchema.parse(payload)
 
@@ -3350,7 +3350,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:formalizeEnrollment', async (_event, payload) => {
-    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'inscribir formalmente alumnos')
+    const actor = requireRole(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'], 'inscribir formalmente alumnos')
     const input = formalizeEnrollmentSchema.parse(payload)
     const student = await prisma.student.findUnique({
       where: { id: input.studentId },
@@ -3510,7 +3510,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('students:update', async (_event, studentId, payload) => {
-    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'editar alumnos')
+    const actor = requireRole(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'], 'editar alumnos')
     const id = z.string().min(1).parse(studentId)
     const input = studentInputSchema.parse(payload)
     const validated = input.validateNow
@@ -3521,6 +3521,9 @@ export function registerIpcHandlers() {
 
     if (!existing) {
       throw new Error('No se encontro el alumno para actualizar.')
+    }
+    if (actor.role === 'INSCRIPCION_AUX' && existing.enrollmentStatus !== 'FICHA_ENTREGADA') {
+      throw new Error('El auxiliar de inscripcion solo puede editar fichas pendientes durante el flujo de inscripcion.')
     }
 
     const paymentAnchor = await prisma.admissionPayment.findFirst({
@@ -3553,10 +3556,10 @@ export function registerIpcHandlers() {
           previousSchool: normalizeOptional(input.previousSchool),
           secondaryAverage: input.secondaryAverage ?? null,
           examRoom: normalizeOptional(input.examRoom),
-          schoolCycle: input.schoolCycle.trim(),
-          schoolPeriod: input.schoolPeriod,
-          semesterLevel: normalizeSemesterLevel(input.semesterLevel),
-          academicStatus: normalizeOptional(input.academicStatus),
+          schoolCycle: actor.role === 'INSCRIPCION_AUX' ? existing.schoolCycle : input.schoolCycle.trim(),
+          schoolPeriod: actor.role === 'INSCRIPCION_AUX' ? existing.schoolPeriod : input.schoolPeriod,
+          semesterLevel: actor.role === 'INSCRIPCION_AUX' ? existing.semesterLevel : normalizeSemesterLevel(input.semesterLevel),
+          academicStatus: actor.role === 'INSCRIPCION_AUX' ? existing.academicStatus : normalizeOptional(input.academicStatus),
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
           validatedAt: validated ? existing.validatedAt ?? new Date() : null,

@@ -40,6 +40,7 @@ type ControlEscolarToolbarProps = {
   uniqueDocumentationStatuses: string[]
   isImportingEnrollmentRoster: boolean
   onImportEnrollmentRoster: () => void
+  isEnrollmentAux?: boolean
 }
 
 export function ControlEscolarToolbar({
@@ -77,6 +78,7 @@ export function ControlEscolarToolbar({
   uniqueDocumentationStatuses,
   isImportingEnrollmentRoster,
   onImportEnrollmentRoster,
+  isEnrollmentAux = false,
 }: ControlEscolarToolbarProps) {
   const visibleQuickFilters = new Set(['all', 'docs-pending', 'with-ficha', 'pending-inscription', 'without-group'])
   const compactQuickFilterOptions = quickFilterOptions.filter((item) => visibleQuickFilters.has(item.value))
@@ -89,7 +91,7 @@ export function ControlEscolarToolbar({
       <PanelSectionTitle
         eyebrow="Exploracion"
         title="Buscar alumno"
-        action={
+        action={isEnrollmentAux ? undefined :
           <div className="dashboard-inline-actions">
             <button
               className="primary-button small-button"
@@ -115,12 +117,12 @@ export function ControlEscolarToolbar({
 
       <div className="control-inline-toolbar">
         <div className="segmented-tabs control-toolbar-tabs">
-          <button className={operationsTab === 'alumnos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('alumnos')} type="button">Padron</button>
-          <button className={operationsTab === 'captura' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('captura')} type="button">Admision</button>
+          {!isEnrollmentAux ? <button className={operationsTab === 'alumnos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('alumnos')} type="button">Padron</button> : null}
+          {!isEnrollmentAux ? <button className={operationsTab === 'captura' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('captura')} type="button">Admision</button> : null}
           <button className={operationsTab === 'inscripcion' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('inscripcion')} type="button">Inscripcion</button>
-          <button className={operationsTab === 'grupos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('grupos')} type="button">Movimientos academicos</button>
-          <button className={operationsTab === 'estadisticas' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('estadisticas')} type="button">Estadisticas</button>
-          {operationsTab === 'bandeja' ? (
+          {!isEnrollmentAux ? <button className={operationsTab === 'grupos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('grupos')} type="button">Movimientos academicos</button> : null}
+          {!isEnrollmentAux ? <button className={operationsTab === 'estadisticas' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('estadisticas')} type="button">Estadisticas</button> : null}
+          {!isEnrollmentAux && operationsTab === 'bandeja' ? (
             <button className="segmented-tab active" onClick={() => setOperationsTab('bandeja')} type="button">Bandeja SEP</button>
           ) : null}
         </div>

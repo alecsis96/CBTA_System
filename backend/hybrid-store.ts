@@ -1989,6 +1989,9 @@ export async function createStudent(input: StudentFormInput, actor: RemoteActor)
 export async function updateStudent(studentId: string, input: StudentFormInput, actor: RemoteActor) {
   const existing = await prisma.student.findUnique({ where: { id: studentId } })
   if (!existing) throw new Error('No se encontro el alumno para actualizar.')
+  if (actor.role === 'INSCRIPCION_AUX' && existing.enrollmentStatus !== 'FICHA_ENTREGADA') {
+    throw new Error('El auxiliar de inscripcion solo puede editar fichas pendientes durante el flujo de inscripcion.')
+  }
   const paymentAnchor = await ensurePaymentAnchor(input.curp)
   if (!paymentAnchor) throw new Error('Primero debes registrar el pago de ficha para este CURP.')
   const validated = input.validateNow
@@ -1998,6 +2001,10 @@ export async function updateStudent(studentId: string, input: StudentFormInput, 
       where: { id: studentId },
       data: {
         ...studentMutationData(input, validated, paymentAnchor.id),
+        schoolCycle: actor.role === 'INSCRIPCION_AUX' ? existing.schoolCycle : input.schoolCycle.trim(),
+        schoolPeriod: actor.role === 'INSCRIPCION_AUX' ? existing.schoolPeriod : input.schoolPeriod,
+        semesterLevel: actor.role === 'INSCRIPCION_AUX' ? existing.semesterLevel : normalizeSemesterLevel(input.semesterLevel),
+        academicStatus: actor.role === 'INSCRIPCION_AUX' ? existing.academicStatus : normalizeOptional(input.academicStatus),
         enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
         guardian: {
           upsert: {

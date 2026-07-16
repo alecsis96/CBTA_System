@@ -29,7 +29,7 @@ function targetSemesterForReinscription(student: StudentSummary) {
 }
 
 export function ControlEscolarOverview({
-  form, students, preRegistrations, admissions, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, loading, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
+  currentRole, form, students, preRegistrations, admissions, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, loading, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
 }: ControlEscolarProps) {
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas');
   const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos'>('alumnos');
@@ -74,6 +74,7 @@ export function ControlEscolarOverview({
   const [isChecklistModalOpen, setIsChecklistModalOpen] = useState(false);
   const [inscriptionQuery, setInscriptionQuery] = useState('');
   const [inscriptionPage, setInscriptionPage] = useState(1);
+  const isEnrollmentAux = currentRole === 'INSCRIPCION_AUX';
   const uniqueDocumentationStatuses = useMemo(
     () => Array.from(new Set(students.map((student) => student.documentationStatus).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
     [students]
@@ -164,6 +165,16 @@ export function ControlEscolarOverview({
     return () => window.clearTimeout(timer);
   }, [checklistFeedback]);
 
+  useEffect(() => {
+    if (!isEnrollmentAux) return;
+    const isAllowedForm = operationsTab === 'captura' && captureTab === 'formulario' && studentFormMode === 'inscripcion';
+    if (operationsTab !== 'inscripcion' && !isAllowedForm) {
+      setOperationsTab('inscripcion');
+      setCaptureTab('fichas');
+      setStudentFormMode('captura');
+    }
+  }, [isEnrollmentAux, operationsTab, captureTab, studentFormMode]);
+
   const selectedPreRegistration = preRegistrations.find((item) => item.id === selectedPreRegistrationId) ?? preRegistrations[0] ?? null;
 
   const normalizedCaptureQuery = captureQuery.trim().toLowerCase();
@@ -201,7 +212,8 @@ export function ControlEscolarOverview({
   const previewTotalPages = Math.max(1, Math.ceil(filteredPreviewRows.length / 20));
   const paginatedPreviewRows = filteredPreviewRows.slice((previewPage - 1) * 20, previewPage * 20);
   const normalizedInscriptionQuery = inscriptionQuery.trim().toLowerCase();
-  const filteredInscriptionStudents = [...fichaStudents, ...pendingReinscriptionStudents, ...pendingGraduationStudents].filter((student) => matchesDirectoryFilters(student, normalizedInscriptionQuery));
+  const inscriptionStudentSource = isEnrollmentAux ? fichaStudents : [...fichaStudents, ...pendingReinscriptionStudents, ...pendingGraduationStudents];
+  const filteredInscriptionStudents = inscriptionStudentSource.filter((student) => matchesDirectoryFilters(student, normalizedInscriptionQuery));
   const totalInscriptionPages = Math.max(1, Math.ceil(filteredInscriptionStudents.length / CONTROL_STUDENTS_PER_PAGE));
   const paginatedInscriptionStudents = filteredInscriptionStudents.slice(
     (inscriptionPage - 1) * CONTROL_STUDENTS_PER_PAGE,
@@ -234,6 +246,7 @@ export function ControlEscolarOverview({
   }
 
   async function handleStartEditStudent(studentId: string) {
+    if (isEnrollmentAux) return;
     await onEditStudent(studentId);
     setStudentFormMode('edicion');
     setOperationsTab('captura');
@@ -327,6 +340,10 @@ export function ControlEscolarOverview({
   }
 
   async function handleImportEnrollmentRoster() {
+    if (isEnrollmentAux) {
+      setChecklistFeedback('Tu usuario solo puede trabajar el flujo de inscripcion formal.');
+      return;
+    }
     if (!studentsApi?.importEnrollmentRoster || isImportingEnrollmentRoster) return;
     try {
       const file = await pickEnrollmentWorkbookFile();
@@ -463,6 +480,7 @@ export function ControlEscolarOverview({
   }
 
   async function handlePrepareReinscriptionReview(student: StudentSummary) {
+    if (isEnrollmentAux) return;
     const targetSemester = targetSemesterForReinscription(student);
     if (!targetSemester || preparingEnrollmentStudentId) return;
     setPreparingEnrollmentStudentId(student.id);
@@ -491,6 +509,7 @@ export function ControlEscolarOverview({
   }
 
   async function handleGraduateStudent(student: StudentSummary) {
+    if (isEnrollmentAux) return;
     if (!studentsApi?.graduatePeriod) return;
     try {
       const result = await studentsApi.graduatePeriod({
@@ -507,6 +526,7 @@ export function ControlEscolarOverview({
   }
 
   async function handleSaveAdvisor(groupId: string) {
+    if (isEnrollmentAux) return;
     if (!groupsApi?.updateAdvisor) return;
     setSavingAdvisorGroup(groupId);
     try {
@@ -582,6 +602,10 @@ export function ControlEscolarOverview({
 
   async function handleFinalizeEnrollment() {
     if (!editingStudentId || !studentsApi?.update || !studentsApi?.saveRequirementChecklist || !requirementChecklist) return;
+    if (isEnrollmentAux && studentFormMode !== 'inscripcion') {
+      setChecklistFeedback('Tu usuario solo puede completar inscripciones de nuevo ingreso.');
+      return;
+    }
     setFinalizingEnrollment(true);
     setChecklistFeedback(null);
     try {
@@ -858,7 +882,8 @@ export function ControlEscolarOverview({
             setDocumentationFilter={setDocumentationFilter}
             uniqueDocumentationStatuses={uniqueDocumentationStatuses}
             isImportingEnrollmentRoster={isImportingEnrollmentRoster}
-            onImportEnrollmentRoster={() => void handleImportEnrollmentRoster()} />
+            onImportEnrollmentRoster={() => void handleImportEnrollmentRoster()}
+            isEnrollmentAux={isEnrollmentAux} />
 
           {importIssues.length > 0 ? (
             <div className="feedback-banner">
@@ -869,7 +894,7 @@ export function ControlEscolarOverview({
             </div>
           ) : null}
 
-          {operationsTab === 'captura' && captureTab === 'fichas' ? (
+          {!isEnrollmentAux && operationsTab === 'captura' && captureTab === 'fichas' ? (
             <section className="panel">
               <div className="section-header">
                 <div>
@@ -901,7 +926,7 @@ export function ControlEscolarOverview({
             </section>
           ) : null}
 
-          {operationsTab === 'bandeja' ? (
+          {!isEnrollmentAux && operationsTab === 'bandeja' ? (
             <PreRegistrationInboxPanel
               onExportSep={onExportSep}
               onSelectPreRegistration={setSelectedPreRegistrationId}
@@ -910,7 +935,7 @@ export function ControlEscolarOverview({
               selectedPreRegistration={selectedPreRegistration} />
           ) : null}
 
-          {operationsTab === 'grupos' ? (
+          {!isEnrollmentAux && operationsTab === 'grupos' ? (
             <section className="panel">
               <div className="section-header">
                 <div>
@@ -1088,7 +1113,7 @@ export function ControlEscolarOverview({
             </section>
           ) : null}
 
-          {operationsTab === 'estadisticas' ? (
+          {!isEnrollmentAux && operationsTab === 'estadisticas' ? (
             <section className="panel">
               <div className="section-header">
                 <div>
@@ -1271,9 +1296,11 @@ export function ControlEscolarOverview({
                         <td>{student.statusLabel}</td>
                         <td>
                           <div className="button-row">
-                            <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
-                              Revisar
-                            </button>
+                            {!isEnrollmentAux ? (
+                              <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
+                                Revisar
+                              </button>
+                            ) : null}
                             {student.enrollmentStatus === 'FICHA_ENTREGADA' ? (
                               <button
                                 className="primary-button small-button"
@@ -1284,7 +1311,7 @@ export function ControlEscolarOverview({
                                 {preparingEnrollmentStudentId === student.id ? 'Abriendo...' : 'Inscribir'}
                               </button>
                             ) : null}
-                            {targetSemesterForReinscription(student) ? (
+                            {!isEnrollmentAux && targetSemesterForReinscription(student) ? (
                               <button
                                 className="primary-button small-button"
                                 disabled={preparingEnrollmentStudentId === student.id}
@@ -1294,7 +1321,7 @@ export function ControlEscolarOverview({
                                 {preparingEnrollmentStudentId === student.id ? 'Abriendo...' : 'Reinscribir'}
                               </button>
                             ) : null}
-                            {student.semesterLevel === 6 && isActiveForSemesterTransition(student) ? (
+                            {!isEnrollmentAux && student.semesterLevel === 6 && isActiveForSemesterTransition(student) ? (
                               <button className="secondary-button small-button" onClick={() => void handleGraduateStudent(student)} type="button">
                                 Egresar
                               </button>
@@ -1333,7 +1360,7 @@ export function ControlEscolarOverview({
             </section>
           ) : null}
 
-          {operationsTab === 'alumnos' ? (
+          {!isEnrollmentAux && operationsTab === 'alumnos' ? (
             <section className="panel" ref={studentsSectionRef}>
               <div className="section-header">
                 <div>
@@ -1428,7 +1455,7 @@ export function ControlEscolarOverview({
             </section>
           ) : null}
 
-          {operationsTab === 'captura' && captureTab === 'formulario' ? (
+          {operationsTab === 'captura' && captureTab === 'formulario' && (!isEnrollmentAux || studentFormMode === 'inscripcion') ? (
             <StudentCaptureFormPanel
               FieldComponent={Field}
               activeAdmission={activeAdmission}

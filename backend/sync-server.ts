@@ -92,7 +92,7 @@ const remoteActorSchema = z.object({
   role: z.string().trim().min(1),
 })
 
-const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
+const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
 const remoteSemesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
 
 const remoteUserCreateSchema = z.object({
@@ -747,7 +747,7 @@ app.post('/api/hybrid/students/import-enrollment-roster', async (req: Request, r
 app.post('/api/hybrid/students/formalize-enrollment', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const actor = await resolveRemoteActor(req)
-  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteFormalizeEnrollmentSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
   try {
@@ -762,7 +762,7 @@ app.post('/api/hybrid/students/formalize-enrollment', async (req: Request, res: 
 app.get('/api/hybrid/students/:id/requirements', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const actor = await resolveRemoteActor(req)
-  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
   try {
     const checklist = await getStudentRequirementChecklist(studentId)
@@ -775,7 +775,7 @@ app.get('/api/hybrid/students/:id/requirements', async (req: Request, res: Respo
 app.put('/api/hybrid/students/:id/requirements', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const actor = await resolveRemoteActor(req)
-  if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
   const parsed = remoteSaveRequirementChecklistSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
   const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
@@ -802,6 +802,7 @@ app.post('/api/hybrid/students', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
     const actor = await resolveRemoteActor(req)
+    if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
     const student = await createStudent(parsed.data, actor)
     recordOperation(buildServerOperation('STUDENT_CREATE', student.id, req.header('x-device-id') ?? 'remote-api', { studentId: student.id }))
     return res.status(201).json({ ok: true, student })
@@ -816,6 +817,7 @@ app.put('/api/hybrid/students/:id', async (req: Request, res: Response) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
     const actor = await resolveRemoteActor(req)
+    if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
     const studentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
     const student = await updateStudent(studentId, parsed.data, actor)
     recordOperation(buildServerOperation('STUDENT_UPDATE', student.id, req.header('x-device-id') ?? 'remote-api', { studentId: student.id }))
@@ -831,6 +833,7 @@ app.post('/api/hybrid/students/change-group', async (req: Request, res: Response
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
     const actor = await resolveRemoteActor(req)
+    if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
     const result = await changeStudentGroup(parsed.data, actor)
     return res.status(200).json({ ok: true, result })
   } catch (error) {
@@ -844,6 +847,7 @@ app.post('/api/hybrid/students/withdraw', async (req: Request, res: Response) =>
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
     const actor = await resolveRemoteActor(req)
+    if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
     const result = await withdrawStudent(parsed.data, actor)
     return res.status(200).json({ ok: true, result })
   } catch (error) {
@@ -857,6 +861,7 @@ app.post('/api/hybrid/students/enroll-grade', async (req: Request, res: Response
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
   try {
     const actor = await resolveRemoteActor(req)
+    if (!['CONTROL_ESCOLAR', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
     const student = await enrollStudentGrade(parsed.data, actor)
     return res.status(200).json({ ok: true, student })
   } catch (error) {

@@ -293,7 +293,7 @@ function App() {
     setLoading(true)
     try {
       const role = sessionForAdmin?.role ?? null
-      const canManageControl = role === 'ADMIN' || role === 'CONTROL_ESCOLAR'
+      const canManageControl = role === 'ADMIN' || role === 'CONTROL_ESCOLAR' || role === 'INSCRIPCION_AUX'
       const canManageIngresos = role === 'ADMIN' || role === 'INGRESOS_PROPIOS'
       const canManageSecretaria = role === 'ADMIN' || role === 'SECRETARIA'
       const receiptsAllPromise =
@@ -378,7 +378,7 @@ function App() {
   }
 
   function defaultScreenByRole(role: AppRole): Screen {
-    if (role === 'CONTROL_ESCOLAR') return 'control-escolar'
+    if (role === 'CONTROL_ESCOLAR' || role === 'INSCRIPCION_AUX') return 'control-escolar'
     if (role === 'INGRESOS_PROPIOS') return 'ingresos-propios'
     if (role === 'SECRETARIA') return 'secretaria'
     return 'configuracion'
@@ -386,7 +386,7 @@ function App() {
 
   function canAccessScreen(role: AppRole, target: Screen) {
     if (role === 'ADMIN') return true
-    if (role === 'CONTROL_ESCOLAR') return target === 'control-escolar'
+    if (role === 'CONTROL_ESCOLAR' || role === 'INSCRIPCION_AUX') return target === 'control-escolar'
     if (role === 'INGRESOS_PROPIOS') return target === 'ingresos-propios' || target === 'configuracion'
     if (role === 'SECRETARIA') return target === 'secretaria'
     return false
@@ -1257,6 +1257,7 @@ function App() {
 
         {screen === 'control-escolar' ? (
           <ControlEscolarOverview
+            currentRole={authSession.role}
             feedback={feedback}
             form={form}
             students={students}
@@ -1431,6 +1432,7 @@ export type AdminUsersOverviewProps = {
 export const roleOptions: Array<{ value: AppRole; label: string }> = [
   { value: 'ADMIN', label: 'Administrador' },
   { value: 'CONTROL_ESCOLAR', label: 'Control Escolar' },
+  { value: 'INSCRIPCION_AUX', label: 'Auxiliar de inscripción' },
   { value: 'INGRESOS_PROPIOS', label: 'Ingresos Propios' },
   { value: 'SECRETARIA', label: 'Secretaría' },
 ]
@@ -1453,6 +1455,7 @@ export type TariffEditorRowProps = {
 }
 
 export type ControlEscolarProps = {
+  currentRole: AppRole
   form: StudentFormInput
   students: StudentSummary[]
   preRegistrations: PreRegistrationSummary[]

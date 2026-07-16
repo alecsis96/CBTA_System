@@ -498,7 +498,7 @@ export type StudentDailyStatusSetInput = {
   notes?: string
 }
 
-export type AppRole = 'CONTROL_ESCOLAR' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
+export type AppRole = 'CONTROL_ESCOLAR' | 'INSCRIPCION_AUX' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
 
 export type DepartmentSummary = {
   id: string
