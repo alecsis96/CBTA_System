@@ -3,6 +3,7 @@ import type {
   AuthSession,
   CashPaymentBatchCreateInput,
   CashPaymentBatchCreateResult,
+  CashPaymentCancelInput,
   CashPaymentCreateInput,
   ConceptSuggestionUpdateInput,
   GroupRosterImportRow,
@@ -177,6 +178,7 @@ function mapRemoteStudentDetail(student: Record<string, unknown>): StudentDetail
     schoolPeriod: Number(student.schoolPeriod ?? 1),
     semesterLevel: Number(student.semesterLevel ?? 1) as StudentDetail['semesterLevel'],
     academicStatus: String(student.academicStatus ?? ''),
+    propedeuticArea: String(student.propedeuticArea ?? ''),
     guardianFullName: String(guardian?.fullName ?? ''),
     guardianRelationship: String(guardian?.relationship ?? ''),
     guardianPhone: String(guardian?.phone ?? ''),
@@ -207,6 +209,22 @@ function buildStudentListQuery(filters?: {
   if (filters?.query?.trim()) params.set('query', filters.query.trim())
   const suffix = params.toString()
   return suffix ? `?${suffix}` : ''
+}
+
+function shouldMergeLocalRoster(filters?: Parameters<AppApi['students']['list']>[0]) {
+  if (!filters) return true
+  return !filters.schoolCycle && !filters.semesterLevel && !filters.enrollmentStatus && !filters.documentationStatus && !filters.query
+}
+
+async function mergeRemoteAndLocalStudents(remoteItems: Awaited<ReturnType<AppApi['students']['list']>>, localItems: Awaited<ReturnType<AppApi['students']['list']>>) {
+  const byKey = new Map<string, Awaited<ReturnType<AppApi['students']['list']>>[number]>()
+  for (const student of localItems) {
+    byKey.set(student.curp || student.id, student)
+  }
+  for (const student of remoteItems) {
+    byKey.set(student.curp || student.id, student)
+  }
+  return Array.from(byKey.values())
 }
 
 export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi {
@@ -288,6 +306,14 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         if (canUseRemoteNow()) {
           try {
             const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['list']>> }>(`/api/hybrid/students${buildStudentListQuery(filters)}`, { method: 'GET' }, getActor)
+            if (shouldMergeLocalRoster(filters)) {
+              const localItems = await localApi.students.list(filters)
+              const hasLocalFormalStudents = localItems.some((student) => student.enrollmentStatus !== 'FICHA_ENTREGADA')
+              const remoteOnlyHasFichas = data.items.length > 0 && data.items.every((student) => student.enrollmentStatus === 'FICHA_ENTREGADA')
+              if (hasLocalFormalStudents && remoteOnlyHasFichas) {
+                return mergeRemoteAndLocalStudents(data.items, localItems)
+              }
+            }
             return data.items
           } catch (error) {
             if (!shouldFallbackToLocal(error)) throw error
@@ -468,6 +494,26 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         }
         return localApi.students.listMovements(input)
       },
+      listImportIssues: async (input) => {
+        if (canUseRemoteNow()) {
+          const params = new URLSearchParams()
+          if (input?.schoolCycle) params.set('schoolCycle', input.schoolCycle)
+          if (input?.status) params.set('status', input.status)
+          if (input?.limit) params.set('limit', String(input.limit))
+          const suffix = params.toString() ? `?${params.toString()}` : ''
+          try {
+            const data = await remoteFetch<{ items: Awaited<ReturnType<AppApi['students']['listImportIssues']>> }>(
+              `/api/hybrid/students/import-issues${suffix}`,
+              { method: 'GET' },
+              getActor,
+            )
+            return data.items
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
+        }
+        return localApi.students.listImportIssues(input)
+      },
       importEnrollmentRoster: async (input) => {
         if (canUseRemoteNow()) {
           try {
@@ -490,6 +536,18 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
           payload: input as unknown as Record<string, unknown>,
           deviceId: getDeviceId(),
         })
+        return result
+      },
+      previewFichaCompletionImport: (input) => localApi.students.previewFichaCompletionImport(input),
+      applyFichaCompletionImport: async (input) => {
+        const result = await localApi.students.applyFichaCompletionImport(input)
+        preferLocalStudentRoster = true
+        return result
+      },
+      previewPropedeuticAreaImport: (input) => localApi.students.previewPropedeuticAreaImport(input),
+      applyPropedeuticAreaImport: async (input) => {
+        const result = await localApi.students.applyPropedeuticAreaImport(input)
+        preferLocalStudentRoster = true
         return result
       },
     },
@@ -547,6 +605,17 @@ export function createHybridApi(localApi: AppApi, getActor: ActorGetter): AppApi
         const payment = await localApi.payments.create(input)
         addPendingSyncOp({ type: 'CASH_PAYMENT_CREATE', entityId: payment.id, payload: input, deviceId: getDeviceId() })
         return payment
+      },
+      cancel: async (input: CashPaymentCancelInput) => {
+        if (canUseRemoteNow()) {
+          try {
+            const data = await remoteFetch<{ payment: Awaited<ReturnType<AppApi['payments']['cancel']>> }>('/api/hybrid/payments/cancel', { method: 'POST', body: JSON.stringify(input) }, getActor)
+            return data.payment
+          } catch (error) {
+            if (!shouldFallbackToLocal(error)) throw error
+          }
+        }
+        return localApi.payments.cancel(input)
       },
       generateBatch: async (input: CashPaymentBatchCreateInput) => {
         if (canUseRemoteNow()) {

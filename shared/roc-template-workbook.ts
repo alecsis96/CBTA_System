@@ -87,6 +87,15 @@ function clearCell(xml: string, address: string) {
   return replaceCell(xml, address, '', 'string')
 }
 
+function normalizeRocShift(value: string) {
+  const normalized = value.trim().toUpperCase()
+  return normalized ? normalized[0] : 'M'
+}
+
+function normalizeRocFullName(value: string) {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
 function applyOfficialRocPayload(xml: string, payload: OfficialRocPayload, rowOffset: number) {
   let nextXml = xml
 
@@ -100,12 +109,12 @@ function applyOfficialRocPayload(xml: string, payload: OfficialRocPayload, rowOf
 
   writeString('N4', payload.rocNumber)
   writeString('J7', payload.printDate)
-  writeString('C10', payload.fullName)
+  writeString('C10', normalizeRocFullName(payload.fullName))
   writeString('K11', payload.identifier)
   writeString('C14', payload.address)
   writeString('L14', payload.grade)
   writeString('N14', payload.group)
-  writeString('O14', payload.shift)
+  writeString('O14', normalizeRocShift(payload.shift))
   writeNumber('E17', payload.totalAmount)
   writeString('F17', `(${payload.amountInWords})`)
   writeNumber('N23', payload.totalAmount)

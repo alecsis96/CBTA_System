@@ -12,6 +12,24 @@ type StudentTableProps = {
   formatPreferredEnrollment: (student: StudentSummary) => string
 }
 
+const propedeuticAreaLabels: Record<string, string> = {
+  CS: 'Ciencias sociales',
+  'C.S': 'Ciencias sociales',
+  CNEyT: 'Ciencias naturales experimentales y tecnologia',
+  CNEYT: 'Ciencias naturales experimentales y tecnologia',
+  'PM/CNEyT': 'Pensamiento matematico y Ciencias naturales experimentales y tecnologia',
+  'PM-CNEYT': 'Pensamiento matematico y Ciencias naturales experimentales y tecnologia',
+  'P.M': 'Pensamiento matematico',
+  'H/L y C': 'Humanidades, lengua y comunicacion',
+  'H.L.Y C.': 'Humanidades, lengua y comunicacion',
+}
+
+function academicTrackLabel(student: Pick<StudentSummary, 'semesterLevel' | 'groupLabel' | 'propedeuticArea'>) {
+  if (student.semesterLevel === 1) return 'Sin carrera'
+  if (student.semesterLevel === 5) return student.propedeuticArea ? propedeuticAreaLabels[student.propedeuticArea] ?? student.propedeuticArea : 'Sin area'
+  return getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera'
+}
+
 export function StudentTable({
   paginatedStudents,
   editingStudentId,
@@ -43,17 +61,14 @@ export function StudentTable({
             const hasGuardianPhone = Boolean(student.guardianPhone?.trim())
             const hasStudentPhone = Boolean(student.phone?.trim())
             const hasAdvisor = Boolean(student.groupAdvisorName?.trim())
-            const hasPermission = Boolean(student.activePermissionSummary?.trim())
             const documentationPending = student.documentationStatus !== 'COMPLETA'
             const guardianName = hasGuardian ? student.guardianFullName : 'Sin tutor capturado'
-            const guardianPhone = hasGuardianPhone ? student.guardianPhone : 'Sin telefono de tutor'
             const studentPhone = hasStudentPhone ? student.phone : 'Sin telefono'
             const visibleGroup = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel)
-            const careerCode = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera'
+            const academicTrack = academicTrackLabel(student)
             const criticalBadges = [
               documentationPending ? 'Documentos pendientes' : null,
               !hasAdvisor ? 'Sin asesor' : null,
-              !hasPermission ? 'Sin permiso activo' : null,
               !hasGuardian ? 'Sin tutor' : null,
               (!hasStudentPhone && !hasGuardianPhone) ? 'Sin telefono' : null,
             ].filter((item): item is string => Boolean(item)).slice(0, 3)
@@ -80,7 +95,7 @@ export function StudentTable({
                   <td>{guardianName}</td>
                   <td>{student.semesterLevel}°</td>
                   <td>{visibleGroup}</td>
-                  <td>{careerCode}</td>
+                  <td>{academicTrack}</td>
                   <td>
                     <span className={combinedStudentStatusClassName(student)}>{combinedStudentStatusLabel(student)}</span>
                   </td>
@@ -97,17 +112,6 @@ export function StudentTable({
                     >
                       Editar
                     </button>
-                    <button
-                      className="tertiary-button mini-button"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        event.preventDefault()
-                        setExpandedStudentId(expanded ? null : student.id)
-                      }}
-                      type="button"
-                    >
-                      {expanded ? 'Cerrar' : 'Mas'}
-                    </button>
                   </td>
                 </tr>
                 {expanded ? (
@@ -116,22 +120,21 @@ export function StudentTable({
                       <div className="student-detail-panel">
                         <div className="student-detail-status-row">
                           {criticalBadges.map((badge) => (
-                            <span className={badge === 'Sin permiso activo' ? 'status-tag' : 'status-tag warning'} key={badge}>{badge}</span>
+                            <span className="status-tag warning" key={badge}>{badge}</span>
                           ))}
                         </div>
 
                         <div className="student-detail-summary">
                           <p>
-                            <strong>CURP:</strong> {student.curp} · <strong>Ciclo:</strong> {student.schoolCycle}/{student.schoolPeriod} · <strong>Grupo:</strong> {student.semesterLevel}° {visibleGroup} · <strong>Asesor:</strong> {student.groupAdvisorName ?? 'Pendiente'}
+                            <strong>CURP:</strong> {student.curp} · <strong>Asesor:</strong> {student.groupAdvisorName ?? 'Pendiente'}
                           </p>
                           <p>
-                            <strong>Tutor:</strong> {guardianName} · <strong>Alumno:</strong> {studentPhone} · <strong>Domicilio:</strong> {student.address ?? 'Sin domicilio'} · <strong>Permiso:</strong> {student.activePermissionSummary ?? 'Sin permiso activo'}
+                            <strong>Tutor:</strong> {guardianName} · <strong>Alumno:</strong> {studentPhone} · <strong>Domicilio:</strong> {student.address ?? 'Sin domicilio'}
                           </p>
                         </div>
 
                         <div className="student-detail-actions">
                           <button className="secondary-button mini-button" onClick={() => void handleStartEditStudent(student.id)} type="button">Editar alumno</button>
-                          <button className="secondary-button mini-button" disabled title="TODO: conectar vista de expediente" type="button">Ver expediente</button>
                         </div>
                       </div>
                     </td>

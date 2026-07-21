@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx'
 import { amountToWords } from '../src/lib/formatters'
 import type {
   CashPaymentBatchCreateInput,
+  CashPaymentCancelInput,
   CashPaymentCreateInput,
   CashPaymentSummary,
   ChargeConceptSummary,
@@ -17,6 +18,8 @@ import type {
   GroupStat,
   EnrollmentRosterImportResult,
   EnrollmentRosterImportRow,
+  StudentImportIssueInput,
+  StudentImportIssueSummary,
   RocCancelInput,
   RocConfigSummary,
   RocConfigUpdateInput,
@@ -116,6 +119,7 @@ type StudentSummaryRecord = Prisma.StudentGetPayload<{
 
 type CashPaymentRecord = Prisma.CashPaymentGetPayload<{
   include: {
+    generatedReceipt: true
     student: true
     lines: { include: { concept: true } }
   }
@@ -254,6 +258,7 @@ function studentSummary(student: {
   schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
+  propedeuticArea: string | null
   documentationStatus: string
   enrollmentStatus: string
   guardian?: { fullName: string; phone: string } | null
@@ -286,6 +291,7 @@ function studentSummary(student: {
     schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? null,
+    propedeuticArea: student.propedeuticArea ?? null,
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus,
     statusLabel: enrollmentStatusLabel(student.enrollmentStatus),
@@ -349,6 +355,11 @@ function cashPaymentSummary(payment: CashPaymentRecord): CashPaymentSummary {
     externalTotalAmount: externalLines.reduce((sum, line) => sum + Number(line.total), 0),
     createdAt: payment.createdAt.toISOString(),
     status: payment.status as CashPaymentSummary['status'],
+    generatedReceiptId: payment.generatedReceiptId ?? payment.generatedReceipt?.id ?? null,
+    generatedRocNumber: payment.generatedReceipt?.rocNumber ?? null,
+    generatedReceiptStatus: payment.generatedReceipt?.status ?? null,
+    cancelledAt: payment.cancelledAt?.toISOString() ?? null,
+    cancellationReason: payment.cancellationReason ?? null,
     conceptLabels: payment.lines.map((line) => `${line.concept.code} ${line.concept.name}`),
     externalConceptLabels: externalLines.map((line) => `${line.concept.code} ${line.concept.name}`),
     notes: payment.notes ?? null,
@@ -448,6 +459,7 @@ function buildNextRocNumber(base: string, offset: number) {
 export async function getNextRocNumberSuggestion() {
   const baseSetting = await readRocInitialSetting()
   const lastReceipt = await prisma.rocReceipt.findFirst({
+    where: { status: { not: 'ANULADO' } },
     orderBy: { rocNumber: 'desc' },
     select: { rocNumber: true },
   })
@@ -541,6 +553,11 @@ function rocGroupLabel(groupLabel: string | null | undefined) {
   return (groupLabel ?? '').trim().replace(/^\d+\s*/u, '')
 }
 
+function rocShiftLabel(shift: string | null | undefined) {
+  const normalized = (shift ?? 'MATUTINO').trim().toUpperCase()
+  return normalized ? normalized[0] : 'M'
+}
+
 function receiptToOfficialPayload(receipt: ReceiptRecordWithGroup): OfficialRocPayload {
   const groupInfo = receipt.student.groupAssignment?.group
   return {
@@ -552,7 +569,7 @@ function receiptToOfficialPayload(receipt: ReceiptRecordWithGroup): OfficialRocP
       .join(', '),
     grade: rocGradeLabel(receipt.student.semesterLevel),
     group: rocGroupLabel(groupInfo?.label),
-    shift: groupInfo?.shift ?? 'MATUTINO',
+    shift: rocShiftLabel(groupInfo?.shift),
     printDate: formatRocPrintDate(receipt.issuedAt),
     totalAmount: Number(receipt.totalAmount),
     amountInWords: amountToWords(Number(receipt.totalAmount)),
@@ -639,12 +656,12 @@ function applyOfficialRocPayload(sheet: XLSX.WorkSheet, payload: OfficialRocPayl
 
   setCell('N4', payload.rocNumber)
   setCell('J7', payload.printDate)
-  setCell('C10', payload.fullName)
+  setCell('C10', payload.fullName.replace(/\s+/g, ' ').trim())
   setCell('K11', payload.identifier)
   setCell('C14', payload.address)
   setCell('L14', payload.grade)
   setCell('N14', payload.group)
-  setCell('O14', payload.shift)
+  setCell('O14', rocShiftLabel(payload.shift))
   setCell('E17', payload.totalAmount)
   setCell('F17', `(${payload.amountInWords})`)
 
@@ -1437,7 +1454,72 @@ export async function importAssignedRosterRows(schoolCycle: string, rows: GroupR
   }
 }
 
-export async function importEnrollmentRosterRows(schoolCycle: string, rows: EnrollmentRosterImportRow[], sourcePath: string | null | undefined, actor: RemoteActor): Promise<EnrollmentRosterImportResult> {
+function studentImportIssueSummary(issue: {
+  id: string
+  schoolCycle: string
+  sourcePath: string | null
+  sheetName: string | null
+  rowNumber: number | null
+  importKind: string | null
+  enrollmentNumber: string | null
+  curp: string | null
+  fullName: string | null
+  groupLabel: string | null
+  reason: string
+  rawJson: string | null
+  status: string
+  createdAt: Date
+}): StudentImportIssueSummary {
+  return {
+    id: issue.id,
+    schoolCycle: issue.schoolCycle,
+    sourcePath: issue.sourcePath,
+    sheetName: issue.sheetName,
+    rowNumber: issue.rowNumber,
+    importKind: issue.importKind,
+    enrollmentNumber: issue.enrollmentNumber,
+    curp: issue.curp,
+    fullName: issue.fullName,
+    groupLabel: issue.groupLabel,
+    reason: issue.reason,
+    rawJson: issue.rawJson,
+    status: issue.status,
+    createdAt: issue.createdAt.toISOString(),
+  }
+}
+
+export async function listStudentImportIssues(input?: { schoolCycle?: string; status?: string; limit?: number }): Promise<StudentImportIssueSummary[]> {
+  const issues = await prisma.studentImportIssue.findMany({
+    where: {
+      ...(input?.schoolCycle ? { schoolCycle: input.schoolCycle.trim() } : {}),
+      ...(input?.status && input.status !== 'all' ? { status: input.status.trim() } : {}),
+    },
+    orderBy: { createdAt: 'desc' },
+    take: input?.limit ?? 100,
+  })
+  return issues.map(studentImportIssueSummary)
+}
+
+async function recordStudentImportIssues(schoolCycle: string, sourcePath: string | null | undefined, issues: StudentImportIssueInput[]) {
+  if (issues.length === 0) return
+  await prisma.studentImportIssue.createMany({
+    data: issues.map((issue) => ({
+      schoolCycle,
+      sourcePath: sourcePath ?? null,
+      sheetName: issue.sheetName?.trim() || null,
+      rowNumber: issue.rowNumber ?? null,
+      importKind: issue.importKind?.trim() || null,
+      enrollmentNumber: issue.enrollmentNumber?.trim() || null,
+      curp: issue.curp?.trim().toUpperCase() || null,
+      fullName: issue.fullName?.trim().toUpperCase() || null,
+      groupLabel: issue.groupLabel?.trim().toUpperCase() || null,
+      reason: issue.reason.trim(),
+      rawJson: issue.rawJson ?? null,
+    })),
+  })
+}
+
+export async function importEnrollmentRosterRows(schoolCycle: string, rows: EnrollmentRosterImportRow[], sourcePath: string | null | undefined, actor: RemoteActor, rejectedRows: StudentImportIssueInput[] = []): Promise<EnrollmentRosterImportResult> {
   const normalizedCycle = schoolCycle.trim()
   const issues: string[] = []
   const dedupedRows = new Map<string, EnrollmentRosterImportRow>()
@@ -1533,8 +1615,8 @@ export async function importEnrollmentRosterRows(schoolCycle: string, rows: Enro
             locality: normalizeOptional(row.locality ?? null),
             previousSchool: normalizeOptional(row.previousSchool ?? null),
             secondaryAverage: row.secondaryAverage ?? null,
-            schoolCycle: normalizedCycle,
-            schoolPeriod: 1,
+            schoolCycle: isFicha ? '' : normalizedCycle,
+            schoolPeriod: isFicha ? 1 : 1,
             semesterLevel: row.semesterLevel,
             academicStatus: row.career ? `Carrera ${row.career}` : existingStudent.academicStatus,
             enrollmentStatus: nextEnrollmentStatus,
@@ -1561,8 +1643,8 @@ export async function importEnrollmentRosterRows(schoolCycle: string, rows: Enro
             state: 'Chiapas',
             previousSchool: normalizeOptional(row.previousSchool ?? null),
             secondaryAverage: row.secondaryAverage ?? null,
-            schoolCycle: normalizedCycle,
-            schoolPeriod: 1,
+            schoolCycle: isFicha ? '' : normalizedCycle,
+            schoolPeriod: isFicha ? 1 : 1,
             semesterLevel: row.semesterLevel,
             academicStatus: row.career ? `Carrera ${row.career}` : 'Regular',
             enrollmentStatus: nextEnrollmentStatus,
@@ -1619,6 +1701,8 @@ export async function importEnrollmentRosterRows(schoolCycle: string, rows: Enro
       afterJson: JSON.stringify({ sourcePath: sourcePath ?? null, createdCount, updatedCount, assignedCount }),
     },
   })
+
+  await recordStudentImportIssues(normalizedCycle, sourcePath, rejectedRows)
 
   return {
     ok: true,
@@ -1813,7 +1897,7 @@ export async function saveStudentRequirementChecklist(studentId: string, input: 
   return requirementChecklistSummary(student)
 }
 
-export async function formalizeStudentEnrollment(input: { studentId: string; allowPendingDocuments?: boolean; notes?: string }, actor: RemoteActor): Promise<StudentSummary> {
+export async function formalizeStudentEnrollment(input: { studentId: string; allowPendingDocuments?: boolean; targetSchoolCycle: string; targetPeriod: number; notes?: string }, actor: RemoteActor): Promise<StudentSummary> {
   const student = await prisma.student.findUnique({
     where: { id: input.studentId },
     include: {
@@ -1842,8 +1926,8 @@ export async function formalizeStudentEnrollment(input: { studentId: string; all
       data: {
         enrollmentNumber: nextEnrollmentNumber,
         officialEnrollmentNumber: nextEnrollmentNumber,
-        schoolCycle: '2026-2027',
-        schoolPeriod: 1,
+        schoolCycle: input.targetSchoolCycle.trim(),
+        schoolPeriod: input.targetPeriod,
         semesterLevel: 1,
         enrollmentStatus: nextEnrollmentStatus,
         documentationStatus: nextDocumentationStatus,
@@ -1926,6 +2010,7 @@ function studentMutationData(input: StudentFormInput, validated: boolean, paymen
     schoolPeriod: input.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(input.semesterLevel),
     academicStatus: normalizeOptional(input.academicStatus),
+    propedeuticArea: normalizeSemesterLevel(input.semesterLevel) === 5 ? normalizeOptional(input.propedeuticArea) : null,
     documentationStatus: 'PENDIENTE',
     status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
     validatedAt: validated ? new Date() : null,
@@ -2005,6 +2090,7 @@ export async function updateStudent(studentId: string, input: StudentFormInput, 
         schoolPeriod: actor.role === 'INSCRIPCION_AUX' ? existing.schoolPeriod : input.schoolPeriod,
         semesterLevel: actor.role === 'INSCRIPCION_AUX' ? existing.semesterLevel : normalizeSemesterLevel(input.semesterLevel),
         academicStatus: actor.role === 'INSCRIPCION_AUX' ? existing.academicStatus : normalizeOptional(input.academicStatus),
+        propedeuticArea: normalizeSemesterLevel(input.semesterLevel) === 5 ? normalizeOptional(input.propedeuticArea) : null,
         enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
         guardian: {
           upsert: {
@@ -2127,7 +2213,7 @@ export async function enrollStudentGrade(input: StudentGradeEnrollmentInput, act
     const nextEnrollmentStatus = targetGroup ? 'ASIGNADO' : 'INSCRITO'
     const nextStudent = await tx.student.update({
       where: { id: student.id },
-      data: { schoolCycle: input.schoolCycle.trim(), semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular' },
+      data: { schoolCycle: input.schoolCycle.trim(), schoolPeriod: input.schoolPeriod, semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular', propedeuticArea: semesterLevel === 5 ? normalizeOptional(input.propedeuticArea) : null },
       include: { guardian: true, admissionPayment: { select: { status: true } }, groupAssignment: { include: { group: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
     })
     await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'ALTA_GRADO', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: semesterLevel, previousGroupId: previousAssignment?.groupId ?? null, previousGroupLabel: previousAssignment?.group.label ?? null, nextGroupId: targetGroup?.id ?? null, nextGroupLabel: targetGroup?.label ?? null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus, actorId: actor.id, actorRole: actor.role } })
@@ -2185,7 +2271,7 @@ export async function listPayments(status?: CashPaymentSummary['status']) {
   const payments = await prisma.cashPayment.findMany({
     where: status ? { status } : undefined,
     orderBy: { createdAt: 'desc' },
-    include: { student: true, lines: { include: { concept: true } } },
+    include: { generatedReceipt: true, student: true, lines: { include: { concept: true } } },
   })
   return payments.map(cashPaymentSummary)
 }
@@ -2210,7 +2296,7 @@ export async function createPayment(input: CashPaymentCreateInput, actor: Remote
         }),
       },
     },
-    include: { student: true, lines: { include: { concept: true } } },
+    include: { generatedReceipt: true, student: true, lines: { include: { concept: true } } },
   })
 
   await prisma.auditLog.create({
@@ -2220,11 +2306,77 @@ export async function createPayment(input: CashPaymentCreateInput, actor: Remote
   return cashPaymentSummary(created)
 }
 
+export async function cancelPayment(input: CashPaymentCancelInput, actor: RemoteActor) {
+  const reason = input.reason.trim()
+  if (reason.length < 3) throw new Error('Escribe un motivo para cancelar el cobro.')
+
+  const payment = await prisma.cashPayment.findUnique({
+    where: { id: input.paymentId },
+    include: { generatedReceipt: true, student: true, lines: { include: { concept: true } } },
+  })
+
+  if (!payment) throw new Error('No se encontro el cobro que quieres cancelar.')
+  if (payment.status === 'CANCELADO') throw new Error('Este cobro ya estaba cancelado.')
+  if (payment.status === 'ROC_GENERADO' && !payment.generatedReceipt) {
+    throw new Error('Este cobro ya genero ROC, pero no tiene un ROC asociado para anular.')
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const receiptToCancel = payment.status === 'ROC_GENERADO' && payment.generatedReceipt?.status !== 'ANULADO'
+      ? payment.generatedReceipt
+      : null
+
+    if (receiptToCancel) {
+      await tx.rocReceipt.update({ where: { id: receiptToCancel.id }, data: { status: 'ANULADO' } })
+    }
+
+    const item = await tx.cashPayment.update({
+      where: { id: payment.id },
+      data: {
+        status: 'CANCELADO',
+        cancelledAt: new Date(),
+        cancelledById: actor.id,
+        cancellationReason: reason,
+        batchGeneratedAt: null,
+      },
+      include: { generatedReceipt: true, student: true, lines: { include: { concept: true } } },
+    })
+
+    if (payment.status === 'ROC_GENERADO') {
+      await tx.student.update({ where: { id: payment.studentId }, data: { status: 'LISTO_PARA_COBRO' } })
+    }
+
+    await tx.auditLog.create({
+      data: {
+        userId: actor.id,
+        entityType: 'CASH_PAYMENT',
+        entityId: payment.id,
+        action: payment.status === 'ROC_GENERADO' ? 'REMOTE_CANCEL_PAYMENT_AND_ROC' : 'REMOTE_CANCEL_PAYMENT',
+        beforeJson: JSON.stringify({
+          status: payment.status,
+          generatedReceiptId: payment.generatedReceiptId,
+          rocNumber: payment.generatedReceipt?.rocNumber ?? null,
+        }),
+        afterJson: JSON.stringify({
+          summary: `${payment.student.firstName} ${payment.student.paternalLastName} - ${payment.lines.map((line) => line.concept.code).join(', ')} - ${reason}`,
+          status: 'CANCELADO',
+          reason,
+          cancelledRocNumber: receiptToCancel?.rocNumber ?? null,
+        }),
+      },
+    })
+
+    return item
+  })
+
+  return cashPaymentSummary(updated)
+}
+
 export async function generateBatch(input: CashPaymentBatchCreateInput, actor: RemoteActor) {
   const payments = await prisma.cashPayment.findMany({
     where: { id: { in: input.paymentIds }, status: 'PENDIENTE_ROC' },
     orderBy: { createdAt: 'asc' },
-    include: { student: true, lines: { include: { concept: true } } },
+    include: { generatedReceipt: true, student: true, lines: { include: { concept: true } } },
   })
   if (payments.length === 0) throw new Error('No hay cobros pendientes seleccionados para generar el ROC masivo.')
 
@@ -2257,7 +2409,7 @@ export async function generateBatch(input: CashPaymentBatchCreateInput, actor: R
         include: { student: true, lines: { include: { concept: true } } },
       })
 
-      await tx.cashPayment.update({ where: { id: payment.id }, data: { status: 'ROC_GENERADO', batchGeneratedAt: new Date() } })
+      await tx.cashPayment.update({ where: { id: payment.id }, data: { status: 'ROC_GENERADO', batchGeneratedAt: new Date(), generatedReceiptId: receipt.id } })
       await tx.student.update({ where: { id: payment.studentId }, data: { status: 'COBRADO' } })
       await tx.auditLog.create({
         data: { userId: actor.id, entityType: 'ROC_BATCH', entityId: payment.id, action: 'REMOTE_CREATE_BATCH_ROC', afterJson: JSON.stringify({ rocNumber }) },

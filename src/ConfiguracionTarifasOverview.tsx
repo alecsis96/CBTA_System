@@ -4,6 +4,7 @@ import { ConfiguracionTarifasProps } from './App'
 import { groupedSelectableConcepts, isSelectableConcept } from '@/lib/utils'
 import { Field } from './components/ui/Field'
 import { TariffEditorRow } from './TariffEditorRow'
+import { TARGET_PERIOD_LABEL } from '../shared/school-periods'
 
 export function ConfiguracionTarifasOverview({
   currentRole,
@@ -138,10 +139,10 @@ export function ConfiguracionTarifasOverview({
 
           <div className="temporary-tools-actions">
             <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('enrollment')} type="button">
-              {savingAdminTestAction === 'enrollment' ? 'Revirtiendo...' : 'Reset inscripciones 2026-2027/1'}
+              {savingAdminTestAction === 'enrollment' ? 'Revirtiendo...' : `Reset inscripciones ${TARGET_PERIOD_LABEL}`}
             </button>
             <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('reinscription')} type="button">
-              {savingAdminTestAction === 'reinscription' ? 'Revirtiendo...' : 'Reset reinscripciones 2026-2027/1'}
+              {savingAdminTestAction === 'reinscription' ? 'Revirtiendo...' : `Reset reinscripciones ${TARGET_PERIOD_LABEL}`}
             </button>
             <button className="secondary-button" disabled={!canRunGlobalReset || savingAdminTestAction !== null} onClick={() => void onRunAdminTestReset('graduation')} type="button">
               {savingAdminTestAction === 'graduation' ? 'Revirtiendo...' : 'Reset egresos'}

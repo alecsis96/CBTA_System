@@ -391,7 +391,9 @@ function saveReceipts(receipts: RocReceiptSummary[]) {
 }
 
 function buildSuggestedRocNumber(receipts: RocReceiptSummary[]): RocNextNumberResult {
-  const sorted = [...receipts].sort((a, b) => a.rocNumber.localeCompare(b.rocNumber, undefined, { numeric: true, sensitivity: 'base' }))
+  const sorted = receipts
+    .filter((receipt) => receipt.status !== 'ANULADO')
+    .sort((a, b) => a.rocNumber.localeCompare(b.rocNumber, undefined, { numeric: true, sensitivity: 'base' }))
   const last = sorted.length > 0 ? sorted[sorted.length - 1].rocNumber : null
   if (!last) {
     return { suggestedRocNumber: 'DGETAYCM-ROC-0001', lastRocNumber: null }
@@ -520,6 +522,7 @@ function buildStudentDetail(input: StudentFormInput, id: string = crypto.randomU
     schoolPeriod: input.schoolPeriod,
     semesterLevel: input.semesterLevel,
     academicStatus: input.academicStatus,
+    propedeuticArea: input.propedeuticArea,
     guardianFullName: input.guardianFullName,
     guardianRelationship: input.guardianRelationship,
     guardianPhone: input.guardianPhone,
@@ -573,6 +576,7 @@ function toStudentSummary(student: BrowserStudentDetail): StudentSummary {
     schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: student.semesterLevel,
     academicStatus: student.academicStatus || null,
+    propedeuticArea: student.propedeuticArea || null,
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus,
     statusLabel: student.statusLabel,
@@ -944,6 +948,9 @@ export const browserFallbackApi = {
         .filter((item) => (input?.studentId ? item.studentId === input.studentId : true))
         .slice(0, input?.limit ?? 100)
     },
+    async listImportIssues() {
+      return []
+    },
     async formalizeEnrollment() {
       throw new Error('La inscripcion formal requiere abrir la app de escritorio con SQLite.')
     },
@@ -955,6 +962,18 @@ export const browserFallbackApi = {
     },
     async importEnrollmentRoster() {
       throw new Error('La importacion de matricula requiere abrir la app de escritorio con SQLite.')
+    },
+    async previewFichaCompletionImport() {
+      throw new Error('La revision de fichas requiere abrir la app de escritorio con SQLite.')
+    },
+    async applyFichaCompletionImport() {
+      throw new Error('Completar datos desde fichas requiere abrir la app de escritorio con SQLite.')
+    },
+    async previewPropedeuticAreaImport() {
+      throw new Error('La revision de areas propedeuticas requiere abrir la app de escritorio con SQLite.')
+    },
+    async applyPropedeuticAreaImport() {
+      throw new Error('Importar areas propedeuticas requiere abrir la app de escritorio con SQLite.')
     },
   },
   permissions: {
@@ -1190,6 +1209,11 @@ export const browserFallbackApi = {
         externalTotalAmount: selectedConcepts.filter((item) => item.concept.excludeFromRoc).reduce((sum, item) => sum + item.amount, 0),
         createdAt: new Date().toISOString(),
         status: 'PENDIENTE_ROC',
+        generatedReceiptId: null,
+        generatedRocNumber: null,
+        generatedReceiptStatus: null,
+        cancelledAt: null,
+        cancellationReason: null,
         conceptLabels: selectedConcepts.map((item) => `${item.concept.code} - ${item.concept.name}`),
         externalConceptLabels: selectedConcepts.filter((item) => item.concept.excludeFromRoc).map((item) => `${item.concept.code} - ${item.concept.name}`),
         notes: input.notes?.trim() || null,
@@ -1200,9 +1224,42 @@ export const browserFallbackApi = {
       savePayments(payments)
       return payment
     },
-    async list(filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' }) {
+    async list(filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' | 'CANCELADO' }) {
       const payments = getPayments()
       return filters?.status ? payments.filter((item) => item.status === filters.status) : payments
+    },
+    async cancel(input: { paymentId: string; reason: string }) {
+      if (input.reason.trim().length < 3) {
+        throw new Error('Escribe un motivo para cancelar el cobro.')
+      }
+
+      const payments = getPayments()
+      const receipts = getReceipts()
+      const payment = payments.find((item) => item.id === input.paymentId)
+      if (!payment) {
+        throw new Error('No se encontro el cobro que quieres cancelar.')
+      }
+
+      if (payment.status === 'CANCELADO') {
+        throw new Error('Este cobro ya estaba cancelado.')
+      }
+
+      const updatedReceipts = receipts.map((receipt) =>
+        payment.generatedReceiptId && receipt.id === payment.generatedReceiptId
+          ? { ...receipt, status: 'ANULADO' }
+          : receipt,
+      )
+      const updatedPayment: CashPaymentSummary = {
+        ...payment,
+        status: 'CANCELADO',
+        generatedReceiptStatus: payment.generatedReceiptId ? 'ANULADO' : payment.generatedReceiptStatus,
+        cancelledAt: new Date().toISOString(),
+        cancellationReason: input.reason.trim(),
+      }
+
+      saveReceipts(updatedReceipts)
+      savePayments(payments.map((item) => (item.id === input.paymentId ? updatedPayment : item)))
+      return updatedPayment
     },
     async generateBatch(input: CashPaymentBatchCreateInput): Promise<CashPaymentBatchCreateResult> {
       const receipts = getReceipts()
@@ -1212,9 +1269,10 @@ export const browserFallbackApi = {
         throw new Error('No hay cobros pendientes seleccionados para generar el ROC masivo.')
       }
 
+      const generatedReceiptByPaymentId = new Map<string, RocReceiptSummary>()
       selectedPayments.forEach((payment, index) => {
         const printableLabels = payment.conceptLabels.filter((label) => !payment.externalConceptLabels.includes(label))
-        receipts.unshift({
+        const receipt = {
           id: crypto.randomUUID(),
           rocNumber: `${input.startingRocNumber}-${index + 1}`,
           studentId: payment.studentId,
@@ -1223,12 +1281,22 @@ export const browserFallbackApi = {
           issuedAt: new Date().toISOString(),
           status: 'EMITIDO',
           conceptLabels: printableLabels,
-        })
+        }
+        receipts.unshift(receipt)
+        generatedReceiptByPaymentId.set(payment.id, receipt)
       })
       saveReceipts(receipts)
 
       const updated = payments.map((payment) =>
-        input.paymentIds.includes(payment.id) ? { ...payment, status: 'ROC_GENERADO' as const } : payment,
+        input.paymentIds.includes(payment.id) && generatedReceiptByPaymentId.has(payment.id)
+          ? {
+              ...payment,
+              status: 'ROC_GENERADO' as const,
+              generatedReceiptId: generatedReceiptByPaymentId.get(payment.id)?.id ?? null,
+              generatedRocNumber: generatedReceiptByPaymentId.get(payment.id)?.rocNumber ?? null,
+              generatedReceiptStatus: 'EMITIDO',
+            }
+          : payment,
       )
       savePayments(updated)
 

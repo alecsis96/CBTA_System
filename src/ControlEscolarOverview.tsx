@@ -1,9 +1,10 @@
 import { useState, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { ControlEscolarProps } from './App';
-import { CONTROL_STUDENTS_PER_PAGE, getOutputFileName, formatPreferredEnrollment, formatVisibleGroupLabel, relationshipOptions, combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel, getCareerCodeFromGroupLabel } from '@/lib/utils';
+import { CONTROL_STUDENTS_PER_PAGE, getOutputFileName, formatPreferredEnrollment, formatSchoolPeriodLabel, formatVisibleGroupLabel, relationshipOptions, combinedStudentStatusClassName, combinedStudentStatusLabel, formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel, getCareerCodeFromGroupLabel } from '@/lib/utils';
 import { pickRosterWorkbookFile, parseRosterWorkbook } from '@/lib/roster-import';
 import { pickEnrollmentWorkbookFile, parseEnrollmentWorkbook } from '@/lib/enrollment-import';
+import { parseFichaCompletionWorkbooks, parsePropedeuticAreaWorkbook, pickStudentDataWorkbookFiles } from '@/lib/student-data-import';
 import { groupSexBalanceLabel, groupBandBalanceLabel } from '@/lib/group-stats';
 import { Field } from './components/ui/Field';
 import { SearchInput } from './components/ui/SearchInput';
@@ -13,10 +14,30 @@ import { StudentCaptureFormPanel } from './components/control-escolar/student-ca
 import { type DashboardMetric, ModuleHero, ModuleBarCompact, DashboardEmptyState } from './components/dashboard-kit';
 import { StudentTable } from './components/StudentTable';
 import { FloatingFeedbackToast } from './FloatingFeedbackToast';
-import type { GroupStat, GroupPreviewRow, StudentRequirementChecklist, StudentSummary, AdmissionSummary, SaveStudentRequirementChecklistInput } from './types/domain';
+import type { GroupStat, GroupPreviewRow, StudentRequirementChecklist, StudentSummary, AdmissionSummary, SaveStudentRequirementChecklistInput, StudentImportIssueSummary } from './types/domain';
+import { CURRENT_SCHOOL_CYCLE, CURRENT_SCHOOL_PERIOD, CURRENT_PERIOD_LABEL, TARGET_SCHOOL_CYCLE, TARGET_SCHOOL_PERIOD, TARGET_PERIOD_LABEL } from '../shared/school-periods';
 
-const TARGET_SCHOOL_CYCLE = '2026-2027';
-const TARGET_SCHOOL_PERIOD = 1;
+const PROPEDEUTIC_AREA_OPTIONS = [
+  { code: 'CS', label: 'Ciencias sociales' },
+  { code: 'C.S', label: 'Ciencias sociales' },
+  { code: 'CNEyT', label: 'Ciencias naturales experimentales y tecnologia' },
+  { code: 'CNEYT', label: 'Ciencias naturales experimentales y tecnologia' },
+  { code: 'PM/CNEyT', label: 'Pensamiento matematico y Ciencias naturales experimentales y tecnologia' },
+  { code: 'PM-CNEYT', label: 'Pensamiento matematico y Ciencias naturales experimentales y tecnologia' },
+  { code: 'P.M', label: 'Pensamiento matematico' },
+  { code: 'H/L y C', label: 'Humanidades, lengua y comunicacion' },
+  { code: 'H.L.Y C.', label: 'Humanidades, lengua y comunicacion' },
+];
+
+function propedeuticAreaLabel(code: string | null | undefined) {
+  return PROPEDEUTIC_AREA_OPTIONS.find((area) => area.code === code)?.label ?? code ?? 'Sin area';
+}
+
+function academicTrackLabel(student: Pick<StudentSummary, 'semesterLevel' | 'groupLabel' | 'propedeuticArea'>) {
+  if (student.semesterLevel === 1) return 'Sin carrera';
+  if (student.semesterLevel === 5) return propedeuticAreaLabel(student.propedeuticArea);
+  return getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera';
+}
 
 function isActiveForSemesterTransition(student: StudentSummary) {
   return ['INSCRITO', 'ASIGNADO', 'CONFIRMADO'].includes(student.enrollmentStatus);
@@ -28,11 +49,15 @@ function targetSemesterForReinscription(student: StudentSummary) {
   return null;
 }
 
+function isCurrentPeriodStudent(student: StudentSummary) {
+  return student.schoolCycle === CURRENT_SCHOOL_CYCLE && student.schoolPeriod === CURRENT_SCHOOL_PERIOD;
+}
+
 export function ControlEscolarOverview({
-  currentRole, form, students, preRegistrations, admissions, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, loading, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
+  currentRole, form, students, preRegistrations, admissions, studentImportIssues, recentAuditLogs, captureQuery, activeAdmission, editingAcademicContext, editingStudentId, newlyCreatedStudentId, saving, loading, feedback, studentsSectionRef, captureSectionRef, onCancelEdit, onEditStudent, onUpdatePreRegistrationStatus, onSubmit, onUpdateField, onSelectAdmissionForCapture, onUpdateCaptureQuery, onExportSep, onReloadData, onClearNewlyCreatedStudent, groupsApi, studentsApi,
 }: ControlEscolarProps) {
   const [captureTab, setCaptureTab] = useState<'fichas' | 'formulario'>('fichas');
-  const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos'>('alumnos');
+  const [operationsTab, setOperationsTab] = useState<'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos' | 'errores'>('alumnos');
   const [studentFormMode, setStudentFormMode] = useState<'captura' | 'edicion' | 'inscripcion' | 'reinscripcion'>('captura');
   const [academicMovementTab, setAcademicMovementTab] = useState<'movimientos' | 'asignacion'>('movimientos');
   const [studentQuery, setStudentQuery] = useState('');
@@ -67,6 +92,7 @@ export function ControlEscolarOverview({
   const [checklistFeedback, setChecklistFeedback] = useState<string | null>(null);
   const [importIssues, setImportIssues] = useState<string[]>([]);
   const [isImportingEnrollmentRoster, setIsImportingEnrollmentRoster] = useState(false);
+  const [isImportingStudentData, setIsImportingStudentData] = useState(false);
   const [preparingEnrollmentStudentId, setPreparingEnrollmentStudentId] = useState<string | null>(null);
   const [advisorDrafts, setAdvisorDrafts] = useState<Record<string, string>>({});
   const [editingAdvisorGroupId, setEditingAdvisorGroupId] = useState<string | null>(null);
@@ -87,8 +113,12 @@ export function ControlEscolarOverview({
   const formalStudents = students.filter((student) => student.enrollmentStatus !== 'FICHA_ENTREGADA' && student.enrollmentStatus !== 'EGRESADO');
   const fichaStudents = students.filter((student) => student.enrollmentStatus === 'FICHA_ENTREGADA');
   const targetPeriodStudents = formalStudents.filter((student) => student.schoolCycle === TARGET_SCHOOL_CYCLE && student.schoolPeriod === TARGET_SCHOOL_PERIOD && [1, 3, 5].includes(student.semesterLevel));
-  const pendingReinscriptionStudents = students.filter((student) => isActiveForSemesterTransition(student) && targetSemesterForReinscription(student) !== null);
-  const pendingGraduationStudents = students.filter((student) => isActiveForSemesterTransition(student) && student.semesterLevel === 6);
+  const allReinscriptionCandidates = formalStudents.filter((student) => isActiveForSemesterTransition(student) && targetSemesterForReinscription(student) !== null);
+  const currentPeriodReinscriptionCandidates = allReinscriptionCandidates.filter(isCurrentPeriodStudent);
+  const pendingReinscriptionStudents = currentPeriodReinscriptionCandidates.length > 0 ? currentPeriodReinscriptionCandidates : allReinscriptionCandidates;
+  const allGraduationCandidates = formalStudents.filter((student) => isActiveForSemesterTransition(student) && student.semesterLevel === 6);
+  const currentPeriodGraduationCandidates = allGraduationCandidates.filter(isCurrentPeriodStudent);
+  const pendingGraduationStudents = currentPeriodGraduationCandidates.length > 0 ? currentPeriodGraduationCandidates : allGraduationCandidates;
   const matchesDirectoryFilters = (student: StudentSummary, query: string) => {
     const haystack = [
       student.enrollmentNumber,
@@ -106,9 +136,10 @@ export function ControlEscolarOverview({
     const matchesStatus = statusFilter === 'all' || student.statusLabel === statusFilter;
     const matchesDocumentation = documentationFilter === 'all' || student.documentationStatus === documentationFilter;
     const studentGroup = formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel);
-    const studentCareer = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera';
+    const studentCareer = academicTrackLabel(student);
+    const studentArea = student.semesterLevel === 5 ? student.propedeuticArea ?? 'Sin area' : null;
     const matchesGroup = groupFilter === 'all' || studentGroup === groupFilter;
-    const matchesCareer = careerFilter === 'all' || studentCareer === careerFilter;
+    const matchesCareer = careerFilter === 'all' || studentCareer === careerFilter || studentArea === careerFilter;
     const matchesCycle = cycleFilter === 'all' || student.schoolCycle === cycleFilter;
     const matchesQuickFilter =
       quickOperationalFilter === 'all' ||
@@ -355,7 +386,7 @@ export function ControlEscolarOverview({
       setIsImportingEnrollmentRoster(true);
       setChecklistFeedback(`Leyendo ${file.name}...`);
       const parsed = await parseEnrollmentWorkbook(file);
-      if (parsed.rows.length === 0) {
+      if (parsed.rows.length === 0 && parsed.rejectedRows.length === 0) {
         setChecklistFeedback('El archivo no contiene alumnos validos para importar matricula.');
         return;
       }
@@ -365,6 +396,7 @@ export function ControlEscolarOverview({
         schoolCycle: form.schoolCycle,
         sourcePath: file.name,
         rows: parsed.rows,
+        rejectedRows: parsed.rejectedRows,
       });
       const allIssues = [...parsed.issues, ...result.issues].slice(0, 12);
       setImportIssues(allIssues);
@@ -372,12 +404,159 @@ export function ControlEscolarOverview({
       setChecklistFeedback(
         `Matricula importada desde ${file.name}: ${result.createdCount} alumnos nuevos, ${result.updatedCount} actualizados, ${result.assignedCount} asignados, ${result.createdGroupCount} grupos nuevos, ${result.skippedCount + parsed.skippedCount} filas omitidas.${issuesSuffix}`
       );
+      if (parsed.rejectedRows.length > 0) {
+        setOperationsTab('errores');
+      }
       await refreshGroupStats();
       await onReloadData();
     } catch (error) {
       setChecklistFeedback(error instanceof Error ? `No se pudo importar la matricula: ${error.message}` : 'No se pudo importar la matricula.');
     } finally {
       setIsImportingEnrollmentRoster(false);
+    }
+  }
+
+  function formatImportFieldCounts(fieldUpdateCounts: Record<string, number>) {
+    const entries = Object.entries(fieldUpdateCounts).filter(([, count]) => count > 0);
+    if (entries.length === 0) return 'Sin campos por actualizar';
+    const labels: Record<string, string> = {
+      phone: 'telefono alumno',
+      email: 'correo',
+      motherTongue: 'lengua materna',
+      locality: 'localidad',
+      previousSchool: 'escuela procedencia',
+      secondaryAverage: 'promedio',
+      age: 'edad',
+      sex: 'sexo',
+      guardianFullName: 'tutor',
+      guardianPhone: 'telefono tutor',
+      semesterLevel: 'semestre',
+      propedeuticArea: 'area propedeutica',
+      academicStatus: 'carrera',
+      groupAssignment: 'grupo',
+    };
+    return entries.map(([field, count]) => `${labels[field] ?? field}: ${count}`).join(', ');
+  }
+
+  async function handleCompleteFichaData() {
+    if (isEnrollmentAux) {
+      setChecklistFeedback('Tu usuario solo puede trabajar el flujo de inscripcion formal.');
+      return;
+    }
+    if (!studentsApi?.previewFichaCompletionImport || !studentsApi?.applyFichaCompletionImport || isImportingStudentData) return;
+    try {
+      const files = await pickStudentDataWorkbookFiles({ multiple: true });
+      if (files.length === 0) {
+        setChecklistFeedback('Importacion cancelada.');
+        return;
+      }
+
+      setIsImportingStudentData(true);
+      setChecklistFeedback(`Leyendo ${files.length} archivo(s) de fichas...`);
+      const parsed = await parseFichaCompletionWorkbooks(files);
+      if (parsed.rows.length === 0 && parsed.rejectedRows.length === 0) {
+        setChecklistFeedback('Los archivos no contienen fichas validas para revisar.');
+        return;
+      }
+
+      const sourcePath = files.map((file) => file.name).join(', ');
+      const payload = { schoolCycle: form.schoolCycle || TARGET_SCHOOL_CYCLE, sourcePath, rows: parsed.rows, rejectedRows: parsed.rejectedRows };
+      const preview = await studentsApi.previewFichaCompletionImport(payload);
+      const message = [
+        `Completar datos desde fichas`,
+        `Filas leidas: ${preview.totalRows}`,
+        `Alumnos encontrados: ${preview.matchedCount}`,
+        `Alumnos que se actualizaran: ${preview.updateCount}`,
+        `Filas omitidas/incidencias: ${preview.skippedCount}`,
+        `Campos: ${formatImportFieldCounts(preview.fieldUpdateCounts)}`,
+        '',
+        '¿Aplicar estos cambios? No se crearan alumnos nuevos.',
+      ].join('\n');
+
+      if (!window.confirm(message)) {
+        setChecklistFeedback('Importacion cancelada antes de aplicar cambios.');
+        setImportIssues([...parsed.issues, ...preview.issues].slice(0, 12));
+        return;
+      }
+
+      setChecklistFeedback(`Aplicando ${preview.updateCount} actualizaciones desde fichas...`);
+      const result = await studentsApi.applyFichaCompletionImport(payload);
+      const allIssues = [...parsed.issues, ...result.issues].slice(0, 12);
+      setImportIssues(allIssues);
+      setChecklistFeedback(
+        `Fichas aplicadas: ${result.appliedCount} alumnos actualizados, ${result.skippedCount} filas omitidas. Campos: ${formatImportFieldCounts(result.fieldUpdateCounts)}.`
+      );
+      if (result.issueCount > 0) setOperationsTab('errores');
+      await refreshGroupStats();
+      await onReloadData();
+    } catch (error) {
+      setChecklistFeedback(error instanceof Error ? `No se pudieron completar las fichas: ${error.message}` : 'No se pudieron completar las fichas.');
+    } finally {
+      setIsImportingStudentData(false);
+    }
+  }
+
+  async function handleImportPropedeuticAreas() {
+    if (isEnrollmentAux) {
+      setChecklistFeedback('Tu usuario solo puede trabajar el flujo de inscripcion formal.');
+      return;
+    }
+    if (!studentsApi?.previewPropedeuticAreaImport || !studentsApi?.applyPropedeuticAreaImport || isImportingStudentData) return;
+    try {
+      const [file] = await pickStudentDataWorkbookFiles();
+      if (!file) {
+        setChecklistFeedback('Importacion cancelada.');
+        return;
+      }
+
+      setIsImportingStudentData(true);
+      setChecklistFeedback(`Leyendo areas propedeuticas desde ${file.name}...`);
+      const parsed = await parsePropedeuticAreaWorkbook(file);
+      if (parsed.rows.length === 0 && parsed.rejectedRows.length === 0) {
+        setChecklistFeedback('El archivo no contiene filas validas de areas propedeuticas.');
+        return;
+      }
+
+      const payload = {
+        schoolCycle: TARGET_SCHOOL_CYCLE,
+        schoolPeriod: TARGET_SCHOOL_PERIOD,
+        sourcePath: file.name,
+        rows: parsed.rows,
+        rejectedRows: parsed.rejectedRows,
+      };
+      const preview = await studentsApi.previewPropedeuticAreaImport(payload);
+      const message = [
+        `Importar areas propedeuticas`,
+        `Filas leidas: ${preview.totalRows}`,
+        `Alumnos encontrados: ${preview.matchedCount}`,
+        `Alumnos que pasaran a 5to: ${preview.updateCount}`,
+        `Grupos nuevos por crear: ${preview.createdGroupCount ?? 0}`,
+        `Filas omitidas/incidencias: ${preview.skippedCount}`,
+        `Campos: ${formatImportFieldCounts(preview.fieldUpdateCounts)}`,
+        '',
+        '¿Aplicar pase a 5to, grupo, carrera y area propedeutica?',
+      ].join('\n');
+
+      if (!window.confirm(message)) {
+        setChecklistFeedback('Importacion cancelada antes de aplicar cambios.');
+        setImportIssues([...parsed.issues, ...preview.issues].slice(0, 12));
+        return;
+      }
+
+      setChecklistFeedback(`Aplicando areas propedeuticas a ${preview.updateCount} alumnos...`);
+      const result = await studentsApi.applyPropedeuticAreaImport(payload);
+      const allIssues = [...parsed.issues, ...result.issues].slice(0, 12);
+      setImportIssues(allIssues);
+      setChecklistFeedback(
+        `Areas importadas: ${result.appliedCount} alumnos actualizados, ${result.createdGroupCount ?? 0} grupos nuevos, ${result.skippedCount} filas omitidas.`
+      );
+      if (result.issueCount > 0) setOperationsTab('errores');
+      await refreshGroupStats();
+      await onReloadData();
+    } catch (error) {
+      setChecklistFeedback(error instanceof Error ? `No se pudieron importar las areas: ${error.message}` : 'No se pudieron importar las areas.');
+    } finally {
+      setIsImportingStudentData(false);
     }
   }
 
@@ -394,8 +573,9 @@ export function ControlEscolarOverview({
       Alumno: student.fullName,
       Semestre: `${student.semesterLevel} semestre`,
       Grupo: formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel) || 'Sin grupo',
-      Carrera: getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera',
-      'Ciclo/periodo': `${student.schoolCycle}/${student.schoolPeriod ?? 1}`,
+      Carrera: academicTrackLabel(student),
+      'Area propedeutica': student.semesterLevel === 5 ? propedeuticAreaLabel(student.propedeuticArea) : '',
+      'Ciclo/periodo': formatSchoolPeriodLabel(student.schoolCycle, student.schoolPeriod),
       Tutor: student.guardianFullName ?? 'Pendiente',
       'Telefono tutor': student.guardianPhone ?? 'Pendiente',
       'Telefono alumno': student.phone ?? 'Sin telefono',
@@ -449,6 +629,102 @@ export function ControlEscolarOverview({
     setChecklistFeedback(`Excel de inscritos exportado: ${rows.length} alumnos. Archivo: ${fileName}`);
   }
 
+  async function handleExportStatistics() {
+    const statisticsStudents = filteredStudents;
+    if (statisticsStudents.length === 0) {
+      setChecklistFeedback('No hay estadisticas para exportar con los filtros actuales.');
+      return;
+    }
+
+    const rowsBySemester = [1, 2, 3, 4, 5, 6].map((semester) => ({
+      Semestre: `${semester} semestre`,
+      Alumnos: statisticsStudents.filter((student) => student.semesterLevel === semester).length,
+      'Docs pendientes': statisticsStudents.filter((student) => student.semesterLevel === semester && student.documentationStatus !== 'COMPLETA').length,
+    }));
+    const rowsByGroup = Array.from(
+      statisticsStudents.reduce((map, student) => {
+        const key = `${student.semesterLevel}|${student.groupLabel ?? 'Sin grupo'}`;
+        const current = map.get(key) ?? {
+          Semestre: `${student.semesterLevel} semestre`,
+          Grupo: formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel) || 'Sin grupo',
+          Carrera: academicTrackLabel(student),
+          'Area propedeutica': student.semesterLevel === 5 ? propedeuticAreaLabel(student.propedeuticArea) : '',
+          Alumnos: 0,
+          'Docs pendientes': 0,
+          Asesor: student.groupAdvisorName ?? 'Pendiente',
+          Ciclo: formatSchoolPeriodLabel(student.schoolCycle, student.schoolPeriod),
+          Periodo: student.schoolPeriod,
+        };
+        current.Alumnos += 1;
+        if (student.documentationStatus !== 'COMPLETA') current['Docs pendientes'] += 1;
+        map.set(key, current);
+        return map;
+      }, new Map<string, { Semestre: string; Grupo: string; Carrera: string; 'Area propedeutica': string; Alumnos: number; 'Docs pendientes': number; Asesor: string; Ciclo: string; Periodo: number }>()),
+    ).map((entry) => entry[1]);
+    const rowsByArea = PROPEDEUTIC_AREA_OPTIONS.map((area) => ({
+      Clave: area.code,
+      Area: area.label,
+      Alumnos: statisticsStudents.filter((student) => student.semesterLevel === 5 && student.propedeuticArea === area.code).length,
+      'Docs pendientes': statisticsStudents.filter((student) => student.semesterLevel === 5 && student.propedeuticArea === area.code && student.documentationStatus !== 'COMPLETA').length,
+    })).concat([{
+      Clave: 'SIN_AREA',
+      Area: 'Sin area capturada',
+      Alumnos: statisticsStudents.filter((student) => student.semesterLevel === 5 && !student.propedeuticArea).length,
+      'Docs pendientes': statisticsStudents.filter((student) => student.semesterLevel === 5 && !student.propedeuticArea && student.documentationStatus !== 'COMPLETA').length,
+    }]);
+    const rowsByDocumentation = Array.from(
+      statisticsStudents.reduce((map, student) => {
+        map.set(student.documentationStatus, (map.get(student.documentationStatus) ?? 0) + 1);
+        return map;
+      }, new Map<string, number>()),
+    ).map(([Estatus, Alumnos]) => ({ Estatus, Alumnos }));
+    const rowsByInscription = Array.from(
+      statisticsStudents.reduce((map, student) => {
+        map.set(student.enrollmentStatus, (map.get(student.enrollmentStatus) ?? 0) + 1);
+        return map;
+      }, new Map<string, number>()),
+    ).map(([Estatus, Alumnos]) => ({ Estatus, Alumnos }));
+    const summaryRows = [
+      { Indicador: 'Periodo actual', Valor: CURRENT_PERIOD_LABEL },
+      { Indicador: 'Periodo siguiente', Valor: TARGET_PERIOD_LABEL },
+      { Indicador: 'Alumnos filtrados', Valor: statisticsStudents.length },
+      { Indicador: 'Docs pendientes', Valor: statisticsStudents.filter((student) => student.documentationStatus !== 'COMPLETA').length },
+      { Indicador: 'Pendientes inscripcion', Valor: statisticsStudents.filter((student) => student.enrollmentStatus === 'FICHA_ENTREGADA' || targetSemesterForReinscription(student) !== null).length },
+      { Indicador: '5o con area propedeutica', Valor: statisticsStudents.filter((student) => student.semesterLevel === 5 && student.propedeuticArea).length },
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    [
+      ['Resumen', summaryRows],
+      ['Por semestre', rowsBySemester],
+      ['Por grupo', rowsByGroup],
+      ['Areas 5to', rowsByArea],
+      ['Documentacion', rowsByDocumentation],
+      ['Inscripcion', rowsByInscription],
+    ].forEach(([sheetName, rows]) => {
+      const worksheet = XLSX.utils.json_to_sheet(rows as Array<Record<string, unknown>>);
+      worksheet['!cols'] = Array.from({ length: 9 }, () => ({ wch: 24 }));
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheetName as string);
+    });
+
+    const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' }) as string;
+    const fileName = `estadisticas-control-escolar-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    if (window.cbta?.files?.saveAndOpenWorkbook) {
+      await window.cbta.files.saveAndOpenWorkbook({ fileName, base64 });
+    } else {
+      const binary = window.atob(base64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    setChecklistFeedback(`Estadisticas exportadas: ${statisticsStudents.length} alumnos. Archivo: ${fileName}`);
+  }
+
   async function handlePrintAssignedRoster() {
     if (!groupsApi?.printAssignedRoster) return;
     await groupsApi.printAssignedRoster({ schoolCycle: form.schoolCycle });
@@ -458,20 +734,24 @@ export function ControlEscolarOverview({
   async function handlePrepareEnrollmentReview(student: StudentSummary) {
     if (preparingEnrollmentStudentId) return;
     setPreparingEnrollmentStudentId(student.id);
+    setStudentFormMode('inscripcion');
+    setOperationsTab('captura');
+    setCaptureTab('formulario');
+    setSelectedChecklistStudentId(student.id);
+    setRequirementChecklist(null);
+    setChecklistFeedback(`Abriendo revision de inscripcion para ${student.fullName}...`);
+    setTimeout(() => {
+      captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
     try {
-      await onEditStudent(student.id);
-      const checklist = await studentsApi?.getRequirementChecklist?.(student.id);
+      const [, checklist] = await Promise.all([
+        onEditStudent(student.id),
+        studentsApi?.getRequirementChecklist?.(student.id),
+      ]);
       if (checklist) {
-        setSelectedChecklistStudentId(student.id);
         setRequirementChecklist(checklist);
       }
-      setStudentFormMode('inscripcion');
-      setOperationsTab('captura');
-      setCaptureTab('formulario');
       setChecklistFeedback(`Revisa la documentacion y completa los datos faltantes de ${student.fullName}. Aun no se ha formalizado la inscripcion.`);
-      setTimeout(() => {
-        captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 0);
     } catch (error) {
       setChecklistFeedback(error instanceof Error ? error.message : 'No se pudo abrir la revision de inscripcion.');
     } finally {
@@ -484,23 +764,28 @@ export function ControlEscolarOverview({
     const targetSemester = targetSemesterForReinscription(student);
     if (!targetSemester || preparingEnrollmentStudentId) return;
     setPreparingEnrollmentStudentId(student.id);
+    setStudentFormMode('reinscripcion');
+    setOperationsTab('captura');
+    setCaptureTab('formulario');
+    setSelectedChecklistStudentId(student.id);
+    setRequirementChecklist(null);
+    setChecklistFeedback(`Abriendo reinscripcion de ${student.fullName}...`);
+    setTimeout(() => {
+      captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
     try {
-      await onEditStudent(student.id);
+      const [, checklist] = await Promise.all([
+        onEditStudent(student.id),
+        studentsApi?.getRequirementChecklist?.(student.id),
+      ]);
       onUpdateField('schoolCycle', TARGET_SCHOOL_CYCLE);
       onUpdateField('schoolPeriod', TARGET_SCHOOL_PERIOD);
       onUpdateField('semesterLevel', targetSemester);
-      const checklist = await studentsApi?.getRequirementChecklist?.(student.id);
+      onUpdateField('propedeuticArea', targetSemester === 5 ? student.propedeuticArea ?? '' : '');
       if (checklist) {
-        setSelectedChecklistStudentId(student.id);
         setRequirementChecklist(checklist);
       }
-      setStudentFormMode('reinscripcion');
-      setOperationsTab('captura');
-      setCaptureTab('formulario');
-      setChecklistFeedback(`Revisa documentacion y datos faltantes de ${student.fullName}. Pasara a ${targetSemester}o semestre en ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}.`);
-      setTimeout(() => {
-        captureSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 0);
+      setChecklistFeedback(`Revisa documentacion y datos faltantes de ${student.fullName}. Pasara a ${targetSemester}o semestre en ${TARGET_PERIOD_LABEL}.`);
     } catch (error) {
       setChecklistFeedback(error instanceof Error ? error.message : 'No se pudo abrir la reinscripcion.');
     } finally {
@@ -516,7 +801,7 @@ export function ControlEscolarOverview({
         studentId: student.id,
         fromSchoolCycle: student.schoolCycle,
         fromPeriod: student.schoolPeriod,
-        notes: `Egreso hacia ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}`,
+        notes: `Egreso hacia ${TARGET_PERIOD_LABEL}`,
       });
       setChecklistFeedback(`${student.fullName} marcado como egresado. Egresados procesados: ${result.graduatedCount}.`);
       await onReloadData();
@@ -630,26 +915,39 @@ export function ControlEscolarOverview({
       const savedChecklist = await studentsApi.saveRequirementChecklist(editingStudentId, payload);
       setRequirementChecklist(savedChecklist);
       const targetSemester = form.semesterLevel === 2 ? 3 : form.semesterLevel === 4 ? 5 : form.semesterLevel;
+      if (studentFormMode === 'reinscripcion' && targetSemester === 5 && !form.propedeuticArea.trim()) {
+        setChecklistFeedback('Selecciona el area propedeutica para reinscribir a 5o semestre.');
+        return;
+      }
       const updated = studentFormMode === 'reinscripcion'
         ? await studentsApi.reinscribeForPeriod({
           studentId: editingStudentId,
           targetSchoolCycle: TARGET_SCHOOL_CYCLE,
           targetPeriod: TARGET_SCHOOL_PERIOD,
           targetSemesterLevel: targetSemester ?? form.semesterLevel,
+          propedeuticArea: targetSemester === 5 ? form.propedeuticArea : null,
           toGroupId: null,
-          notes: `Reinscripcion ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}`,
+          notes: `Reinscripcion ${TARGET_PERIOD_LABEL}`,
         })
-        : await studentsApi.formalizeEnrollment({ studentId: editingStudentId });
+        : await studentsApi.formalizeEnrollment({
+          studentId: editingStudentId,
+          targetSchoolCycle: TARGET_SCHOOL_CYCLE,
+          targetPeriod: TARGET_SCHOOL_PERIOD,
+        });
       setChecklistFeedback(studentFormMode === 'reinscripcion'
-        ? `${updated.fullName} reinscrito en ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}.`
+        ? `${updated.fullName} reinscrito en ${TARGET_PERIOD_LABEL}.`
         : `${updated.fullName} inscrito formalmente con matricula ${formatPreferredEnrollment(updated)}.`);
       setStudentFormMode('captura');
       setSelectedChecklistStudentId('');
       setRequirementChecklist(null);
       onCancelEdit();
       setOperationsTab('inscripcion');
+      setCaptureTab('fichas');
       await refreshGroupStats();
       await onReloadData();
+      setTimeout(() => {
+        studentsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 0);
     } catch (error) {
       setChecklistFeedback(error instanceof Error ? error.message : 'No se pudo completar la inscripcion formal.');
     } finally {
@@ -679,6 +977,8 @@ export function ControlEscolarOverview({
     ? 'Folio, CURP o nombre de ficha'
     : operationsTab === 'bandeja'
       ? 'La bandeja SEP usa su propio flujo'
+      : operationsTab === 'errores'
+        ? 'Revisa alumnos rechazados por datos erroneos'
       : operationsTab === 'inscripcion'
         ? 'Buscar por matrícula, nombre o CURP'
         : 'Buscar por matrícula, nombre o CURP';
@@ -728,8 +1028,12 @@ export function ControlEscolarOverview({
   ).map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value));
   const careerFilterOptions = Array.from(
     filterSourceStudents.reduce((map, student) => {
-      const value = getCareerCodeFromGroupLabel(student.groupLabel) ?? 'Sin carrera';
+      const value = academicTrackLabel(student);
       map.set(value, (map.get(value) ?? 0) + 1);
+      if (student.semesterLevel === 5) {
+        const areaValue = propedeuticAreaLabel(student.propedeuticArea);
+        map.set(areaValue, (map.get(areaValue) ?? 0) + 1);
+      }
       return map;
     }, new Map<string, number>()),
   ).map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value));
@@ -748,25 +1052,31 @@ export function ControlEscolarOverview({
     statusFilter !== 'all' ||
     documentationFilter !== 'all';
   const inscriptionMetrics = [
-    { label: `Inscritos ${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}`, value: targetPeriodStudents.length, helper: 'Alumnos activos' },
+    { label: `Inscritos ${TARGET_PERIOD_LABEL}`, value: targetPeriodStudents.length, helper: 'Alumnos activos' },
     { label: 'Faltantes', value: inscriptionPendingCount, helper: 'Por inscribir o reinscribir', tone: inscriptionPendingCount > 0 ? 'warning' : 'default' },
     { label: 'Nuevo ingreso', value: fichaStudents.length, helper: 'Fichas pendientes' },
     { label: 'Reinscripcion', value: pendingReinscriptionStudents.length, helper: '2o y 4o pendientes' },
     { label: 'Sextos por egresar', value: pendingGraduationStudents.length, helper: 'Cierre semestral', tone: pendingGraduationStudents.length > 0 ? 'warning' : 'default' },
   ] satisfies DashboardMetric[];
+  const statisticsStudents = filteredStudents;
   const semesterStats = [1, 2, 3, 4, 5, 6].map((semester) => ({
     semester,
-    count: formalStudents.filter((student) => student.semesterLevel === semester).length,
+    count: statisticsStudents.filter((student) => student.semesterLevel === semester).length,
   }));
   const activeSemesterStats = semesterStats.filter((item) => item.count > 0);
-  const targetReinscribedCount = targetPeriodStudents.filter((student) => [3, 5].includes(student.semesterLevel)).length;
+  const targetReinscribedCount = statisticsStudents.filter((student) => student.schoolCycle === TARGET_SCHOOL_CYCLE && student.schoolPeriod === TARGET_SCHOOL_PERIOD && [3, 5].includes(student.semesterLevel)).length;
+  const propedeuticAreaStats = PROPEDEUTIC_AREA_OPTIONS.map((area) => ({
+    ...area,
+    count: statisticsStudents.filter((student) => student.semesterLevel === 5 && student.propedeuticArea === area.code).length,
+  }));
   const statisticsSummaryMetrics = [
-    { label: 'Total alumnos', value: formalStudents.length, helper: 'Inscritos formales' },
+    { label: 'Total filtrado', value: statisticsStudents.length, helper: 'Inscritos formales' },
     ...activeSemesterStats.map((item) => ({ label: `${item.semester} semestre`, value: item.count, helper: 'Alumnos' })),
     { label: 'Con ficha', value: fichaStudents.length, helper: 'Nuevo ingreso' },
     { label: 'Pendientes inscripción', value: inscriptionPendingCount, helper: 'Fichas y reinscripción', tone: inscriptionPendingCount > 0 ? 'warning' : undefined },
-    { label: 'Reinscritos', value: targetReinscribedCount, helper: `${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}` },
-    { label: 'Docs pendientes', value: docsPendingCount, helper: 'Por revisar', tone: docsPendingCount > 0 ? 'warning' : undefined },
+    { label: 'Reinscritos', value: targetReinscribedCount, helper: TARGET_PERIOD_LABEL },
+    { label: 'Docs pendientes', value: statisticsStudents.filter((student) => student.documentationStatus !== 'COMPLETA').length, helper: 'Por revisar', tone: docsPendingCount > 0 ? 'warning' : undefined },
+    { label: '5o con area', value: statisticsStudents.filter((student) => student.semesterLevel === 5 && student.propedeuticArea).length, helper: 'Propedeutica' },
   ];
   const fichaStatsByGroup = Array.from(
     fichaStudents.reduce((map, student) => {
@@ -779,16 +1089,17 @@ export function ControlEscolarOverview({
     }, new Map<string, { groupLabel: string; total: number; docsPending: number }>()),
   ).map((entry) => entry[1]).sort((left, right) => left.groupLabel.localeCompare(right.groupLabel));
   const groupStatsSummary = Array.from(
-    formalStudents.reduce((map, student) => {
+    statisticsStudents.reduce((map, student) => {
       const key = `${student.semesterLevel}|${student.groupLabel ?? 'Sin grupo'}`;
       const current = map.get(key) ?? {
         groupId: student.groupId ?? '',
         semester: student.semesterLevel,
         groupLabel: student.groupLabel ?? 'Sin grupo',
         visibleGroup: formatGroupLabelWithoutCareer(student.groupLabel, student.semesterLevel),
-        career: getCareerLabelFromGroupLabel(student.groupLabel),
+        career: academicTrackLabel(student),
         schoolCycle: student.schoolCycle,
         advisor: student.groupAdvisorName ?? 'Pendiente',
+        propedeuticArea: student.semesterLevel === 5 ? propedeuticAreaLabel(student.propedeuticArea) : '',
         total: 0,
         docsPending: 0,
       };
@@ -796,7 +1107,7 @@ export function ControlEscolarOverview({
       if (student.documentationStatus !== 'COMPLETA') current.docsPending += 1;
       map.set(key, current);
       return map;
-    }, new Map<string, { groupId: string; semester: number; groupLabel: string; visibleGroup: string; career: string; schoolCycle: string; advisor: string; total: number; docsPending: number }>()),
+    }, new Map<string, { groupId: string; semester: number; groupLabel: string; visibleGroup: string; career: string; propedeuticArea: string; schoolCycle: string; advisor: string; total: number; docsPending: number }>()),
   )
     .map((entry) => entry[1])
     .sort((left, right) => {
@@ -818,7 +1129,7 @@ export function ControlEscolarOverview({
     { label: 'Grupos con alumnos', value: groupCount, helper: 'Activos' },
     { label: 'Con ficha', value: fichaStudents.length, helper: 'Nuevo ingreso' },
     { label: 'Pendientes inscripcion', value: inscriptionPendingCount, helper: 'Inscribir/reinscribir', tone: inscriptionPendingCount > 0 ? 'warning' : 'default' },
-    { label: 'Reinscritos', value: targetReinscribedCount, helper: `${TARGET_SCHOOL_CYCLE}/${TARGET_SCHOOL_PERIOD}` },
+    { label: 'Reinscritos', value: targetReinscribedCount, helper: TARGET_PERIOD_LABEL },
     { label: 'Permisos activos', value: students.filter((student) => Boolean(student.activePermissionSummary)).length, helper: 'Secretaria' },
     { label: 'Docs pendientes', value: docsPendingCount, helper: 'Requieren revisión' },
     { label: 'Sin grupo', value: withoutGroupCount, helper: 'Ajuste académico', tone: withoutGroupCount > 0 ? 'warning' : 'default' },
@@ -883,6 +1194,10 @@ export function ControlEscolarOverview({
             uniqueDocumentationStatuses={uniqueDocumentationStatuses}
             isImportingEnrollmentRoster={isImportingEnrollmentRoster}
             onImportEnrollmentRoster={() => void handleImportEnrollmentRoster()}
+            isImportingStudentData={isImportingStudentData}
+            onCompleteFichaData={() => void handleCompleteFichaData()}
+            onImportPropedeuticAreas={() => void handleImportPropedeuticAreas()}
+            importIssueCount={studentImportIssues.length}
             isEnrollmentAux={isEnrollmentAux} />
 
           {importIssues.length > 0 ? (
@@ -892,6 +1207,61 @@ export function ControlEscolarOverview({
                 {importIssues.map((issue) => <li key={issue}>{issue}</li>)}
               </ul>
             </div>
+          ) : null}
+
+          {!isEnrollmentAux && operationsTab === 'errores' ? (
+            <section className="panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Control Escolar</p>
+                  <h2 className="compact-header">Alumnos con datos erroneos</h2>
+                  <p className="compact-operational-line">Filas del padron que no se registraron por CURP incompleta, campos faltantes o errores de formato.</p>
+                </div>
+                <div className="button-row">
+                  <span className="status-tag">{studentImportIssues.length} pendientes</span>
+                  <button className="secondary-button small-button" onClick={() => void onReloadData()} type="button">
+                    Actualizar
+                  </button>
+                </div>
+              </div>
+              <table className="student-table">
+                <thead>
+                  <tr>
+                    <th>Archivo / hoja</th>
+                    <th>Fila</th>
+                    <th>Alumno</th>
+                    <th>CURP</th>
+                    <th>Grupo</th>
+                    <th>Motivo</th>
+                    <th>Fecha</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studentImportIssues.map((issue: StudentImportIssueSummary) => (
+                    <tr key={issue.id}>
+                      <td>
+                        <strong>{issue.sourcePath ?? 'Importacion'}</strong>
+                        <br />
+                        <span className="muted-text">{issue.sheetName ?? 'Sin hoja'}</span>
+                      </td>
+                      <td>{issue.rowNumber ?? '-'}</td>
+                      <td>
+                        <strong>{issue.fullName || 'Sin nombre completo'}</strong>
+                        <br />
+                        <span className="muted-text">{issue.enrollmentNumber || 'Sin folio/matricula'}</span>
+                      </td>
+                      <td>{issue.curp || 'Sin CURP'}</td>
+                      <td>{issue.groupLabel || '-'}</td>
+                      <td>{issue.reason}</td>
+                      <td>{new Date(issue.createdAt).toLocaleString('es-MX')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {studentImportIssues.length === 0 ? (
+                <p className="empty-state">No hay alumnos rechazados por errores de importacion.</p>
+              ) : null}
+            </section>
           ) : null}
 
           {!isEnrollmentAux && operationsTab === 'captura' && captureTab === 'fichas' ? (
@@ -1119,9 +1489,14 @@ export function ControlEscolarOverview({
                 <div>
                   <p className="eyebrow">Control Escolar</p>
                   <h2 className="compact-header">Estadisticas de matricula</h2>
-                  <p className="compact-operational-line">Resumen por carrera, grado, grupo, asesor y ciclo escolar.</p>
+                  <p className="compact-operational-line">Resumen filtrable por carrera, area, grado, grupo, asesor y ciclo escolar.</p>
                 </div>
-                <span className="status-tag">{formalStudents.length} alumnos</span>
+                <div className="button-row">
+                  <span className="status-tag">{statisticsStudents.length} alumnos filtrados</span>
+                  <button className="secondary-button small-button" onClick={() => void handleExportStatistics()} type="button">
+                    Exportar estadisticas
+                  </button>
+                </div>
               </div>
 
               <div className="metric-strip statistics-metric-strip">
@@ -1145,6 +1520,7 @@ export function ControlEscolarOverview({
                   <thead>
                     <tr>
                       <th>Carrera</th>
+                      <th>Detalle 5to</th>
                       <th>Grado</th>
                       <th>Grupo</th>
                       <th>Alumnos</th>
@@ -1157,6 +1533,7 @@ export function ControlEscolarOverview({
                     {groupStatsSummary.map((group) => (
                       <tr key={`${group.semester}-${group.groupLabel}`}>
                         <td>{group.career}</td>
+                        <td>{group.propedeuticArea || '-'}</td>
                         <td>{group.semester} semestre</td>
                         <td>{group.visibleGroup}</td>
                         <td>{group.total}</td>
@@ -1220,6 +1597,39 @@ export function ControlEscolarOverview({
               </div>
               <div className="section-header">
                 <div>
+                  <p className="eyebrow">Quinto semestre</p>
+                  <h2 className="compact-header">Areas propedeuticas</h2>
+                  <p className="compact-operational-line">Distribucion de alumnos de 5o semestre por area oficial.</p>
+                </div>
+                <span className="status-tag">{statisticsStudents.filter((student) => student.semesterLevel === 5).length} alumnos de 5o</span>
+              </div>
+              <div className="student-table-wrap">
+                <table className="student-table">
+                  <thead>
+                    <tr>
+                      <th>Clave</th>
+                      <th>Area</th>
+                      <th>Alumnos</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {propedeuticAreaStats.map((area) => (
+                      <tr key={area.code}>
+                        <td>{area.code}</td>
+                        <td>{area.label}</td>
+                        <td>{area.count}</td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>SIN_AREA</td>
+                      <td>Sin area capturada</td>
+                      <td>{statisticsStudents.filter((student) => student.semesterLevel === 5 && !student.propedeuticArea).length}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="section-header">
+                <div>
                   <p className="eyebrow">Nuevo ingreso</p>
                   <h2 className="compact-header">Fichas en proceso</h2>
                   <p className="compact-operational-line">Estos alumnos aun no cuentan como inscritos formales.</p>
@@ -1255,7 +1665,7 @@ export function ControlEscolarOverview({
                 <div>
                   <p className="eyebrow">Control Escolar</p>
                   <h2 className="compact-header">Inscripción</h2>
-                  <p className="compact-operational-line">Transicion semestral hacia {TARGET_SCHOOL_CYCLE}/{TARGET_SCHOOL_PERIOD}: nuevo ingreso, reinscripcion y egreso.</p>
+                  <p className="compact-operational-line">Transicion semestral de {CURRENT_PERIOD_LABEL} hacia {TARGET_PERIOD_LABEL}: nuevo ingreso, reinscripcion y egreso.</p>
                 </div>
                 <span className="status-tag">Checklist y plazo de entrega</span>
               </div>
@@ -1276,10 +1686,9 @@ export function ControlEscolarOverview({
                       <th>Alumno</th>
                       <th>Tutor</th>
                       <th>Ciclo</th>
+                      <th>Carrera</th>
                       <th>Semestre</th>
                       <th>Estado actual</th>
-                      <th>Documentación</th>
-                      <th>Inscripción</th>
                       <th>Acciones</th>
                     </tr>
                   </thead>
@@ -1287,20 +1696,14 @@ export function ControlEscolarOverview({
                     {paginatedInscriptionStudents.map((student) => (
                       <tr key={`checklist-${student.id}`} className={selectedChecklistStudentId === student.id ? 'student-row active' : 'student-row'}>
                         <td><strong>{formatPreferredEnrollment(student)}</strong></td>
-                        <td>{student.fullName}</td>
-                        <td>{student.guardianFullName?.trim() || 'Sin tutor capturado'}</td>
-                        <td>{student.schoolCycle}/{student.schoolPeriod}</td>
+                        <td className="inscription-student-name">{student.fullName}</td>
+                        <td className="inscription-student-name">{student.guardianFullName?.trim() || 'Sin tutor capturado'}</td>
+                        <td>{student.enrollmentStatus === 'FICHA_ENTREGADA' ? 'Sin ciclo' : formatSchoolPeriodLabel(student.schoolCycle, student.schoolPeriod)}</td>
+                        <td className="inscription-track-cell">{academicTrackLabel(student)}</td>
                         <td>{student.semesterLevel}°</td>
                         <td><span className={combinedStudentStatusClassName(student)}>{combinedStudentStatusLabel(student)}</span></td>
-                        <td>{student.documentationStatus}</td>
-                        <td>{student.statusLabel}</td>
                         <td>
                           <div className="button-row">
-                            {!isEnrollmentAux ? (
-                              <button className="secondary-button small-button" onClick={() => void handleLoadRequirementChecklist(student.id)} type="button">
-                                Revisar
-                              </button>
-                            ) : null}
                             {student.enrollmentStatus === 'FICHA_ENTREGADA' ? (
                               <button
                                 className="primary-button small-button"
@@ -1403,11 +1806,27 @@ export function ControlEscolarOverview({
                     </button>
                     <button
                       className="secondary-button"
-                      disabled={isImportingEnrollmentRoster}
+                      disabled={isImportingEnrollmentRoster || isImportingStudentData}
                       onClick={() => void handleImportEnrollmentRoster()}
                       type="button"
                     >
                       {isImportingEnrollmentRoster ? 'Importando...' : 'Importar padron'}
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={isImportingEnrollmentRoster || isImportingStudentData}
+                      onClick={() => void handleCompleteFichaData()}
+                      type="button"
+                    >
+                      Completar fichas
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={isImportingEnrollmentRoster || isImportingStudentData}
+                      onClick={() => void handleImportPropedeuticAreas()}
+                      type="button"
+                    >
+                      Areas 5to
                     </button>
                   </>} />
               ) : null}

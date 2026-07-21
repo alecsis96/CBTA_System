@@ -1,7 +1,7 @@
 import type { FormEvent, MutableRefObject, ReactNode } from 'react'
 import type { StudentAcademicContext } from '@/App'
 import type { AdmissionSummary, StudentFormInput, StudentRequirementChecklist } from '@/types/domain'
-import { formatGroupLabelWithoutCareer, getCareerLabelFromGroupLabel } from '@/lib/utils'
+import { formatGroupLabelWithoutCareer, formatSchoolPeriodLabel, getCareerLabelFromGroupLabel } from '@/lib/utils'
 
 type FieldRendererProps = {
   label: string
@@ -30,6 +30,17 @@ type StudentCaptureFormPanelProps = {
   onFinalizeEnrollment: () => Promise<void>
   onCancelEdit: () => void
   onBackToFichas?: () => void
+}
+
+const PROPEDEUTIC_AREA_OPTIONS = [
+  { code: 'CS', label: 'Ciencias sociales' },
+  { code: 'CNEyT', label: 'Ciencias naturales experimentales y tecnologia' },
+  { code: 'PM/CNEyT', label: 'Pensamiento matematico y Ciencias naturales experimentales y tecnologia' },
+  { code: 'H/L y C', label: 'Humanidades, lengua y comunicacion' },
+]
+
+function propedeuticAreaLabel(code: string | null | undefined) {
+  return PROPEDEUTIC_AREA_OPTIONS.find((area) => area.code === code)?.label ?? code ?? 'Sin area'
 }
 
 export function StudentCaptureFormPanel({
@@ -62,6 +73,7 @@ export function StudentCaptureFormPanel({
     schoolPeriod: form.schoolPeriod,
     semesterLevel: form.semesterLevel,
     academicStatus: form.academicStatus,
+    propedeuticArea: form.propedeuticArea,
     enrollmentStatus: '',
     documentationStatus: '',
     groupLabel: null,
@@ -74,12 +86,14 @@ export function StudentCaptureFormPanel({
   const visibleGroup = formatGroupLabelWithoutCareer(displayAcademicContext.groupLabel, displayAcademicContext.semesterLevel)
   const contextItems = [
     ['Matricula / folio', displayAcademicContext.enrollmentNumber || 'Se asigna al guardar'],
-    ['Ciclo', `${displayAcademicContext.schoolCycle}/${displayAcademicContext.schoolPeriod ?? 1}`],
+    ['Ciclo', formatSchoolPeriodLabel(displayAcademicContext.schoolCycle, displayAcademicContext.schoolPeriod)],
     ['Grado', `${displayAcademicContext.semesterLevel}o semestre`],
     ['Grupo', visibleGroup],
     ['Carrera', getCareerLabelFromGroupLabel(displayAcademicContext.groupLabel)],
+    ...(displayAcademicContext.semesterLevel === 5 ? [['Area propedeutica', propedeuticAreaLabel(displayAcademicContext.propedeuticArea)]] : []),
     ['Estatus academico', displayAcademicContext.academicStatus || 'Sin dato'],
   ]
+  const showPropedeuticArea = form.semesterLevel === 5 || displayAcademicContext.semesterLevel === 5
 
   return (
     <section className="panel" ref={captureSectionRef}>
@@ -170,6 +184,16 @@ export function StudentCaptureFormPanel({
           <Field label="Lengua materna">
             <input value={form.motherTongue} onChange={(event) => onUpdateField('motherTongue', event.target.value)} />
           </Field>
+          {showPropedeuticArea ? (
+            <Field label="Area propedeutica" required={isReinscriptionMode && form.semesterLevel === 5}>
+              <select value={form.propedeuticArea} onChange={(event) => onUpdateField('propedeuticArea', event.target.value)}>
+                <option value="">Selecciona area</option>
+                {PROPEDEUTIC_AREA_OPTIONS.map((area) => (
+                  <option key={area.code} value={area.code}>{area.code} - {area.label}</option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
           <Field className="span-2" label="Domicilio" required>
             <input value={form.addressLine} onChange={(event) => onUpdateField('addressLine', event.target.value)} />
           </Field>

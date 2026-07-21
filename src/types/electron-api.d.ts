@@ -6,6 +6,7 @@ import type {
   AuditLogSummary,
   CashPaymentBatchCreateInput,
   CashPaymentBatchCreateResult,
+  CashPaymentCancelInput,
   CashPaymentCreateInput,
   CashPaymentSummary,
   ChargeConceptSummary,
@@ -13,6 +14,12 @@ import type {
   GroupAssignedRosterRow,
   EnrollmentRosterImportResult,
   EnrollmentRosterImportRow,
+  PropedeuticAreaImportRow,
+  StudentDataCompletionFichaRow,
+  StudentDataCompletionImportResult,
+  StudentImportIssueInput,
+  StudentImportIssueSummary,
+  StudentImportPreview,
   SemesterLevel,
   StudentAcademicMovementSummary,
   StudentGradeEnrollmentInput,
@@ -96,9 +103,14 @@ type CbtaApi = {
     enrollGrade: (input: StudentGradeEnrollmentInput) => Promise<StudentSummary>
     reinscribeForPeriod: (input: StudentPeriodReinscriptionInput) => Promise<StudentSummary>
     graduatePeriod: (input: StudentPeriodGraduationInput) => Promise<{ ok: boolean; graduatedCount: number }>
-    formalizeEnrollment: (input: { studentId: string; allowPendingDocuments?: boolean; notes?: string }) => Promise<StudentSummary>
+    formalizeEnrollment: (input: { studentId: string; allowPendingDocuments?: boolean; targetSchoolCycle?: string; targetPeriod?: number; notes?: string }) => Promise<StudentSummary>
     listMovements: (input?: { studentId?: string; schoolCycle?: string; limit?: number }) => Promise<StudentAcademicMovementSummary[]>
-    importEnrollmentRoster: (input: { schoolCycle: string; sourcePath?: string | null; rows: EnrollmentRosterImportRow[] }) => Promise<EnrollmentRosterImportResult>
+    listImportIssues: (input?: { schoolCycle?: string; status?: string; limit?: number }) => Promise<StudentImportIssueSummary[]>
+    previewFichaCompletionImport: (input: { schoolCycle: string; sourcePath?: string | null; rows: StudentDataCompletionFichaRow[]; rejectedRows?: StudentImportIssueInput[] }) => Promise<StudentImportPreview>
+    applyFichaCompletionImport: (input: { schoolCycle: string; sourcePath?: string | null; rows: StudentDataCompletionFichaRow[]; rejectedRows?: StudentImportIssueInput[] }) => Promise<StudentDataCompletionImportResult>
+    previewPropedeuticAreaImport: (input: { schoolCycle: string; schoolPeriod: number; sourcePath?: string | null; rows: PropedeuticAreaImportRow[]; rejectedRows?: StudentImportIssueInput[] }) => Promise<StudentImportPreview>
+    applyPropedeuticAreaImport: (input: { schoolCycle: string; schoolPeriod: number; sourcePath?: string | null; rows: PropedeuticAreaImportRow[]; rejectedRows?: StudentImportIssueInput[] }) => Promise<StudentDataCompletionImportResult>
+    importEnrollmentRoster: (input: { schoolCycle: string; sourcePath?: string | null; rows: EnrollmentRosterImportRow[]; rejectedRows?: StudentImportIssueInput[] }) => Promise<EnrollmentRosterImportResult>
   }
   permissions: {
     list: (filters?: { query?: string; status?: string; activeOn?: string }) => Promise<StudentPermissionSummary[]>
@@ -120,7 +132,8 @@ type CbtaApi = {
   }
   payments: {
     create: (input: CashPaymentCreateInput) => Promise<CashPaymentSummary>
-    list: (filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' }) => Promise<CashPaymentSummary[]>
+    list: (filters?: { status?: 'PENDIENTE_ROC' | 'ROC_GENERADO' | 'CANCELADO' }) => Promise<CashPaymentSummary[]>
+    cancel: (input: CashPaymentCancelInput) => Promise<CashPaymentSummary>
     generateBatch: (input: CashPaymentBatchCreateInput) => Promise<CashPaymentBatchCreateResult>
   }
     receipts: {

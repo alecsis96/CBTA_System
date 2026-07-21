@@ -1,5 +1,6 @@
 import { prisma } from './prisma'
 import { buildPasswordHash, isValidPasswordHash } from '../shared/auth-password'
+import { CURRENT_SCHOOL_CYCLE, CURRENT_SCHOOL_PERIOD } from '../shared/school-periods'
 
 const seedDepartments = [
   { code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.' },
@@ -51,6 +52,19 @@ const enrollmentRequirements = [
 ] as const
 
 export async function ensureBackendBaseData() {
+  await prisma.student.updateMany({
+    where: { enrollmentStatus: 'FICHA_ENTREGADA' },
+    data: { schoolCycle: '', schoolPeriod: 1, officialEnrollmentNumber: null },
+  })
+  await prisma.student.updateMany({
+    where: {
+      schoolCycle: '2026-2027',
+      schoolPeriod: 1,
+      enrollmentStatus: { in: ['INSCRITO', 'ASIGNADO', 'CONFIRMADO'] },
+    },
+    data: { schoolCycle: CURRENT_SCHOOL_CYCLE, schoolPeriod: CURRENT_SCHOOL_PERIOD },
+  })
+
   const departmentByCode = new Map<string, { id: string }>()
   for (const department of seedDepartments) {
     const item = await prisma.department.upsert({

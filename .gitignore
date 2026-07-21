@@ -6,6 +6,9 @@ dist-electron/
 .env
 prisma/dev.db
 prisma/dev.db-journal
+prisma/*.db
+prisma/*backup*.json
+~$*
 release/
 generated-rocs/
 backups/

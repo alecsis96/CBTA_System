@@ -37,9 +37,30 @@ model User {
   groupAssignmentAudits GroupAssignmentAudit[] @relation("GroupAuditActor")
   academicMovements StudentAcademicMovement[] @relation("AcademicMovementActor")
   cashPayments CashPayment[] @relation("CashPaymentCreatedBy")
+  cancelledCashPayments CashPayment[] @relation("CashPaymentCancelledBy")
   grantedPermissions StudentPermission[] @relation("PermissionGrantedBy")
   closedPermissions StudentPermission[] @relation("PermissionClosedBy")
   recordedDailyStatuses StudentDailyStatus[] @relation("DailyStatusRecordedBy")
+}
+
+model StudentImportIssue {
+  id               String   @id @default(cuid())
+  schoolCycle      String
+  sourcePath       String?
+  sheetName        String?
+  rowNumber        Int?
+  importKind       String?
+  enrollmentNumber String?
+  curp             String?
+  fullName         String?
+  groupLabel       String?
+  reason           String
+  rawJson          String?
+  status           String   @default("PENDIENTE")
+  createdAt        DateTime @default(now())
+
+  @@index([schoolCycle, status])
+  @@index([createdAt])
 }
 
 model Student {
@@ -71,6 +92,7 @@ model Student {
   schoolPeriod      Int            @default(1)
   semesterLevel     Int            @default(1)
   academicStatus    String?
+  propedeuticArea    String?
   conductStatus     String         @default("REGULAR")
   addressConfirmedAt DateTime?
   addressConfirmedBy String?
@@ -369,6 +391,7 @@ model RocReceipt {
   templateVersion   String?
   student           Student          @relation(fields: [studentId], references: [id], onDelete: Restrict)
   createdBy         User             @relation("ReceiptCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  cashPayment        CashPayment?
   lines             RocReceiptLine[]
 }
 
@@ -387,16 +410,23 @@ model CashPayment {
   id             String            @id @default(cuid())
   studentId      String
   createdById    String
+  generatedReceiptId String?         @unique
   status         String            @default("PENDIENTE_ROC")
   notes          String?
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancellationReason String?
   batchGeneratedAt DateTime?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   student        Student           @relation(fields: [studentId], references: [id], onDelete: Restrict)
   createdBy      User              @relation("CashPaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  generatedReceipt RocReceipt?     @relation(fields: [generatedReceiptId], references: [id], onDelete: SetNull)
+  cancelledBy    User?             @relation("CashPaymentCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
   lines          CashPaymentLine[]
 
   @@index([studentId, status])
+  @@index([generatedReceiptId])
 }
 
 model CashPaymentLine {

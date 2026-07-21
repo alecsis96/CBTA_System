@@ -2,9 +2,10 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as XLSX from 'xlsx'
 import { prisma } from './prisma'
+import { CURRENT_SCHOOL_CYCLE } from '../shared/school-periods'
 
 const INTERNAL_FOLIO_PREFIX = '2610701044'
-const IMPORT_SCHOOL_CYCLE = process.env.BACKEND_STUDENT_IMPORT_SCHOOL_CYCLE?.trim() || '2026-2027'
+const IMPORT_SCHOOL_CYCLE = process.env.BACKEND_STUDENT_IMPORT_SCHOOL_CYCLE?.trim() || CURRENT_SCHOOL_CYCLE
 
 type ExcelStudentRow = {
   sourceIndex: number

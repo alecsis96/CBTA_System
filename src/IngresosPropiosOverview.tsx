@@ -44,18 +44,22 @@ export function IngresosPropiosOverview({
   onPrintMonthlyReceipts,
   onReprintReceipt,
   onCancelReceipt,
+  onCancelCashPayment,
   onSelectStudent,
   onToggleLifeInsurance,
   onToggleConcept,
   onUpdateConceptAmount,
 }: IngresosProps) {
-  const [operationsTab, setOperationsTab] = useState<'caja' | 'pendientes-roc' | 'historial'>('caja')
+  const [operationsTab, setOperationsTab] = useState<'caja' | 'historial'>('caja')
   const [studentQuery, setStudentQuery] = useState('')
   const [receiptPage, setReceiptPage] = useState(1)
   const [cancelReceiptId, setCancelReceiptId] = useState<string | null>(null)
   const [cancelReceiptReason, setCancelReceiptReason] = useState('')
   const [submittingCancelReceipt, setSubmittingCancelReceipt] = useState(false)
-  const [openMonthlyActionMenu, setOpenMonthlyActionMenu] = useState<{ rowId: string; receiptId: string; top: number; left: number } | null>(null)
+  const [cancelPaymentId, setCancelPaymentId] = useState<string | null>(null)
+  const [cancelPaymentReason, setCancelPaymentReason] = useState('')
+  const [submittingCancelPayment, setSubmittingCancelPayment] = useState(false)
+  const [openMonthlyActionMenu, setOpenMonthlyActionMenu] = useState<{ rowId: string; receiptId: string | null; paymentId: string; top: number; left: number } | null>(null)
   const studentSearchRef = useRef<HTMLInputElement | null>(null)
   const monthlyActionMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -97,17 +101,17 @@ export function IngresosPropiosOverview({
     return value.getFullYear() === rocBatchYear && value.getMonth() + 1 === rocBatchMonth
   }
 
-  const pendingPayments = cashPayments.filter((payment) => payment.status === 'PENDIENTE_ROC')
+  const activeCashPayments = cashPayments.filter((payment) => payment.status !== 'CANCELADO')
+  const pendingPayments = activeCashPayments.filter((payment) => payment.status === 'PENDIENTE_ROC')
   const pendingPaymentsForSelectedMonth = pendingPayments.filter((payment) => belongsToSelectedMonth(payment.createdAt))
-  const monthlyPayments = cashPayments.filter((payment) => belongsToSelectedMonth(payment.createdAt))
+  const monthlyPayments = activeCashPayments.filter((payment) => belongsToSelectedMonth(payment.createdAt))
   const generatedPaymentsForSelectedMonth = monthlyPayments.filter((payment) => payment.status === 'ROC_GENERADO')
   const monthlyReceipts = allReceipts.filter((receipt) => belongsToSelectedMonth(receipt.issuedAt))
-  const studentsWithoutPayments = students.filter((student) => !cashPayments.some((payment) => payment.studentId === student.id))
   const suggestedConcepts = paymentConcepts.filter((concept) => concept.isSuggested)
   const todayKey = new Date().toDateString()
-  const todayPayments = cashPayments.filter((payment) => new Date(payment.createdAt).toDateString() === todayKey)
+  const todayPayments = activeCashPayments.filter((payment) => new Date(payment.createdAt).toDateString() === todayKey)
   const todayTotal = todayPayments.reduce((sum, payment) => sum + payment.totalAmount, 0)
-  const selectedStudentPayments = selectedStudent ? cashPayments.filter((payment) => payment.studentId === selectedStudent.id) : []
+  const selectedStudentPayments = selectedStudent ? activeCashPayments.filter((payment) => payment.studentId === selectedStudent.id) : []
   const selectedStudentPaymentsToday = selectedStudentPayments.filter((payment) => new Date(payment.createdAt).toDateString() === todayKey)
   const recentReceipt = receipts.find((receipt) => Date.now() - new Date(receipt.issuedAt).getTime() < 1000 * 60 * 60 * 24 * 7)
   const selectedCodes = selectedConcepts.map((concept) => concept.code)
@@ -127,6 +131,7 @@ export function IngresosPropiosOverview({
   const receiptPendingCancellation = cancelReceiptId
     ? allReceipts.find((receipt) => receipt.id === cancelReceiptId) ?? receipts.find((receipt) => receipt.id === cancelReceiptId) ?? null
     : null
+  const paymentPendingCancellation = cancelPaymentId ? cashPayments.find((payment) => payment.id === cancelPaymentId) ?? null : null
   const monthlyUnifiedRows = useMemo(() => {
     const paymentsByStudent = new Map<string, typeof monthlyPayments>()
     const receiptsByStudent = new Map<string, typeof monthlyReceipts>()
@@ -148,7 +153,8 @@ export function IngresosPropiosOverview({
         const studentReceipts = receiptsByStudent.get(payment.studentId) ?? []
         const studentPayments = paymentsByStudent.get(payment.studentId) ?? []
         const generatedIndex = studentPayments.filter((item) => item.status === 'ROC_GENERADO').findIndex((item) => item.id === payment.id)
-        const receipt = payment.status === 'ROC_GENERADO' && generatedIndex >= 0 ? studentReceipts[generatedIndex] ?? null : null
+        const linkedReceipt = payment.generatedReceiptId ? monthlyReceipts.find((receipt) => receipt.id === payment.generatedReceiptId) ?? null : null
+        const receipt = payment.status === 'ROC_GENERADO' && generatedIndex >= 0 ? linkedReceipt ?? studentReceipts[generatedIndex] ?? null : null
 
         return {
           id: payment.id,
@@ -159,21 +165,18 @@ export function IngresosPropiosOverview({
           total: receipt ? receipt.totalAmount : payment.rocTotalAmount > 0 ? payment.rocTotalAmount : payment.totalAmount,
           monthlyStatus: payment.status === 'ROC_GENERADO' ? 'Incluido en ROC mensual' : 'Pendiente de incluir',
           receipt,
+          payment,
         }
       })
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
   }, [monthlyPayments, monthlyReceipts])
 
   const ingresosMetrics: DashboardMetric[] = [
-    { label: 'Cobros registrados', value: cashPayments.length, helper: 'En caja' },
-    { label: 'ROC generados', value: cashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length, helper: 'Mensuales' },
+    { label: 'Cobros registrados', value: activeCashPayments.length, helper: 'En caja' },
+    { label: 'ROC generados', value: activeCashPayments.filter((payment) => payment.status === 'ROC_GENERADO').length, helper: 'Mensuales' },
     { label: 'Pendientes ROC', value: pendingPayments.length, helper: 'Por consolidar', tone: pendingPayments.length > 0 ? 'warning' : 'default' },
-    { label: 'Alumnos sin cobro', value: studentsWithoutPayments.length, helper: 'En padrón' },
-    { label: 'Cobros del dia', value: todayPayments.length, helper: 'Jornada actual' },
+    { label: 'Cobros hoy', value: todayPayments.length, helper: 'Jornada actual' },
     { label: 'Recaudado hoy', value: formatCurrency(todayTotal), helper: 'Caja diaria' },
-    { label: 'Cobros pendientes', value: pendingPayments.length, helper: 'Sin ROC mensual', tone: pendingPayments.length > 0 ? 'warning' : 'default' },
-    // TODO: conectar cuando exista un campo de impresion/reimpresion del ROC.
-    { label: 'ROC sin imprimir', value: 0, helper: 'Pendiente de conectar' },
   ]
 
   useEffect(() => {
@@ -305,6 +308,20 @@ export function IngresosPropiosOverview({
     }
   }
 
+  async function handleConfirmCancelPayment() {
+    if (!cancelPaymentId) return
+    if (cancelPaymentReason.trim().length < 3) return
+
+    setSubmittingCancelPayment(true)
+    try {
+      await onCancelCashPayment(cancelPaymentId, cancelPaymentReason.trim())
+      setCancelPaymentId(null)
+      setCancelPaymentReason('')
+    } finally {
+      setSubmittingCancelPayment(false)
+    }
+  }
+
   return (
     <section className="module-dashboard ingresos-layout">
       <ModuleBarCompact
@@ -319,13 +336,6 @@ export function IngresosPropiosOverview({
           <div className="segmented-tabs">
             <button className={operationsTab === 'caja' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('caja')} type="button">
               Caja
-            </button>
-            <button
-              className={operationsTab === 'pendientes-roc' ? 'segmented-tab active' : 'segmented-tab'}
-              onClick={() => setOperationsTab('pendientes-roc')}
-              type="button"
-            >
-              Pendientes ROC
             </button>
             <button className={operationsTab === 'historial' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('historial')} type="button">
               ROC mensual
@@ -666,73 +676,12 @@ export function IngresosPropiosOverview({
         </article>
       ) : null}
 
-      {operationsTab === 'pendientes-roc' ? (
-        <article className="panel wide">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">Cola operativa</p>
-              <h2>Pendientes de ROC</h2>
-            </div>
-            <div className="button-row">
-              <button className="secondary-button small-button" onClick={() => setOperationsTab('historial')} type="button">
-                Ir a ROC mensual
-              </button>
-              <span className="status-tag">{pendingPayments.length} pendientes reales</span>
-            </div>
-          </div>
-
-          <p className="table-summary compact-operational-line">
-            Esta vista queda solo como cola operativa rápida. Lo mensual se consolida en ROC mensual.
-          </p>
-
-          <div className="student-table-wrap monthly-roc-table-wrap">
-            <table className="student-table monthly-roc-table">
-              <thead>
-                <tr>
-                  <th>Alumno</th>
-                  <th>Folio</th>
-                  <th>Fecha</th>
-                  <th>Claves</th>
-                  <th>Total</th>
-                  <th>Estatus</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pendingPayments.length === 0 ? (
-                  <tr>
-                    <td colSpan={6}>
-                      <p className="empty-state">No hay cobros pendientes para mandar al ROC mensual.</p>
-                    </td>
-                  </tr>
-                ) : null}
-                {pendingPayments.map((payment) => (
-                  <tr key={payment.id}>
-                    <td>{payment.studentName}</td>
-                    <td>{payment.enrollmentNumber}</td>
-                    <td>{new Date(payment.createdAt).toLocaleString('es-MX')}</td>
-                    <td>
-                      {payment.conceptLabels.join(' | ')}
-                      {payment.externalConceptLabels.length > 0 ? <div><small>Externos al ROC: {payment.externalConceptLabels.join(' | ')}</small></div> : null}
-                    </td>
-                    <td>
-                      {formatCurrency(payment.totalAmount)}
-                      {payment.externalTotalAmount > 0 ? <div><small>ROC: {formatCurrency(payment.rocTotalAmount)}</small></div> : null}
-                    </td>
-                    <td>{payment.status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </article>
-      ) : null}
-
       {operationsTab === 'historial' ? (
         <article className="panel wide">
           <div className="section-header">
             <div>
-              <p className="eyebrow">Historial mensual</p>
-              <h2>Cobros acumulados del mes</h2>
+              <p className="eyebrow">ROC mensual</p>
+              <h2>Pendientes e incluidos del mes</h2>
             </div>
             <span className="status-tag">{monthlyPayments.length} cobros del periodo</span>
           </div>
@@ -807,7 +756,7 @@ export function IngresosPropiosOverview({
                 {monthlyUnifiedRows.length === 0 ? (
                   <tr>
                     <td colSpan={7}>
-                      <p className="empty-state">Todavía no hay cobros acumulados para este mes.</p>
+                      <p className="empty-state">Todavía no hay cobros pendientes o incluidos para este mes.</p>
                     </td>
                   </tr>
                 ) : null}
@@ -836,7 +785,16 @@ export function IngresosPropiosOverview({
                           ) : row.receipt?.status === 'ANULADO' ? (
                             <span className="status-tag status-tag-muted">Anulado</span>
                           ) : (
-                            <span className="status-tag">Pendiente</span>
+                            <button
+                              className="tertiary-button small-button"
+                              onClick={() => {
+                                setCancelPaymentId(row.payment.id)
+                                setCancelPaymentReason('')
+                              }}
+                              type="button"
+                            >
+                              Cancelar
+                            </button>
                           )}
                           {activeReceipt ? (
                             <div className="monthly-roc-actions-menu">
@@ -852,6 +810,7 @@ export function IngresosPropiosOverview({
                                       : {
                                           rowId: row.id,
                                           receiptId: activeReceipt.id,
+                                          paymentId: row.payment.id,
                                           top: rect.bottom + 6,
                                           left: Math.max(rect.right - 140, 16),
                                         },
@@ -936,6 +895,68 @@ export function IngresosPropiosOverview({
         </div>
       ) : null}
 
+      {cancelPaymentId && paymentPendingCancellation ? (
+        <div className="modal-overlay" role="presentation">
+          <div className="modal-card checklist-modal">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Cancelacion de cobro</p>
+                <h2 className="compact-header">{paymentPendingCancellation.studentName}</h2>
+              </div>
+              <button
+                className="tertiary-button small-button"
+                onClick={() => {
+                  setCancelPaymentId(null)
+                  setCancelPaymentReason('')
+                }}
+                type="button"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <p className="table-summary">
+              Vas a cancelar el cobro por <strong>{formatCurrency(paymentPendingCancellation.totalAmount)}</strong>.
+              {paymentPendingCancellation.generatedRocNumber ? (
+                <> Tambien se anulara el ROC <strong>{paymentPendingCancellation.generatedRocNumber}</strong>.</>
+              ) : (
+                <> El cobro saldra de pendientes de ROC.</>
+              )}
+            </p>
+
+            <Field label="Motivo de cancelacion" required>
+              <textarea
+                rows={4}
+                value={cancelPaymentReason}
+                onChange={(event) => setCancelPaymentReason(event.target.value)}
+                placeholder="Explica por que se cancela este cobro..."
+              />
+            </Field>
+
+            <div className="button-row">
+              <button
+                className="tertiary-button"
+                onClick={() => {
+                  setCancelPaymentId(null)
+                  setCancelPaymentReason('')
+                }}
+                type="button"
+              >
+                Cancelar
+              </button>
+              <button
+                className="primary-button"
+                disabled={submittingCancelPayment || cancelPaymentReason.trim().length < 3}
+                onClick={() => void handleConfirmCancelPayment()}
+                type="button"
+              >
+                {submittingCancelPayment ? 'Cancelando...' : 'Confirmar cancelacion'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {openMonthlyActionMenu
         ? createPortal(
             <div
@@ -952,12 +973,26 @@ export function IngresosPropiosOverview({
                 className="monthly-roc-actions-item danger"
                 onClick={() => {
                   setOpenMonthlyActionMenu(null)
-                  setCancelReceiptId(openMonthlyActionMenu.receiptId)
+                  if (openMonthlyActionMenu.receiptId) {
+                    setCancelReceiptId(openMonthlyActionMenu.receiptId)
+                  }
                   setCancelReceiptReason('')
                 }}
+                disabled={!openMonthlyActionMenu.receiptId}
                 type="button"
               >
                 Anular
+              </button>
+              <button
+                className="monthly-roc-actions-item danger"
+                onClick={() => {
+                  setOpenMonthlyActionMenu(null)
+                  setCancelPaymentId(openMonthlyActionMenu.paymentId)
+                  setCancelPaymentReason('')
+                }}
+                type="button"
+              >
+                Cancelar cobro
               </button>
             </div>,
             document.body,

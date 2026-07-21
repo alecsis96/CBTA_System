@@ -3,7 +3,7 @@ import { SearchInput } from '@/components/ui/SearchInput'
 import type { StudentFormInput } from '@/types/domain'
 
 type SemesterFilter = 'all' | '1' | '2' | '3' | '4' | '5' | '6'
-type OperationsTab = 'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos'
+type OperationsTab = 'captura' | 'bandeja' | 'grupos' | 'estadisticas' | 'inscripcion' | 'alumnos' | 'errores'
 
 type ControlEscolarToolbarProps = {
   operationsTab: OperationsTab
@@ -40,6 +40,10 @@ type ControlEscolarToolbarProps = {
   uniqueDocumentationStatuses: string[]
   isImportingEnrollmentRoster: boolean
   onImportEnrollmentRoster: () => void
+  isImportingStudentData: boolean
+  onCompleteFichaData: () => void
+  onImportPropedeuticAreas: () => void
+  importIssueCount?: number
   isEnrollmentAux?: boolean
 }
 
@@ -78,13 +82,17 @@ export function ControlEscolarToolbar({
   uniqueDocumentationStatuses,
   isImportingEnrollmentRoster,
   onImportEnrollmentRoster,
+  isImportingStudentData,
+  onCompleteFichaData,
+  onImportPropedeuticAreas,
+  importIssueCount = 0,
   isEnrollmentAux = false,
 }: ControlEscolarToolbarProps) {
   const visibleQuickFilters = new Set(['all', 'docs-pending', 'with-ficha', 'pending-inscription', 'without-group'])
   const compactQuickFilterOptions = quickFilterOptions.filter((item) => visibleQuickFilters.has(item.value))
   const advancedQuickFilterOptions = quickFilterOptions.filter((item) => !visibleQuickFilters.has(item.value))
-  const searchDisabled = operationsTab === 'bandeja' || operationsTab === 'grupos' || operationsTab === 'estadisticas'
-  const academicFiltersDisabled = operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'bandeja'
+  const searchDisabled = operationsTab === 'bandeja' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'errores'
+  const academicFiltersDisabled = operationsTab === 'captura' || operationsTab === 'grupos' || operationsTab === 'estadisticas' || operationsTab === 'bandeja' || operationsTab === 'errores'
 
   return (
     <SurfaceCard className="dashboard-search-panel control-toolbar-panel">
@@ -105,11 +113,27 @@ export function ControlEscolarToolbar({
             </button>
             <button
               className="secondary-button small-button"
-              disabled={isImportingEnrollmentRoster}
+              disabled={isImportingEnrollmentRoster || isImportingStudentData}
               onClick={onImportEnrollmentRoster}
               type="button"
             >
               {isImportingEnrollmentRoster ? 'Importando...' : 'Importar padron'}
+            </button>
+            <button
+              className="secondary-button small-button"
+              disabled={isImportingEnrollmentRoster || isImportingStudentData}
+              onClick={onCompleteFichaData}
+              type="button"
+            >
+              Completar fichas
+            </button>
+            <button
+              className="secondary-button small-button"
+              disabled={isImportingEnrollmentRoster || isImportingStudentData}
+              onClick={onImportPropedeuticAreas}
+              type="button"
+            >
+              Areas 5to
             </button>
           </div>
         }
@@ -120,6 +144,7 @@ export function ControlEscolarToolbar({
           {!isEnrollmentAux ? <button className={operationsTab === 'alumnos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('alumnos')} type="button">Padron</button> : null}
           {!isEnrollmentAux ? <button className={operationsTab === 'captura' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('captura')} type="button">Admision</button> : null}
           <button className={operationsTab === 'inscripcion' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('inscripcion')} type="button">Inscripcion</button>
+          {!isEnrollmentAux ? <button className={operationsTab === 'errores' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('errores')} type="button">Datos con error{importIssueCount > 0 ? ` (${importIssueCount})` : ''}</button> : null}
           {!isEnrollmentAux ? <button className={operationsTab === 'grupos' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('grupos')} type="button">Movimientos academicos</button> : null}
           {!isEnrollmentAux ? <button className={operationsTab === 'estadisticas' ? 'segmented-tab active' : 'segmented-tab'} onClick={() => setOperationsTab('estadisticas')} type="button">Estadisticas</button> : null}
           {!isEnrollmentAux && operationsTab === 'bandeja' ? (

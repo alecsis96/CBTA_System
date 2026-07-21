@@ -1,11 +1,12 @@
 import * as XLSX from 'xlsx'
-import type { EnrollmentRosterImportRow, SemesterLevel } from '@/types/domain'
+import type { EnrollmentRosterImportRow, SemesterLevel, StudentImportIssueInput } from '@/types/domain'
 import {
   normalizeSheetCell,
   normalizeSheetHeader,
   normalizeSheetUpper,
   pickSheetValue,
 } from '@/lib/text-utils'
+import { FICHA_FOLIO_YEAR } from '../../shared/school-periods'
 
 const ENROLLMENT_ALIASES = ['no control', 'numero control', 'numero de control', 'matricula']
 const NAME_ALIASES = ['nombre', 'nombre completo', 'alumno']
@@ -77,7 +78,13 @@ export async function parseEnrollmentWorkbook(file: File) {
   const workbook = XLSX.read(buffer, { type: 'array' })
   const rows: EnrollmentRosterImportRow[] = []
   const issues: string[] = []
+  const rejectedRows: StudentImportIssueInput[] = []
   let skippedCount = 0
+
+  const addRejectedRow = (issue: StudentImportIssueInput) => {
+    rejectedRows.push(issue)
+    issues.push(`Fila ${issue.rowNumber ?? '?'} en ${issue.sheetName ?? 'archivo'}: ${issue.reason}`)
+  }
 
   for (const sheetName of workbook.SheetNames) {
     const semesterLevel = inferSemesterFromSheet(sheetName)
@@ -103,20 +110,40 @@ export async function parseEnrollmentWorkbook(file: File) {
 
         if (!folio || !paternalLastName || !names || !curp || !group) {
           skippedCount += 1
-          issues.push(`Fila ${rowNumber} en ${sheetName}: faltan folio, nombre, CURP o grupo de ficha.`)
+          addRejectedRow({
+            sheetName,
+            rowNumber,
+            importKind: 'FICHA',
+            enrollmentNumber: folio || null,
+            curp: curp || null,
+            fullName: `${paternalLastName} ${maternalLastName} ${names}`.trim() || null,
+            groupLabel: group || null,
+            reason: 'Faltan folio, nombre, CURP o grupo de ficha.',
+            rawJson: JSON.stringify(row),
+          })
           continue
         }
 
         if (!hasValidCurpLength(curp)) {
           skippedCount += 1
-          issues.push(`Fila ${rowNumber} en ${sheetName}: CURP invalida para folio ${folio} (${curp.length} caracteres).`)
+          addRejectedRow({
+            sheetName,
+            rowNumber,
+            importKind: 'FICHA',
+            enrollmentNumber: folio,
+            curp,
+            fullName: `${paternalLastName} ${maternalLastName} ${names}`.trim(),
+            groupLabel: group || null,
+            reason: `CURP invalida para folio ${folio} (${curp.length} caracteres).`,
+            rawJson: JSON.stringify(row),
+          })
           continue
         }
 
         rows.push({
           sheetName,
           rowNumber,
-          enrollmentNumber: buildFichaEnrollmentNumber('2026', folio),
+          enrollmentNumber: buildFichaEnrollmentNumber(FICHA_FOLIO_YEAR, folio),
           officialEnrollmentNumber: null,
           importKind: 'FICHA',
           fullName: `${paternalLastName} ${maternalLastName} ${names}`.trim(),
@@ -145,6 +172,12 @@ export async function parseEnrollmentWorkbook(file: File) {
     if (headerRowIndex < 0) {
       skippedCount += 1
       issues.push(`${sheetName}: no se encontro encabezado de alumnos.`)
+      rejectedRows.push({
+        sheetName,
+        rowNumber: null,
+        importKind: 'MATRICULA',
+        reason: 'No se encontro encabezado de alumnos.',
+      })
       continue
     }
 
@@ -165,13 +198,33 @@ export async function parseEnrollmentWorkbook(file: File) {
 
       if (!enrollmentNumber || !fullName || !curp || !group) {
         skippedCount += 1
-        issues.push(`Fila ${rowNumber} en ${sheetName}: faltan No. Control, Nombre, CURP o Grupo.`)
+        addRejectedRow({
+          sheetName,
+          rowNumber,
+          importKind: 'MATRICULA',
+          enrollmentNumber: enrollmentNumber || null,
+          curp: curp || null,
+          fullName: fullName || null,
+          groupLabel: group || null,
+          reason: 'Faltan No. Control, Nombre, CURP o Grupo.',
+          rawJson: JSON.stringify(row),
+        })
         continue
       }
 
       if (!hasValidCurpLength(curp)) {
         skippedCount += 1
-        issues.push(`Fila ${rowNumber} en ${sheetName}: CURP invalida para ${enrollmentNumber} (${curp.length} caracteres).`)
+        addRejectedRow({
+          sheetName,
+          rowNumber,
+          importKind: 'MATRICULA',
+          enrollmentNumber,
+          curp,
+          fullName,
+          groupLabel: group || null,
+          reason: `CURP invalida para ${enrollmentNumber} (${curp.length} caracteres).`,
+          rawJson: JSON.stringify(row),
+        })
         continue
       }
 
@@ -192,5 +245,5 @@ export async function parseEnrollmentWorkbook(file: File) {
     }
   }
 
-  return { rows, skippedCount, issues }
+  return { rows, skippedCount, issues, rejectedRows }
 }

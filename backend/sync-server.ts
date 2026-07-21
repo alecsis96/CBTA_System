@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { Prisma } from '../prisma/generated/backend-client'
 import { prisma } from './prisma'
 import {
+  cancelPayment,
   cancelReceipt,
   createPayment,
   createStudent,
@@ -27,6 +28,7 @@ import {
   listDepartments,
   listConcepts,
   listPayments,
+  listStudentImportIssues,
   listStudentMovements,
   listReceipts,
   listReceiptsByStudent,
@@ -49,6 +51,7 @@ import {
   updateUser,
 } from './hybrid-store'
 import { ensureBackendBaseData } from './seed-backend'
+import { TARGET_SCHOOL_CYCLE, TARGET_SCHOOL_PERIOD } from '../shared/school-periods'
 
 const app = express()
 const port = Number(process.env.PORT ?? process.env.SYNC_SERVER_PORT ?? '8787')
@@ -94,6 +97,7 @@ const remoteActorSchema = z.object({
 
 const remoteAppRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
 const remoteSemesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
+const remotePropedeuticAreaSchema = z.enum(['CS', 'CNEyT', 'PM/CNEyT', 'H/L y C'])
 
 const remoteUserCreateSchema = z.object({
   username: z.string().trim().min(1),
@@ -168,7 +172,20 @@ const remoteEnrollmentRosterImportSchema = z.object({
     guardianFullName: z.string().trim().nullable().optional(),
     guardianPhone: z.string().trim().nullable().optional(),
     secondaryAverage: z.number().min(0).max(10).nullable().optional(),
-  })).min(1),
+  })),
+  rejectedRows: z.array(z.object({
+    sheetName: z.string().trim().nullable().optional(),
+    rowNumber: z.number().int().min(1).nullable().optional(),
+    importKind: z.string().trim().nullable().optional(),
+    enrollmentNumber: z.string().trim().nullable().optional(),
+    curp: z.string().trim().nullable().optional(),
+    fullName: z.string().trim().nullable().optional(),
+    groupLabel: z.string().trim().nullable().optional(),
+    reason: z.string().trim().min(1),
+    rawJson: z.string().trim().nullable().optional(),
+  })).optional(),
+}).refine((input) => input.rows.length > 0 || (input.rejectedRows?.length ?? 0) > 0, {
+  message: 'Agrega alumnos validos o filas con error para importar.',
 })
 
 const remoteStudentInputSchema = z.object({
@@ -198,6 +215,7 @@ const remoteStudentInputSchema = z.object({
   schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: remoteSemesterLevelSchema.default(1),
   academicStatus: z.string().optional().default(''),
+  propedeuticArea: z.union([remotePropedeuticAreaSchema, z.literal('')]).optional().default(''),
   guardianFullName: z.string().trim().min(1),
   guardianRelationship: z.string().optional().default(''),
   guardianPhone: z.string().trim().min(1),
@@ -232,7 +250,9 @@ const remoteStudentWithdrawalSchema = z.object({
 const remoteStudentGradeEnrollmentSchema = z.object({
   studentId: z.string().trim().min(1),
   schoolCycle: z.string().trim().min(1),
+  schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: remoteSemesterLevelSchema,
+  propedeuticArea: z.union([remotePropedeuticAreaSchema, z.literal('')]).optional().nullable(),
   toGroupId: z.string().trim().min(1).nullable().optional(),
   reasonCode: z.string().trim().min(1),
   notes: z.string().trim().optional(),
@@ -241,6 +261,8 @@ const remoteStudentGradeEnrollmentSchema = z.object({
 const remoteFormalizeEnrollmentSchema = z.object({
   studentId: z.string().trim().min(1),
   allowPendingDocuments: z.boolean().optional(),
+  targetSchoolCycle: z.string().trim().min(1).default(TARGET_SCHOOL_CYCLE),
+  targetPeriod: z.number().int().min(1).max(2).default(TARGET_SCHOOL_PERIOD),
   notes: z.string().trim().optional(),
 })
 
@@ -275,6 +297,11 @@ const remotePaymentCreateSchema = z.object({
   studentId: z.string().trim().min(1),
   conceptItems: z.array(z.object({ code: z.string().trim().min(1), amount: z.number().nonnegative() })).min(1),
   notes: z.string().optional(),
+})
+
+const remotePaymentCancelSchema = z.object({
+  paymentId: z.string().trim().min(1),
+  reason: z.string().trim().min(3),
 })
 
 const remotePaymentBatchSchema = z.object({
@@ -323,7 +350,7 @@ function normalizeOptional(value: string | undefined) {
 
 let publicPreRegistrationSequence = 0
 const publicPreRegistrationSchoolCycle =
-  process.env.PUBLIC_PRE_REGISTRATION_SCHOOL_CYCLE?.trim() || '2026-2027'
+  process.env.PUBLIC_PRE_REGISTRATION_SCHOOL_CYCLE?.trim() || TARGET_SCHOOL_CYCLE
 
 app.set('trust proxy', true)
 app.use(express.json())
@@ -729,6 +756,18 @@ app.get('/api/hybrid/students/next-folio-preview', async (req: Request, res: Res
   return res.status(200).json({ ok: true, nextFolio })
 })
 
+app.get('/api/hybrid/students/import-issues', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const actor = await resolveRemoteActor(req)
+  if (!['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'].includes(actor.role)) return res.status(403).json({ ok: false, error: 'forbidden' })
+  const items = await listStudentImportIssues({
+    schoolCycle: typeof req.query.schoolCycle === 'string' ? req.query.schoolCycle : undefined,
+    status: typeof req.query.status === 'string' ? req.query.status : undefined,
+    limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined,
+  })
+  return res.status(200).json({ ok: true, items })
+})
+
 app.post('/api/hybrid/students/import-enrollment-roster', async (req: Request, res: Response) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
   const actor = await resolveRemoteActor(req)
@@ -736,7 +775,7 @@ app.post('/api/hybrid/students/import-enrollment-roster', async (req: Request, r
   const parsed = remoteEnrollmentRosterImportSchema.safeParse(req.body)
   if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload', issues: parsed.error.issues })
   try {
-    const result = await importEnrollmentRosterRows(parsed.data.schoolCycle, parsed.data.rows, parsed.data.sourcePath, actor)
+    const result = await importEnrollmentRosterRows(parsed.data.schoolCycle, parsed.data.rows, parsed.data.sourcePath, actor, parsed.data.rejectedRows)
     recordOperation(buildServerOperation('ENROLLMENT_ROSTER_IMPORT', parsed.data.schoolCycle, req.header('x-device-id') ?? 'remote-api', parsed.data as unknown as Record<string, unknown>))
     return res.status(200).json({ ok: true, result })
   } catch (error) {
@@ -1047,6 +1086,19 @@ app.post('/api/hybrid/payments', async (req: Request, res: Response) => {
     return res.status(201).json({ ok: true, payment })
   } catch (error) {
     return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'payment_failed' })
+  }
+})
+
+app.post('/api/hybrid/payments/cancel', async (req: Request, res: Response) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: 'unauthorized' })
+  const parsed = remotePaymentCancelSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ ok: false, error: 'invalid_payload' })
+  try {
+    const actor = await resolveRemoteActor(req)
+    const payment = await cancelPayment(parsed.data, actor)
+    return res.status(200).json({ ok: true, payment })
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'payment_cancel_failed' })
   }
 })
 

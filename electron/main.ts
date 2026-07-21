@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, session } from 'electron'
 import * as path from 'node:path'
 import { initializeDatabaseEnvironment } from './db-bootstrap'
 import { ensureLocalDbCompatibility } from './db-compat'
@@ -31,6 +31,9 @@ function createWindow() {
 app.whenReady().then(async () => {
   initializeDatabaseEnvironment()
   await ensureLocalDbCompatibility()
+  if (process.env.CBTA_CLEAR_LOCAL_STORAGE_ON_START === '1') {
+    await session.defaultSession.clearStorageData({ storages: ['localstorage'] })
+  }
 
   const [{ registerIpcHandlers }, { ensureBaseData }] = await Promise.all([
     import('./ipc'),

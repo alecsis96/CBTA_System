@@ -42,6 +42,11 @@ contextBridge.exposeInMainWorld('cbta', {
     graduatePeriod: (input: unknown) => ipcRenderer.invoke('students:graduatePeriod', input),
     formalizeEnrollment: (input: unknown) => ipcRenderer.invoke('students:formalizeEnrollment', input),
     listMovements: (input?: unknown) => ipcRenderer.invoke('students:listMovements', input),
+    listImportIssues: (input?: unknown) => ipcRenderer.invoke('students:listImportIssues', input),
+    previewFichaCompletionImport: (input: unknown) => ipcRenderer.invoke('students:previewFichaCompletionImport', input),
+    applyFichaCompletionImport: (input: unknown) => ipcRenderer.invoke('students:applyFichaCompletionImport', input),
+    previewPropedeuticAreaImport: (input: unknown) => ipcRenderer.invoke('students:previewPropedeuticAreaImport', input),
+    applyPropedeuticAreaImport: (input: unknown) => ipcRenderer.invoke('students:applyPropedeuticAreaImport', input),
     importEnrollmentRoster: (input: unknown) => ipcRenderer.invoke('students:importEnrollmentRoster', input),
   },
   permissions: {
@@ -66,6 +71,7 @@ contextBridge.exposeInMainWorld('cbta', {
   payments: {
     create: (input: unknown) => ipcRenderer.invoke('payments:create', input),
     list: (filters?: unknown) => ipcRenderer.invoke('payments:list', filters),
+    cancel: (input: unknown) => ipcRenderer.invoke('payments:cancel', input),
     generateBatch: (input: unknown) => ipcRenderer.invoke('payments:generateBatch', input),
   },
     receipts: {

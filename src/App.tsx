@@ -51,6 +51,7 @@ import type {
   PreRegistrationSummary,
   RocReceiptSummary,
   GroupStat,
+  StudentImportIssueSummary,
   StudentDailyStatusSetInput,
   StudentDetail,
   StudentFormInput,
@@ -65,10 +66,11 @@ import { SecretariaOverview } from './SecretariaOverview'
 import { IngresosPropiosOverview } from './IngresosPropiosOverview'
 import { ConfiguracionTarifasOverview } from './ConfiguracionTarifasOverview'
 import { FloatingFeedbackToast } from './FloatingFeedbackToast'
+import { TARGET_SCHOOL_CYCLE, TARGET_SCHOOL_PERIOD } from '../shared/school-periods'
 
 type Screen = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion'
 type FeedbackScope = 'control-escolar' | 'ingresos-propios' | 'secretaria' | 'configuracion' | 'sync'
-export type StudentAcademicContext = Pick<StudentDetail, 'enrollmentNumber' | 'schoolCycle' | 'schoolPeriod' | 'semesterLevel' | 'academicStatus' | 'enrollmentStatus' | 'documentationStatus' | 'groupLabel' | 'groupAdvisorName' | 'shiftLabel'>
+export type StudentAcademicContext = Pick<StudentDetail, 'enrollmentNumber' | 'schoolCycle' | 'schoolPeriod' | 'semesterLevel' | 'academicStatus' | 'propedeuticArea' | 'enrollmentStatus' | 'documentationStatus' | 'groupLabel' | 'groupAdvisorName' | 'shiftLabel'>
 
 const CURRENT_DATE = new Date()
 
@@ -95,10 +97,11 @@ const initialForm: StudentFormInput = {
   previousSchool: '',
   secondaryAverage: null,
   examRoom: '',
-  schoolCycle: '2026-2027',
-  schoolPeriod: 1,
+  schoolCycle: TARGET_SCHOOL_CYCLE,
+  schoolPeriod: TARGET_SCHOOL_PERIOD,
   semesterLevel: 1,
   academicStatus: 'Regular',
+  propedeuticArea: '',
   guardianFullName: '',
   guardianRelationship: '',
   guardianPhone: '',
@@ -131,6 +134,7 @@ function App() {
   const [validatedStudents, setValidatedStudents] = useState<StudentSummary[]>([])
   const [selectedStudent, setSelectedStudent] = useState<StudentSummary | null>(null)
   const [studentPermissions, setStudentPermissions] = useState<StudentPermissionSummary[]>([])
+  const [studentImportIssues, setStudentImportIssues] = useState<StudentImportIssueSummary[]>([])
   const [concepts, setConcepts] = useState<ChargeConceptSummary[]>([])
   const [selectedConcepts, setSelectedConcepts] = useState<ChargeConceptSummary[]>([])
   const [conceptAmounts, setConceptAmounts] = useState<Record<string, number>>({})
@@ -333,8 +337,12 @@ function App() {
         canManageSecretaria && typeof appApi.permissions?.list === 'function'
           ? safeLoad('permissions.list', appApi.permissions.list(), [])
           : Promise.resolve([])
+      const studentImportIssuesPromise =
+        canManageControl && typeof appApi.students?.listImportIssues === 'function'
+          ? safeLoad('students.listImportIssues', appApi.students.listImportIssues({ status: 'PENDIENTE', limit: 200 }), [])
+          : Promise.resolve([])
 
-      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments, permissions] = await Promise.all([
+      const [allStudents, preRegistrations, validatedStudents, activeConcepts, auditLogs, receiptsAll, cashPayments, admissions, rocConfig, adminUsers, departments, permissions, importIssues] = await Promise.all([
         safeLoad('students.list', appApi.students.list(), []),
         canManageControl && typeof appApi.preRegistrations?.list === 'function' ? safeLoad('preRegistrations.list', appApi.preRegistrations.list(), []) : Promise.resolve([]),
         typeof appApi.students.listValidated === 'function' ? safeLoad('students.listValidated', appApi.students.listValidated(), []) : Promise.resolve([]),
@@ -347,6 +355,7 @@ function App() {
         adminUsersPromise,
         departmentsPromise,
         permissionsPromise,
+        studentImportIssuesPromise,
       ])
 
       setStudents(allStudents)
@@ -360,6 +369,7 @@ function App() {
       setAdminUsers(adminUsers)
       setDepartments(departments)
       setStudentPermissions(permissions)
+      setStudentImportIssues(importIssues)
       setRocInitialNumber(rocConfig.initialRocNumber)
       applySuggestedRocNumber(rocConfig.nextSuggestedRocNumber)
       setSelectedStudent((current) => {
@@ -568,6 +578,7 @@ function App() {
         schoolPeriod: student.schoolPeriod,
         semesterLevel: student.semesterLevel,
         academicStatus: student.academicStatus,
+        propedeuticArea: student.propedeuticArea,
         enrollmentStatus: student.enrollmentStatus,
         documentationStatus: student.documentationStatus,
         groupLabel: student.groupLabel,
@@ -908,8 +919,8 @@ function App() {
 
   async function handleAdminControlEscolarTestReset(action: string, input?: { studentId?: string; schoolCycle?: string; schoolPeriod?: number }) {
     const periodInput = {
-      schoolCycle: input?.schoolCycle ?? '2026-2027',
-      schoolPeriod: input?.schoolPeriod ?? 1,
+      schoolCycle: input?.schoolCycle ?? TARGET_SCHOOL_CYCLE,
+      schoolPeriod: input?.schoolPeriod ?? TARGET_SCHOOL_PERIOD,
     }
     setSavingAdminTestAction(action)
     setConfigFeedback(null)
@@ -1015,7 +1026,7 @@ function App() {
       setSelectedConcepts([])
       setConceptAmounts({})
       setIncludeLifeInsurance(false)
-      setIngresosFeedback('Cobro registrado. El alumno ya esta en pendientes de ROC.')
+      setIngresosFeedback('Cobro registrado correctamente. Quedó pendiente para ROC mensual.')
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudo registrar el cobro.'
@@ -1095,6 +1106,34 @@ function App() {
       const message = error instanceof Error ? error.message : 'No se pudo generar el ROC mensual.'
       setIngresosFeedback(message)
       return null
+    } finally {
+      setSavingReceipt(false)
+    }
+  }
+
+  async function handleCancelCashPayment(paymentId: string, reason: string) {
+    setSavingReceipt(true)
+    setIngresosFeedback(null)
+
+    try {
+      const cancelled = await appApi.payments.cancel({
+        paymentId,
+        reason: reason.trim(),
+      })
+
+      await loadData()
+      if (selectedStudent) {
+        await loadReceipts(selectedStudent.id)
+      }
+      await refreshSuggestedRocNumber(true)
+      setIngresosFeedback(
+        cancelled.generatedReceiptId
+          ? 'Cobro y ROC anulados correctamente.'
+          : 'Cobro cancelado correctamente.',
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo cancelar el cobro.'
+      setIngresosFeedback(message)
     } finally {
       setSavingReceipt(false)
     }
@@ -1323,6 +1362,7 @@ function App() {
             students={students}
             preRegistrations={preRegistrations}
             admissions={admissions}
+            studentImportIssues={studentImportIssues}
             recentAuditLogs={recentAuditLogs}
             captureQuery={captureQuery}
             activeAdmission={activeAdmission}
@@ -1387,6 +1427,7 @@ function App() {
             onPrintMonthlyReceipts={handlePrintMonthlyReceipts}
             onReprintReceipt={handleReprintReceipt}
             onCancelReceipt={handleCancelReceipt}
+            onCancelCashPayment={handleCancelCashPayment}
             onSelectStudent={handleSelectIngresosStudent}
             onToggleLifeInsurance={handleToggleLifeInsurance}
             onToggleConcept={toggleConcept}
@@ -1520,6 +1561,7 @@ export type ControlEscolarProps = {
   students: StudentSummary[]
   preRegistrations: PreRegistrationSummary[]
   admissions: AdmissionSummary[]
+  studentImportIssues: StudentImportIssueSummary[]
   recentAuditLogs: AuditLogSummary[]
   captureQuery: string
   activeAdmission: AdmissionSummary | null
@@ -1578,6 +1620,7 @@ export type IngresosProps = {
   onPrintMonthlyReceipts: () => Promise<void>
   onReprintReceipt: (receiptId: string) => Promise<void>
   onCancelReceipt: (receiptId: string, reason: string) => Promise<void>
+  onCancelCashPayment: (paymentId: string, reason: string) => Promise<void>
   onSelectStudent: (student: StudentSummary | null) => void
   onToggleLifeInsurance: (checked: boolean) => void
   onToggleConcept: (concept: ChargeConceptSummary) => void

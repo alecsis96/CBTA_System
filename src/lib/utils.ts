@@ -157,6 +157,16 @@ export function formatPreferredEnrollment(student: StudentSummary) {
   return student.officialEnrollmentNumber?.trim() || student.enrollmentNumber
 }
 
+export function formatSchoolPeriodLabel(schoolCycle: string | null | undefined, schoolPeriod: number | null | undefined) {
+  const cycle = schoolCycle?.trim() ?? ''
+  const period = schoolPeriod ?? 1
+  const rangeMatch = cycle.match(/^(\d{4})-(\d{4})$/)
+  if (rangeMatch) {
+    return `${period}-${rangeMatch[period === 1 ? 2 : 1]}`
+  }
+  return `${period}-${cycle || 'Sin ciclo'}`
+}
+
 export function dailyStatusClassName(status: StudentSummary['dailyStatus']) {
   if (status === 'PERMISO') return 'status-tag warning'
   if (status === 'AUSENTE') return 'status-tag danger'

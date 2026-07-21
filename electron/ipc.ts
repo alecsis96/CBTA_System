@@ -8,6 +8,7 @@ import { prisma } from './db'
 import { exportOfficialRocTemplateBatch, openOfficialRocTemplate, type RocTemplatePayload } from './roc-template'
 import { getGeneratedRocsDir } from './runtime-paths'
 import { buildPasswordHash, verifyPassword } from '../shared/auth-password'
+import { TARGET_SCHOOL_CYCLE, TARGET_SCHOOL_PERIOD } from '../shared/school-periods'
 
 type AppRole = 'CONTROL_ESCOLAR' | 'INSCRIPCION_AUX' | 'INGRESOS_PROPIOS' | 'SECRETARIA' | 'ADMIN'
 
@@ -22,6 +23,7 @@ let currentSession: SessionUser | null = null
 const ROC_INITIAL_SETTING_KEY = 'ROC_INITIAL_NUMBER'
 const appRoleSchema = z.enum(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'INGRESOS_PROPIOS', 'SECRETARIA', 'ADMIN'])
 const semesterLevelSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)])
+const propedeuticAreaSchema = z.enum(['CS', 'C.S', 'CNEyT', 'CNEYT', 'PM/CNEyT', 'PM-CNEYT', 'P.M', 'H/L y C', 'H.L.Y C.'])
 const studentDailyStatusSchema = z.enum(['PRESENTE', 'PERMISO', 'AUSENTE'])
 const studentPermissionKindSchema = z.enum(['PERMISO_GENERAL', 'SALIDA_ANTICIPADA', 'DIA_COMPLETO', 'JUSTIFICANTE_MEDICO'])
 const studentPermissionStatusSchema = z.enum(['PROGRAMADO', 'ACTIVO', 'CERRADO', 'CANCELADO'])
@@ -64,9 +66,9 @@ const adminTestStudentResetSchema = z.object({
 })
 
 const adminTestPeriodResetSchema = z.object({
-  schoolCycle: z.string().trim().min(1).default('2026-2027'),
-  schoolPeriod: z.number().int().min(1).max(2).default(1),
-}).default({ schoolCycle: '2026-2027', schoolPeriod: 1 })
+  schoolCycle: z.string().trim().min(1).default(TARGET_SCHOOL_CYCLE),
+  schoolPeriod: z.number().int().min(1).max(2).default(TARGET_SCHOOL_PERIOD),
+}).default({ schoolCycle: TARGET_SCHOOL_CYCLE, schoolPeriod: TARGET_SCHOOL_PERIOD })
 
 function authSessionSummary() {
   return currentSession
@@ -190,6 +192,7 @@ const studentInputSchema = z.object({
   schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: semesterLevelSchema.default(1),
   academicStatus: z.string().trim().optional().nullable(),
+  propedeuticArea: z.union([propedeuticAreaSchema, z.literal('')]).optional().nullable(),
   guardianFullName: z.string().min(1),
   guardianRelationship: z.string().trim().optional().nullable(),
   guardianPhone: z.string().min(1),
@@ -226,6 +229,7 @@ const studentGradeEnrollmentSchema = z.object({
   schoolCycle: z.string().trim().min(1),
   schoolPeriod: z.number().int().min(1).max(2).default(1),
   semesterLevel: semesterLevelSchema,
+  propedeuticArea: z.union([propedeuticAreaSchema, z.literal('')]).optional().nullable(),
   toGroupId: z.string().trim().min(1).nullable().optional(),
   reasonCode: z.string().trim().min(1),
   notes: z.string().trim().optional(),
@@ -235,6 +239,24 @@ const studentMovementListSchema = z.object({
   studentId: z.string().trim().optional(),
   schoolCycle: z.string().trim().optional(),
   limit: z.number().int().min(1).max(100).optional(),
+}).optional()
+
+const studentImportIssueSchema = z.object({
+  sheetName: z.string().trim().nullable().optional(),
+  rowNumber: z.number().int().min(1).nullable().optional(),
+  importKind: z.string().trim().nullable().optional(),
+  enrollmentNumber: z.string().trim().nullable().optional(),
+  curp: z.string().trim().nullable().optional(),
+  fullName: z.string().trim().nullable().optional(),
+  groupLabel: z.string().trim().nullable().optional(),
+  reason: z.string().trim().min(1),
+  rawJson: z.string().trim().nullable().optional(),
+})
+
+const studentImportIssueListSchema = z.object({
+  schoolCycle: z.string().trim().optional(),
+  status: z.string().trim().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
 }).optional()
 
 const enrollmentRosterImportSchema = z.object({
@@ -261,7 +283,61 @@ const enrollmentRosterImportSchema = z.object({
     guardianFullName: z.string().trim().nullable().optional(),
     guardianPhone: z.string().trim().nullable().optional(),
     secondaryAverage: z.number().min(0).max(10).nullable().optional(),
-  })).min(1),
+  })),
+  rejectedRows: z.array(studentImportIssueSchema).optional(),
+}).refine((input) => input.rows.length > 0 || (input.rejectedRows?.length ?? 0) > 0, {
+  message: 'Agrega alumnos validos o filas con error para importar.',
+})
+
+const fichaCompletionRowSchema = z.object({
+  sheetName: z.string().trim().min(1),
+  rowNumber: z.number().int().min(1),
+  sourcePath: z.string().trim().min(1),
+  folio: z.string().trim().nullable().optional(),
+  fullName: z.string().trim().min(1),
+  curp: z.string().trim().min(18).max(18),
+  sex: z.string().trim().nullable().optional(),
+  age: z.number().int().min(0).max(120).nullable().optional(),
+  previousSchool: z.string().trim().nullable().optional(),
+  locality: z.string().trim().nullable().optional(),
+  phone: z.string().trim().nullable().optional(),
+  email: z.string().trim().nullable().optional(),
+  motherTongue: z.string().trim().nullable().optional(),
+  guardianFullName: z.string().trim().nullable().optional(),
+  guardianPhone: z.string().trim().nullable().optional(),
+  secondaryAverage: z.number().min(0).max(10).nullable().optional(),
+})
+
+const fichaCompletionImportSchema = z.object({
+  schoolCycle: z.string().trim().min(1),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(fichaCompletionRowSchema),
+  rejectedRows: z.array(studentImportIssueSchema).optional(),
+}).refine((input) => input.rows.length > 0 || (input.rejectedRows?.length ?? 0) > 0, {
+  message: 'Agrega filas de fichas para revisar.',
+})
+
+const propedeuticAreaRowSchema = z.object({
+  sheetName: z.string().trim().min(1),
+  rowNumber: z.number().int().min(1),
+  sourcePath: z.string().trim().min(1),
+  controlNumber: z.string().trim().min(1),
+  fullName: z.string().trim().min(1),
+  curp: z.string().trim().min(18).max(18),
+  previousGroup: z.string().trim().min(1),
+  nextGroup: z.string().trim().min(1),
+  career: z.string().trim().min(1),
+  area: z.string().trim().min(1),
+})
+
+const propedeuticAreaImportSchema = z.object({
+  schoolCycle: z.string().trim().min(1).default(TARGET_SCHOOL_CYCLE),
+  schoolPeriod: z.number().int().min(1).max(2).default(TARGET_SCHOOL_PERIOD),
+  sourcePath: z.string().trim().nullable().optional(),
+  rows: z.array(propedeuticAreaRowSchema),
+  rejectedRows: z.array(studentImportIssueSchema).optional(),
+}).refine((input) => input.rows.length > 0 || (input.rejectedRows?.length ?? 0) > 0, {
+  message: 'Agrega filas de areas propedeuticas para revisar.',
 })
 
 const permissionListFiltersSchema = z
@@ -289,6 +365,8 @@ const permissionCancelSchema = z.object({
 const formalizeEnrollmentSchema = z.object({
   studentId: z.string().min(1),
   allowPendingDocuments: z.boolean().default(false),
+  targetSchoolCycle: z.string().trim().min(1).default(TARGET_SCHOOL_CYCLE),
+  targetPeriod: z.number().int().min(1).max(2).default(TARGET_SCHOOL_PERIOD),
   notes: z.string().trim().optional(),
 })
 
@@ -297,6 +375,7 @@ const reinscribeForPeriodSchema = z.object({
   targetSchoolCycle: z.string().trim().min(1),
   targetPeriod: z.number().int().min(1).max(2).default(1),
   targetSemesterLevel: semesterLevelSchema,
+  propedeuticArea: z.union([propedeuticAreaSchema, z.literal('')]).optional().nullable(),
   toGroupId: z.string().trim().min(1).nullable().optional(),
   notes: z.string().trim().optional(),
 })
@@ -352,6 +431,11 @@ const cancelReceiptSchema = z.object({
   reason: z.string().trim().min(3),
 })
 
+const cancelCashPaymentSchema = z.object({
+  paymentId: z.string().min(1),
+  reason: z.string().trim().min(3),
+})
+
 const cashPaymentCreateSchema = z.object({
   studentId: z.string().min(1),
   conceptItems: z.array(z.object({ code: z.string().min(1), amount: z.number().min(0) })).min(1),
@@ -360,7 +444,7 @@ const cashPaymentCreateSchema = z.object({
 
 const cashPaymentListFiltersSchema = z
   .object({
-    status: z.enum(['PENDIENTE_ROC', 'ROC_GENERADO']).optional(),
+    status: z.enum(['PENDIENTE_ROC', 'ROC_GENERADO', 'CANCELADO']).optional(),
   })
   .optional()
 
@@ -648,6 +732,238 @@ function normalizeOptional(value: string | null | undefined) {
   return trimmed.length > 0 ? trimmed : null
 }
 
+function normalizeCode(value: string | null | undefined) {
+  return normalizeOptional(value)?.toUpperCase() ?? null
+}
+
+function isImportBlank(value: unknown) {
+  if (value == null) return true
+  if (value instanceof Prisma.Decimal) return false
+  if (typeof value === 'string') {
+    const normalized = value.trim().toUpperCase()
+    return normalized.length === 0 || normalized === 'PENDIENTE' || normalized === 'PENDIENTE DE ACTUALIZAR'
+  }
+  return false
+}
+
+function addFieldUpdate(data: Record<string, unknown>, fieldUpdateCounts: Record<string, number>, field: string, currentValue: unknown, nextValue: unknown) {
+  const normalizedNext = typeof nextValue === 'string' ? normalizeOptional(nextValue) : nextValue ?? null
+  if (normalizedNext == null || !isImportBlank(currentValue)) return false
+  data[field] = normalizedNext
+  fieldUpdateCounts[field] = (fieldUpdateCounts[field] ?? 0) + 1
+  return true
+}
+
+type FichaCompletionInput = z.infer<typeof fichaCompletionImportSchema>
+type PropedeuticAreaInput = z.infer<typeof propedeuticAreaImportSchema>
+
+async function persistImportIssues(
+  schoolCycle: string,
+  sourcePath: string | null | undefined,
+  issues: Array<z.infer<typeof studentImportIssueSchema>>,
+) {
+  if (issues.length === 0) return
+  await prisma.studentImportIssue.createMany({
+    data: issues.map((issue) => ({
+      schoolCycle,
+      sourcePath: sourcePath ?? null,
+      sheetName: issue.sheetName?.trim() || null,
+      rowNumber: issue.rowNumber ?? null,
+      importKind: issue.importKind?.trim() || null,
+      enrollmentNumber: issue.enrollmentNumber?.trim() || null,
+      curp: issue.curp?.trim().toUpperCase() || null,
+      fullName: issue.fullName?.trim().toUpperCase() || null,
+      groupLabel: issue.groupLabel?.trim().toUpperCase() || null,
+      reason: issue.reason.trim(),
+      rawJson: issue.rawJson ?? null,
+    })),
+  })
+}
+
+async function buildFichaCompletionPlan(input: FichaCompletionInput) {
+  const fieldUpdateCounts: Record<string, number> = {}
+  const issues: string[] = []
+  const issueRows: Array<z.infer<typeof studentImportIssueSchema>> = [...(input.rejectedRows ?? [])]
+  const seenCurps = new Set<string>()
+  const plannedUpdates: Array<{
+    row: FichaCompletionInput['rows'][number]
+    studentId: string
+    studentData: Record<string, unknown>
+    guardianData: { fullName?: string; phone?: string } | null
+    changedFields: string[]
+  }> = []
+
+  for (const row of input.rows) {
+    const curp = row.curp.trim().toUpperCase()
+    if (seenCurps.has(curp)) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: CURP_DUPLICADA_EN_EXCEL ${curp}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'FICHA_COMPLETAR', curp, fullName: row.fullName, reason: 'CURP_DUPLICADA_EN_EXCEL', rawJson: JSON.stringify(row) })
+      continue
+    }
+    seenCurps.add(curp)
+
+    const student = await prisma.student.findUnique({
+      where: { curp },
+      include: { guardian: true },
+    })
+    if (!student) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: NO_EXISTE_EN_BASE ${curp}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'FICHA_COMPLETAR', enrollmentNumber: row.folio ?? null, curp, fullName: row.fullName, reason: 'NO_EXISTE_EN_BASE', rawJson: JSON.stringify(row) })
+      continue
+    }
+
+    const studentData: Record<string, unknown> = {}
+    const guardianData: { fullName?: string; phone?: string } = {}
+    const beforeCounts = { ...fieldUpdateCounts }
+
+    addFieldUpdate(studentData, fieldUpdateCounts, 'phone', student.phone, row.phone)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'email', student.email, row.email)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'motherTongue', student.motherTongue, row.motherTongue)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'locality', student.locality, row.locality)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'previousSchool', student.previousSchool, row.previousSchool)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'age', student.age, row.age)
+    addFieldUpdate(studentData, fieldUpdateCounts, 'sex', student.sex, normalizeCode(row.sex))
+    addFieldUpdate(studentData, fieldUpdateCounts, 'secondaryAverage', student.secondaryAverage, row.secondaryAverage == null ? null : new Prisma.Decimal(row.secondaryAverage))
+
+    if (normalizeOptional(row.guardianFullName) && (!student.guardian || isImportBlank(student.guardian.fullName))) {
+      guardianData.fullName = row.guardianFullName!.trim()
+      fieldUpdateCounts.guardianFullName = (fieldUpdateCounts.guardianFullName ?? 0) + 1
+    }
+    if (normalizeOptional(row.guardianPhone) && (!student.guardian || isImportBlank(student.guardian.phone))) {
+      guardianData.phone = row.guardianPhone!.trim()
+      fieldUpdateCounts.guardianPhone = (fieldUpdateCounts.guardianPhone ?? 0) + 1
+    }
+
+    const changedFields = Object.keys(fieldUpdateCounts).filter((field) => fieldUpdateCounts[field] !== beforeCounts[field])
+    if (changedFields.length === 0) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: SIN_CAMBIOS_CAMPOS_YA_COMPLETOS ${curp}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'FICHA_COMPLETAR', enrollmentNumber: row.folio ?? null, curp, fullName: row.fullName, reason: 'SIN_CAMBIOS_CAMPOS_YA_COMPLETOS', rawJson: JSON.stringify(row) })
+      continue
+    }
+
+    plannedUpdates.push({
+      row,
+      studentId: student.id,
+      studentData,
+      guardianData: Object.keys(guardianData).length > 0 ? guardianData : null,
+      changedFields,
+    })
+  }
+
+  return {
+    plannedUpdates,
+    issueRows,
+    preview: {
+      ok: true,
+      sourcePath: input.sourcePath ?? null,
+      totalRows: input.rows.length + (input.rejectedRows?.length ?? 0),
+      matchedCount: plannedUpdates.length + issueRows.filter((issue) => issue.reason === 'SIN_CAMBIOS_CAMPOS_YA_COMPLETOS').length,
+      updateCount: plannedUpdates.length,
+      skippedCount: issueRows.length,
+      issueCount: issueRows.length,
+      fieldUpdateCounts,
+      issues: issues.slice(0, 20),
+    },
+  }
+}
+
+async function buildPropedeuticAreaPlan(input: PropedeuticAreaInput) {
+  const fieldUpdateCounts: Record<string, number> = { semesterLevel: 0, propedeuticArea: 0, academicStatus: 0, groupAssignment: 0 }
+  const issues: string[] = []
+  const issueRows: Array<z.infer<typeof studentImportIssueSchema>> = [...(input.rejectedRows ?? [])]
+  const seenCurps = new Set<string>()
+  const plannedUpdates: Array<{
+    row: PropedeuticAreaInput['rows'][number]
+    studentId: string
+    beforeGroupId: string | null
+    beforeGroupLabel: string | null
+    beforeSemesterLevel: number
+    beforeEnrollmentStatus: string
+    targetGroupLabel: string
+  }> = []
+  const targetGroupLabels = new Set<string>()
+
+  for (const row of input.rows) {
+    const curp = row.curp.trim().toUpperCase()
+    const controlNumber = row.controlNumber.trim()
+    const career = row.career.trim().toUpperCase()
+    const nextGroup = row.nextGroup.trim().toUpperCase()
+    const area = row.area.trim().toUpperCase()
+    const targetGroupLabel = `5${nextGroup}-${career}`
+
+    if (seenCurps.has(curp)) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: CURP_DUPLICADA_EN_EXCEL ${curp}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'AREA_PROPEDEUTICA', enrollmentNumber: controlNumber, curp, fullName: row.fullName, groupLabel: targetGroupLabel, reason: 'CURP_DUPLICADA_EN_EXCEL', rawJson: JSON.stringify(row) })
+      continue
+    }
+    seenCurps.add(curp)
+
+    const student = await prisma.student.findUnique({
+      where: { curp },
+      include: { groupAssignment: { include: { group: true } } },
+    })
+    if (!student) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: NO_EXISTE_EN_BASE ${curp}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'AREA_PROPEDEUTICA', enrollmentNumber: controlNumber, curp, fullName: row.fullName, groupLabel: targetGroupLabel, reason: 'NO_EXISTE_EN_BASE', rawJson: JSON.stringify(row) })
+      continue
+    }
+
+    if ((student.officialEnrollmentNumber ?? '').trim() !== controlNumber) {
+      issues.push(`Fila ${row.rowNumber} en ${row.sheetName}: NO_CONTROL_NO_COINCIDE ${controlNumber}.`)
+      issueRows.push({ sheetName: row.sheetName, rowNumber: row.rowNumber, importKind: 'AREA_PROPEDEUTICA', enrollmentNumber: controlNumber, curp, fullName: row.fullName, groupLabel: targetGroupLabel, reason: 'NO_CONTROL_NO_COINCIDE', rawJson: JSON.stringify({ ...row, officialEnrollmentNumber: student.officialEnrollmentNumber }) })
+      continue
+    }
+
+    plannedUpdates.push({
+      row: { ...row, career, nextGroup, area },
+      studentId: student.id,
+      beforeGroupId: student.groupAssignment?.groupId ?? null,
+      beforeGroupLabel: student.groupAssignment?.group.label ?? null,
+      beforeSemesterLevel: student.semesterLevel,
+      beforeEnrollmentStatus: student.enrollmentStatus,
+      targetGroupLabel,
+    })
+    targetGroupLabels.add(targetGroupLabel)
+  }
+
+  const existingGroups = targetGroupLabels.size > 0
+    ? await prisma.intakeGroup.findMany({
+      where: {
+        schoolCycle: input.schoolCycle,
+        semesterLevel: 5,
+        shift: MATUTINO_SHIFT,
+        label: { in: Array.from(targetGroupLabels) },
+      },
+      select: { label: true },
+    })
+    : []
+  const existingGroupLabels = new Set(existingGroups.map((group) => group.label))
+  const createdGroupCount = Array.from(targetGroupLabels).filter((label) => !existingGroupLabels.has(label)).length
+
+  fieldUpdateCounts.semesterLevel = plannedUpdates.filter((item) => item.beforeSemesterLevel !== 5).length
+  fieldUpdateCounts.propedeuticArea = plannedUpdates.length
+  fieldUpdateCounts.academicStatus = plannedUpdates.length
+  fieldUpdateCounts.groupAssignment = plannedUpdates.length
+
+  return {
+    plannedUpdates,
+    issueRows,
+    createdGroupCount,
+    preview: {
+      ok: true,
+      sourcePath: input.sourcePath ?? null,
+      totalRows: input.rows.length + (input.rejectedRows?.length ?? 0),
+      matchedCount: plannedUpdates.length,
+      updateCount: plannedUpdates.length,
+      skippedCount: issueRows.length,
+      issueCount: issueRows.length,
+      fieldUpdateCounts,
+      createdGroupCount,
+      issues: issues.slice(0, 20),
+    },
+  }
+}
+
 function startOfLocalDay(value?: string | Date) {
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const [year, month, day] = value.split('-').map(Number)
@@ -763,6 +1079,7 @@ function studentSummary(student: {
   schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
+  propedeuticArea: string | null
   status: string
   documentationStatus: string
   enrollmentStatus?: string | null
@@ -813,6 +1130,7 @@ function studentSummary(student: {
     schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? null,
+    propedeuticArea: student.propedeuticArea ?? null,
     documentationStatus: student.documentationStatus,
     enrollmentStatus: student.enrollmentStatus ?? 'INSCRITO',
     firstName: student.firstName,
@@ -861,6 +1179,7 @@ function studentDetail(student: {
   schoolPeriod?: number | null
   semesterLevel: number
   academicStatus: string | null
+  propedeuticArea: string | null
   status: string
   documentationStatus: string
   enrollmentStatus?: string | null
@@ -907,6 +1226,7 @@ function studentDetail(student: {
     schoolPeriod: student.schoolPeriod ?? 1,
     semesterLevel: normalizeSemesterLevel(student.semesterLevel),
     academicStatus: student.academicStatus ?? '',
+    propedeuticArea: student.propedeuticArea ?? '',
     guardianFullName: student.guardian?.fullName ?? '',
     guardianRelationship: student.guardian?.relationship ?? '',
     guardianPhone: student.guardian?.phone ?? '',
@@ -1007,11 +1327,15 @@ function conceptSummary(concept: {
 
 function cashPaymentSummary(payment: {
   id: string
+  generatedReceiptId?: string | null
   status: string
   notes: string | null
+  cancelledAt?: Date | null
+  cancellationReason?: string | null
   createdAt: Date
   student: { id: string; enrollmentNumber: string; firstName: string; paternalLastName: string; maternalLastName: string }
   lines: Array<{ total: unknown; concept: { code: string; name: string; excludeFromRoc: boolean } }>
+  generatedReceipt?: { id: string; rocNumber: string; status: string } | null
 }) {
   const rocLines = payment.lines.filter((line) => !line.concept.excludeFromRoc)
   const externalLines = payment.lines.filter((line) => line.concept.excludeFromRoc)
@@ -1025,6 +1349,11 @@ function cashPaymentSummary(payment: {
     externalTotalAmount: externalLines.reduce((sum, line) => sum + Number(line.total), 0),
     createdAt: payment.createdAt.toISOString(),
     status: payment.status,
+    generatedReceiptId: payment.generatedReceiptId ?? payment.generatedReceipt?.id ?? null,
+    generatedRocNumber: payment.generatedReceipt?.rocNumber ?? null,
+    generatedReceiptStatus: payment.generatedReceipt?.status ?? null,
+    cancelledAt: payment.cancelledAt?.toISOString() ?? null,
+    cancellationReason: payment.cancellationReason ?? null,
     conceptLabels: payment.lines.map((line) => `${line.concept.code} - ${line.concept.name}`),
     externalConceptLabels: externalLines.map((line) => `${line.concept.code} - ${line.concept.name}`),
     notes: payment.notes ?? null,
@@ -1049,6 +1378,7 @@ function buildNextRocNumber(baseRocNumber: string, offset: number) {
 async function getNextRocNumberSuggestion() {
   const baseSetting = await readRocInitialSetting()
   const lastReceipt = await prisma.rocReceipt.findFirst({
+    where: { status: { not: 'ANULADO' } },
     orderBy: { rocNumber: 'desc' },
     select: { rocNumber: true },
   })
@@ -1394,6 +1724,11 @@ function rocGroupLabel(groupLabel: string | null | undefined) {
   return (groupLabel ?? '').trim().replace(/^\d+\s*/u, '')
 }
 
+function rocShiftLabel(shift: string | null | undefined) {
+  const normalized = (shift ?? 'MATUTINO').trim().toUpperCase()
+  return normalized ? normalized[0] : 'M'
+}
+
 function buildRocStudentPayloadFields(student: ReceiptForTemplate['student']) {
   return {
     fullName: `${student.paternalLastName} ${student.maternalLastName} ${student.firstName}`.replace(/\s+/g, ' ').trim(),
@@ -1403,7 +1738,7 @@ function buildRocStudentPayloadFields(student: ReceiptForTemplate['student']) {
       .join(', '),
     grade: rocGradeLabel(student.semesterLevel),
     group: rocGroupLabel(student.groupAssignment?.group?.label),
-    shift: student.groupAssignment?.group?.shift ?? 'MATUTINO',
+    shift: rocShiftLabel(student.groupAssignment?.group?.shift),
   }
 }
 
@@ -1489,6 +1824,29 @@ function sortableConceptKey(conceptLabels: string[]) {
 }
 
 async function restorePaymentAfterReceiptCancellation(tx: Omit<typeof prisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>, receipt: ReceiptForTemplate) {
+  const linkedPayment = await tx.cashPayment.findUnique({
+    where: { generatedReceiptId: receipt.id },
+    select: { id: true },
+  })
+
+  if (linkedPayment) {
+    await tx.cashPayment.update({
+      where: { id: linkedPayment.id },
+      data: {
+        status: 'PENDIENTE_ROC',
+        batchGeneratedAt: null,
+        generatedReceiptId: null,
+      },
+    })
+
+    await tx.student.update({
+      where: { id: receipt.studentId },
+      data: { status: 'LISTO_PARA_COBRO' },
+    })
+
+    return { restoredPaymentId: linkedPayment.id, studentStatus: 'LISTO_PARA_COBRO' }
+  }
+
   const receiptConceptKey = sortableConceptKey(
     receipt.lines.map((line) => `${line.concept.code} - ${line.concept.name}`),
   )
@@ -1534,6 +1892,7 @@ async function restorePaymentAfterReceiptCancellation(tx: Omit<typeof prisma, '$
     data: {
       status: 'PENDIENTE_ROC',
       batchGeneratedAt: null,
+      generatedReceiptId: null,
     },
   })
 
@@ -2398,7 +2757,7 @@ export function registerIpcHandlers() {
           },
         })
       } else {
-        const previousPeriod = previousSchoolPeriod('2026-2027', 1)
+        const previousPeriod = previousSchoolPeriod(TARGET_SCHOOL_CYCLE, TARGET_SCHOOL_PERIOD)
         await restoreGroupAssignmentForReset(tx, input.studentId, movement.previousGroupId)
         await tx.student.update({
           where: { id: input.studentId },
@@ -3389,8 +3748,8 @@ export function registerIpcHandlers() {
         data: {
           enrollmentNumber: nextEnrollmentNumber,
           officialEnrollmentNumber: nextEnrollmentNumber,
-          schoolCycle: '2026-2027',
-          schoolPeriod: 1,
+          schoolCycle: input.targetSchoolCycle.trim(),
+          schoolPeriod: input.targetPeriod,
           semesterLevel: 1,
           enrollmentStatus: nextEnrollmentStatus,
           documentationStatus: nextDocumentationStatus,
@@ -3475,6 +3834,7 @@ export function registerIpcHandlers() {
           schoolPeriod: input.schoolPeriod,
           semesterLevel: normalizeSemesterLevel(input.semesterLevel),
           academicStatus: normalizeOptional(input.academicStatus),
+          propedeuticArea: normalizeSemesterLevel(input.semesterLevel) === 5 ? normalizeOptional(input.propedeuticArea) : null,
           documentationStatus: 'PENDIENTE',
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: 'INSCRITO',
@@ -3569,6 +3929,7 @@ export function registerIpcHandlers() {
           schoolPeriod: actor.role === 'INSCRIPCION_AUX' ? existing.schoolPeriod : input.schoolPeriod,
           semesterLevel: actor.role === 'INSCRIPCION_AUX' ? existing.semesterLevel : normalizeSemesterLevel(input.semesterLevel),
           academicStatus: actor.role === 'INSCRIPCION_AUX' ? existing.academicStatus : normalizeOptional(input.academicStatus),
+          propedeuticArea: normalizeSemesterLevel(input.semesterLevel) === 5 ? normalizeOptional(input.propedeuticArea) : null,
           status: validated ? 'LISTO_PARA_COBRO' : 'CAPTURADO',
           enrollmentStatus: existing.enrollmentStatus || 'INSCRITO',
           validatedAt: validated ? existing.validatedAt ?? new Date() : null,
@@ -3695,7 +4056,7 @@ export function registerIpcHandlers() {
       const nextEnrollmentStatus = targetGroup ? 'ASIGNADO' : 'INSCRITO'
       const nextStudent = await tx.student.update({
         where: { id: student.id },
-        data: { schoolCycle: input.schoolCycle.trim(), schoolPeriod: input.schoolPeriod, semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular' },
+        data: { schoolCycle: input.schoolCycle.trim(), schoolPeriod: input.schoolPeriod, semesterLevel, enrollmentStatus: nextEnrollmentStatus, academicStatus: student.academicStatus ?? 'Regular', propedeuticArea: semesterLevel === 5 ? normalizeOptional(input.propedeuticArea) : null },
         include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
       })
       await tx.studentAcademicMovement.create({ data: { studentId: student.id, movementType: 'ALTA_GRADO', reasonCode: input.reasonCode, reasonLabel, notes: normalizeOptional(input.notes), previousSemesterLevel: student.semesterLevel, nextSemesterLevel: semesterLevel, previousGroupId: previousAssignment?.groupId ?? null, previousGroupLabel: previousAssignment?.group.label ?? null, nextGroupId: targetGroup?.id ?? null, nextGroupLabel: targetGroup?.label ?? null, previousEnrollmentStatus: student.enrollmentStatus, nextEnrollmentStatus, actorId: actor.id, actorRole: actor.role } })
@@ -3757,6 +4118,7 @@ export function registerIpcHandlers() {
           documentationStatus: nextDocumentationStatus,
           status: 'VALIDADO',
           academicStatus: student.academicStatus ?? 'Regular',
+          propedeuticArea: semesterLevel === 5 ? normalizeOptional(input.propedeuticArea) : null,
         },
         include: { groupAssignment: { include: { group: true } }, guardian: true, admissionPayment: { select: { status: true } }, cashPayments: { select: { status: true }, orderBy: { createdAt: 'desc' }, take: 1 } },
       })
@@ -3844,6 +4206,218 @@ export function registerIpcHandlers() {
     return movements.map(academicMovementSummary)
   })
 
+  ipcMain.handle('students:listImportIssues', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'INSCRIPCION_AUX', 'ADMIN'], 'consultar alumnos con datos erroneos')
+    const input = studentImportIssueListSchema.parse(payload)
+    const issues = await prisma.studentImportIssue.findMany({
+      where: {
+        ...(input?.schoolCycle ? { schoolCycle: input.schoolCycle.trim() } : {}),
+        ...(input?.status && input.status !== 'all' ? { status: input.status.trim() } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: input?.limit ?? 100,
+    })
+    return issues.map((issue) => ({
+      id: issue.id,
+      schoolCycle: issue.schoolCycle,
+      sourcePath: issue.sourcePath ?? null,
+      sheetName: issue.sheetName ?? null,
+      rowNumber: issue.rowNumber ?? null,
+      importKind: issue.importKind ?? null,
+      enrollmentNumber: issue.enrollmentNumber ?? null,
+      curp: issue.curp ?? null,
+      fullName: issue.fullName ?? null,
+      groupLabel: issue.groupLabel ?? null,
+      reason: issue.reason,
+      rawJson: issue.rawJson ?? null,
+      status: issue.status,
+      createdAt: issue.createdAt.toISOString(),
+    }))
+  })
+
+  ipcMain.handle('students:previewFichaCompletionImport', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'previsualizar completado de fichas')
+    const input = fichaCompletionImportSchema.parse(payload)
+    const plan = await buildFichaCompletionPlan(input)
+    return plan.preview
+  })
+
+  ipcMain.handle('students:applyFichaCompletionImport', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'completar datos desde fichas')
+    const input = fichaCompletionImportSchema.parse(payload)
+    const plan = await buildFichaCompletionPlan(input)
+
+    for (const item of plan.plannedUpdates) {
+      await prisma.$transaction(async (tx) => {
+        await tx.student.update({
+          where: { id: item.studentId },
+          data: item.studentData as Prisma.StudentUpdateInput,
+        })
+
+        if (item.guardianData) {
+          await tx.guardian.upsert({
+            where: { studentId: item.studentId },
+            create: {
+              studentId: item.studentId,
+              fullName: item.guardianData.fullName ?? 'PENDIENTE DE ACTUALIZAR',
+              phone: item.guardianData.phone ?? 'PENDIENTE',
+            },
+            update: item.guardianData,
+          })
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: actor.id,
+            entityType: 'Student',
+            entityId: item.studentId,
+            action: 'COMPLETAR_DATOS_FICHA',
+            afterJson: JSON.stringify({
+              sourcePath: item.row.sourcePath,
+              sheetName: item.row.sheetName,
+              rowNumber: item.row.rowNumber,
+              changedFields: item.changedFields,
+            }),
+          },
+        })
+      })
+    }
+
+    await persistImportIssues(input.schoolCycle, input.sourcePath, plan.issueRows)
+    await prisma.auditLog.create({
+      data: {
+        userId: actor.id,
+        entityType: 'Student',
+        entityId: input.schoolCycle,
+        action: 'IMPORTACION_COMPLETAR_FICHAS',
+        afterJson: JSON.stringify({
+          sourcePath: input.sourcePath ?? null,
+          appliedCount: plan.plannedUpdates.length,
+          skippedCount: plan.issueRows.length,
+          fieldUpdateCounts: plan.preview.fieldUpdateCounts,
+        }),
+      },
+    })
+
+    return { ...plan.preview, appliedCount: plan.plannedUpdates.length }
+  })
+
+  ipcMain.handle('students:previewPropedeuticAreaImport', async (_event, payload) => {
+    requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'previsualizar areas propedeuticas')
+    const input = propedeuticAreaImportSchema.parse(payload)
+    const plan = await buildPropedeuticAreaPlan(input)
+    return plan.preview
+  })
+
+  ipcMain.handle('students:applyPropedeuticAreaImport', async (_event, payload) => {
+    const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'importar areas propedeuticas')
+    const input = propedeuticAreaImportSchema.parse(payload)
+    const plan = await buildPropedeuticAreaPlan(input)
+    const targetGroupLabels = Array.from(new Set(plan.plannedUpdates.map((item) => item.targetGroupLabel)))
+
+    if (targetGroupLabels.length > 0) {
+      await prisma.$transaction(
+        targetGroupLabels.map((label) =>
+          prisma.intakeGroup.upsert({
+            where: { schoolCycle_semesterLevel_label_shift: { schoolCycle: input.schoolCycle, semesterLevel: 5, label, shift: MATUTINO_SHIFT } },
+            update: { isActive: true, capacity: ASSIGNMENT_MAX_CAPACITY },
+            create: { schoolCycle: input.schoolCycle, semesterLevel: 5, label, shift: MATUTINO_SHIFT, capacity: ASSIGNMENT_MAX_CAPACITY },
+          }),
+        ),
+      )
+    }
+
+    const groups = targetGroupLabels.length > 0
+      ? await prisma.intakeGroup.findMany({
+        where: { schoolCycle: input.schoolCycle, semesterLevel: 5, shift: MATUTINO_SHIFT, label: { in: targetGroupLabels } },
+        select: { id: true, label: true },
+      })
+      : []
+    const groupByLabel = new Map(groups.map((group) => [group.label, group]))
+
+    for (const item of plan.plannedUpdates) {
+      const group = groupByLabel.get(item.targetGroupLabel)
+      if (!group) continue
+
+      await prisma.$transaction(async (tx) => {
+        const existingAssignment = await tx.studentGroupAssignment.findUnique({ where: { studentId: item.studentId } })
+        const assignment = existingAssignment
+          ? await tx.studentGroupAssignment.update({
+            where: { id: existingAssignment.id },
+            data: { groupId: group.id, status: 'ASIGNADO', updatedById: actor.id, reason: 'IMPORTACION_AREA_PROPEDEUTICA' },
+          })
+          : await tx.studentGroupAssignment.create({
+            data: { studentId: item.studentId, groupId: group.id, status: 'ASIGNADO', assignedById: actor.id, updatedById: actor.id, reason: 'IMPORTACION_AREA_PROPEDEUTICA' },
+          })
+
+        await tx.student.update({
+          where: { id: item.studentId },
+          data: {
+            schoolCycle: input.schoolCycle,
+            schoolPeriod: input.schoolPeriod,
+            semesterLevel: 5,
+            propedeuticArea: item.row.area,
+            academicStatus: `Carrera ${item.row.career}`,
+            enrollmentStatus: 'ASIGNADO',
+            status: 'VALIDADO',
+          },
+        })
+
+        await tx.groupAssignmentAudit.create({
+          data: {
+            assignmentId: assignment.id,
+            studentId: item.studentId,
+            beforeGroupId: item.beforeGroupId,
+            beforeGroupLabel: item.beforeGroupLabel,
+            afterGroupId: group.id,
+            afterGroupLabel: group.label,
+            actorId: actor.id,
+            actorRole: actor.role,
+            reason: 'IMPORTACION_AREA_PROPEDEUTICA',
+          },
+        })
+
+        await tx.studentAcademicMovement.create({
+          data: {
+            studentId: item.studentId,
+            movementType: 'REINSCRIPCION',
+            reasonCode: 'IMPORTACION_AREA_PROPEDEUTICA',
+            reasonLabel: 'Importacion de area propedeutica',
+            notes: `Origen: ${item.row.sourcePath} fila ${item.row.rowNumber}`,
+            previousSemesterLevel: item.beforeSemesterLevel,
+            nextSemesterLevel: 5,
+            previousGroupId: item.beforeGroupId,
+            previousGroupLabel: item.beforeGroupLabel,
+            nextGroupId: group.id,
+            nextGroupLabel: group.label,
+            previousEnrollmentStatus: item.beforeEnrollmentStatus,
+            nextEnrollmentStatus: 'ASIGNADO',
+            actorId: actor.id,
+            actorRole: actor.role,
+          },
+        })
+      })
+    }
+
+    await persistImportIssues(input.schoolCycle, input.sourcePath, plan.issueRows)
+    await prisma.auditLog.create({
+      data: {
+        userId: actor.id,
+        entityType: 'Student',
+        entityId: input.schoolCycle,
+        action: 'IMPORTACION_AREAS_PROPEDEUTICAS',
+        afterJson: JSON.stringify({
+          sourcePath: input.sourcePath ?? null,
+          appliedCount: plan.plannedUpdates.length,
+          skippedCount: plan.issueRows.length,
+          createdGroupCount: plan.createdGroupCount,
+        }),
+      },
+    })
+
+    return { ...plan.preview, appliedCount: plan.plannedUpdates.length }
+  })
+
   ipcMain.handle('students:importEnrollmentRoster', async (_event, payload) => {
     const actor = requireRole(['CONTROL_ESCOLAR', 'ADMIN'], 'importar matricula desde Excel')
     const input = enrollmentRosterImportSchema.parse(payload)
@@ -3865,10 +4439,12 @@ export function registerIpcHandlers() {
       const [semesterLevelText, label] = key.split(':')
       return { semesterLevel: normalizeSemesterLevel(Number(semesterLevelText)), label }
     })
-    const existingGroups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
-      select: { label: true, semesterLevel: true },
-    })
+    const existingGroups = groupFilters.length > 0
+      ? await prisma.intakeGroup.findMany({
+        where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+        select: { label: true, semesterLevel: true },
+      })
+      : []
     const existingGroupKeys = new Set(existingGroups.map((group) => `${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`))
 
     if (groupFilters.length > 0) {
@@ -3883,10 +4459,12 @@ export function registerIpcHandlers() {
       )
     }
 
-    const groups = await prisma.intakeGroup.findMany({
-      where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
-      select: { id: true, label: true, semesterLevel: true },
-    })
+    const groups = groupFilters.length > 0
+      ? await prisma.intakeGroup.findMany({
+        where: { schoolCycle, shift: MATUTINO_SHIFT, OR: groupFilters },
+        select: { id: true, label: true, semesterLevel: true },
+      })
+      : []
     const groupByKey = new Map(groups.map((group) => [`${normalizeSemesterLevel(group.semesterLevel)}:${group.label}`, group]))
 
     let createdCount = 0
@@ -3932,7 +4510,7 @@ export function registerIpcHandlers() {
               locality: normalizeOptional(row.locality ?? null),
               previousSchool: normalizeOptional(row.previousSchool ?? null),
               secondaryAverage: row.secondaryAverage ?? null,
-              schoolCycle,
+              schoolCycle: isFicha ? '' : schoolCycle,
               schoolPeriod: 1,
               semesterLevel: row.semesterLevel,
               academicStatus: row.career ? `Carrera ${row.career}` : existingStudent.academicStatus,
@@ -3960,7 +4538,7 @@ export function registerIpcHandlers() {
               state: 'Chiapas',
               previousSchool: normalizeOptional(row.previousSchool ?? null),
               secondaryAverage: row.secondaryAverage ?? null,
-              schoolCycle,
+              schoolCycle: isFicha ? '' : schoolCycle,
               schoolPeriod: 1,
               semesterLevel: row.semesterLevel,
               academicStatus: row.career ? `Carrera ${row.career}` : 'Regular',
@@ -4018,6 +4596,24 @@ export function registerIpcHandlers() {
         afterJson: JSON.stringify({ sourcePath: input.sourcePath ?? null, createdCount, updatedCount, assignedCount }),
       },
     })
+
+    if ((input.rejectedRows?.length ?? 0) > 0) {
+      await prisma.studentImportIssue.createMany({
+        data: input.rejectedRows!.map((issue) => ({
+          schoolCycle,
+          sourcePath: input.sourcePath ?? null,
+          sheetName: issue.sheetName?.trim() || null,
+          rowNumber: issue.rowNumber ?? null,
+          importKind: issue.importKind?.trim() || null,
+          enrollmentNumber: issue.enrollmentNumber?.trim() || null,
+          curp: issue.curp?.trim().toUpperCase() || null,
+          fullName: issue.fullName?.trim().toUpperCase() || null,
+          groupLabel: issue.groupLabel?.trim().toUpperCase() || null,
+          reason: issue.reason.trim(),
+          rawJson: issue.rawJson ?? null,
+        })),
+      })
+    }
 
     return {
       ok: true,
@@ -4175,6 +4771,7 @@ export function registerIpcHandlers() {
         },
       },
       include: {
+        generatedReceipt: true,
         student: true,
         lines: {
           include: {
@@ -4195,6 +4792,7 @@ export function registerIpcHandlers() {
       where: filters?.status ? { status: filters.status } : undefined,
       orderBy: { createdAt: 'desc' },
       include: {
+        generatedReceipt: true,
         student: true,
         lines: {
           include: {
@@ -4205,6 +4803,103 @@ export function registerIpcHandlers() {
     })
 
     return payments.map(cashPaymentSummary)
+  })
+
+  ipcMain.handle('payments:cancel', async (_event, payload) => {
+    const actor = requireRole(['INGRESOS_PROPIOS', 'ADMIN'], 'cancelar cobros')
+    const input = cancelCashPaymentSchema.parse(payload)
+    const reason = input.reason.trim()
+
+    const payment = await prisma.cashPayment.findUnique({
+      where: { id: input.paymentId },
+      include: {
+        generatedReceipt: true,
+        student: true,
+        lines: {
+          include: {
+            concept: true,
+          },
+        },
+      },
+    })
+
+    if (!payment) {
+      throw new Error('No se encontro el cobro que quieres cancelar.')
+    }
+
+    if (payment.status === 'CANCELADO') {
+      throw new Error('Este cobro ya estaba cancelado.')
+    }
+
+    if (payment.status === 'ROC_GENERADO' && !payment.generatedReceipt) {
+      throw new Error('Este cobro ya genero ROC, pero no tiene un ROC asociado para anular. Anula el ROC desde el historial.')
+    }
+
+    const updatedPayment = await prisma.$transaction(async (tx) => {
+      const previousStatus = payment.status
+      const receiptToCancel = payment.status === 'ROC_GENERADO' && payment.generatedReceipt?.status !== 'ANULADO'
+        ? payment.generatedReceipt
+        : null
+
+      if (receiptToCancel) {
+        await tx.rocReceipt.update({
+          where: { id: receiptToCancel.id },
+          data: { status: 'ANULADO' },
+        })
+      }
+
+      const updated = await tx.cashPayment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'CANCELADO',
+          cancelledAt: new Date(),
+          cancelledById: actor.id,
+          cancellationReason: reason,
+          batchGeneratedAt: null,
+        },
+        include: {
+          generatedReceipt: true,
+          student: true,
+          lines: {
+            include: {
+              concept: true,
+            },
+          },
+        },
+      })
+
+      if (previousStatus === 'ROC_GENERADO') {
+        await tx.student.update({
+          where: { id: payment.studentId },
+          data: { status: 'LISTO_PARA_COBRO' },
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: actor.id,
+          entityType: 'CASH_PAYMENT',
+          entityId: payment.id,
+          action: previousStatus === 'ROC_GENERADO' ? 'CANCEL_PAYMENT_AND_ROC' : 'CANCEL_PAYMENT',
+          beforeJson: JSON.stringify({
+            status: previousStatus,
+            generatedReceiptId: payment.generatedReceiptId,
+            rocNumber: payment.generatedReceipt?.rocNumber ?? null,
+          }),
+          afterJson: JSON.stringify({
+            summary: `${payment.student.firstName} ${payment.student.paternalLastName} - ${payment.lines.map((line) => line.concept.code).join(', ')} - ${reason}`,
+            status: 'CANCELADO',
+            reason,
+            cancelledRocNumber: receiptToCancel?.rocNumber ?? null,
+            totalAmount: payment.lines.reduce((sum, line) => sum + Number(line.total), 0),
+          }),
+        },
+      })
+
+      return updated
+    })
+
+    return cashPaymentSummary(updatedPayment)
   })
 
   ipcMain.handle('payments:generateBatch', async (_event, payload) => {
@@ -4275,7 +4970,7 @@ export function registerIpcHandlers() {
 
         await tx.cashPayment.update({
           where: { id: payment.id },
-          data: { status: 'ROC_GENERADO', batchGeneratedAt: new Date() },
+          data: { status: 'ROC_GENERADO', batchGeneratedAt: new Date(), generatedReceiptId: receipt.id },
         })
 
         await tx.student.update({

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import * as XLSX from 'xlsx'
 import { getPackagedAssetPath } from './runtime-paths'
 import { buildPasswordHash, isValidPasswordHash } from '../shared/auth-password'
+import { CURRENT_SCHOOL_CYCLE, CURRENT_SCHOOL_PERIOD } from '../shared/school-periods'
 
 const seedDepartments = [
   { code: 'CONTROL_ESCOLAR', name: 'Control Escolar', description: 'Captura, validacion documental e inscripcion de alumnos.' },
@@ -325,6 +326,22 @@ export async function ensureBaseData() {
       })
       departmentByCode.set(item.code, { id: item.id })
     }
+  }
+
+  const hasStudentTable = await hasTable('Student')
+  if (hasStudentTable) {
+    await prisma.student.updateMany({
+      where: { enrollmentStatus: 'FICHA_ENTREGADA' },
+      data: { schoolCycle: '', schoolPeriod: 1, officialEnrollmentNumber: null },
+    })
+    await prisma.student.updateMany({
+      where: {
+        schoolCycle: '2026-2027',
+        schoolPeriod: 1,
+        enrollmentStatus: { in: ['INSCRITO', 'ASIGNADO', 'CONFIRMADO'] },
+      },
+      data: { schoolCycle: CURRENT_SCHOOL_CYCLE, schoolPeriod: CURRENT_SCHOOL_PERIOD },
+    })
   }
 
   for (const user of seedUsers) {

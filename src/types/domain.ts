@@ -27,6 +27,7 @@ export type StudentSummary = {
   schoolPeriod: number
   semesterLevel: SemesterLevel
   academicStatus: string | null
+  propedeuticArea: string | null
   documentationStatus: string
   enrollmentStatus: string
   statusLabel: string
@@ -99,6 +100,7 @@ export type StudentFormInput = {
   schoolPeriod: number
   semesterLevel: SemesterLevel
   academicStatus: string
+  propedeuticArea: string
   guardianFullName: string
   guardianRelationship: string
   guardianPhone: string
@@ -140,10 +142,20 @@ export type CashPaymentSummary = {
   rocTotalAmount: number
   externalTotalAmount: number
   createdAt: string
-  status: 'PENDIENTE_ROC' | 'ROC_GENERADO'
+  status: 'PENDIENTE_ROC' | 'ROC_GENERADO' | 'CANCELADO'
+  generatedReceiptId: string | null
+  generatedRocNumber: string | null
+  generatedReceiptStatus: string | null
+  cancelledAt: string | null
+  cancellationReason: string | null
   conceptLabels: string[]
   externalConceptLabels: string[]
   notes: string | null
+}
+
+export type CashPaymentCancelInput = {
+  paymentId: string
+  reason: string
 }
 
 export type CashPaymentBatchCreateInput = {
@@ -378,6 +390,26 @@ export type EnrollmentRosterImportRow = {
   secondaryAverage?: number | null
 }
 
+export type StudentImportIssueInput = {
+  sheetName?: string | null
+  rowNumber?: number | null
+  importKind?: 'MATRICULA' | 'FICHA' | string | null
+  enrollmentNumber?: string | null
+  curp?: string | null
+  fullName?: string | null
+  groupLabel?: string | null
+  reason: string
+  rawJson?: string | null
+}
+
+export type StudentImportIssueSummary = StudentImportIssueInput & {
+  id: string
+  schoolCycle: string
+  sourcePath: string | null
+  status: string
+  createdAt: string
+}
+
 export type EnrollmentRosterImportResult = {
   ok: boolean
   sourcePath: string | null
@@ -387,6 +419,55 @@ export type EnrollmentRosterImportResult = {
   createdGroupCount: number
   skippedCount: number
   issues: string[]
+}
+
+export type StudentDataCompletionFichaRow = {
+  sheetName: string
+  rowNumber: number
+  sourcePath: string
+  folio: string | null
+  fullName: string
+  curp: string
+  sex: string | null
+  age: number | null
+  previousSchool: string | null
+  locality: string | null
+  phone: string | null
+  email: string | null
+  motherTongue: string | null
+  guardianFullName: string | null
+  guardianPhone: string | null
+  secondaryAverage: number | null
+}
+
+export type PropedeuticAreaImportRow = {
+  sheetName: string
+  rowNumber: number
+  sourcePath: string
+  controlNumber: string
+  fullName: string
+  curp: string
+  previousGroup: string
+  nextGroup: string
+  career: string
+  area: string
+}
+
+export type StudentImportPreview = {
+  ok: boolean
+  sourcePath: string | null
+  totalRows: number
+  matchedCount: number
+  updateCount: number
+  skippedCount: number
+  issueCount: number
+  fieldUpdateCounts: Record<string, number>
+  createdGroupCount?: number
+  issues: string[]
+}
+
+export type StudentDataCompletionImportResult = StudentImportPreview & {
+  appliedCount: number
 }
 
 export type StudentAcademicMovementSummary = {
@@ -427,6 +508,7 @@ export type StudentGradeEnrollmentInput = {
   schoolCycle: string
   schoolPeriod?: number
   semesterLevel: SemesterLevel
+  propedeuticArea?: string | null
   toGroupId?: string | null
   reasonCode: string
   notes?: string
@@ -437,6 +519,7 @@ export type StudentPeriodReinscriptionInput = {
   targetSchoolCycle: string
   targetPeriod: number
   targetSemesterLevel: SemesterLevel
+  propedeuticArea?: string | null
   toGroupId?: string | null
   notes?: string
 }
